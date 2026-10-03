@@ -248,7 +248,13 @@ export async function onRequest(context: { request: Request; env: Env; params: {
         count: candidateList.length,
         streams: candidateList,
       }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json',
+          'Cache-Control': 'public, max-age=600, s-maxage=1800, stale-while-revalidate=3600',
+        },
+      }
     );
   }
 

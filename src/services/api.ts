@@ -435,8 +435,17 @@ function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
   return result;
 }
 
+// In-memory client stream cache (15-min TTL) to prevent duplicate scraper hits
+const streamClientCache = new Map<string, { streams: StreamSource[]; timestamp: number }>();
+
 // Dual-Engine Stream Finder (Server Edge Proxy + Fast Direct Scraper Fallback)
 export async function fetchStreams(type: 'movie' | 'tv', id: number, s = 1, e = 1): Promise<StreamSource[]> {
+  const cacheKey = `${type}-${id}-${s}-${e}`;
+  const cached = streamClientCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < 15 * 60 * 1000 && cached.streams.length > 0) {
+    return cached.streams;
+  }
+
   const query = type === 'tv' ? `?s=${s}&e=${e}` : '';
 
   // 1. Try Backend Server Proxy first (up to 5s)
@@ -448,6 +457,7 @@ export async function fetchStreams(type: 'movie' | 'tv', id: number, s = 1, e = 
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data.streams) && data.streams.length > 0) {
+        streamClientCache.set(cacheKey, { streams: data.streams, timestamp: Date.now() });
         return data.streams;
       }
     }
@@ -483,7 +493,9 @@ export async function fetchStreams(type: 'movie' | 'tv', id: number, s = 1, e = 
         const str = `${st.provider || ''} ${st.quality || ''} ${st.rawTitle || ''}`.toUpperCase();
         return str.includes('MULTI') || str.includes('DUAL');
       });
-      return multiFiltered.length > 0 ? multiFiltered : combined;
+      const finalStreams = multiFiltered.length > 0 ? multiFiltered : combined;
+      streamClientCache.set(cacheKey, { streams: finalStreams, timestamp: Date.now() });
+      return finalStreams;
     }
   } catch (err) {
     console.error('Direct scraper fallback error:', err);

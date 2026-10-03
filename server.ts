@@ -414,6 +414,7 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
     // Rank all candidate streams with English language prioritized first
     const sorted = rankStreams(combined, isTV);
 
+    res.setHeader('Cache-Control', 'public, max-age=600, s-maxage=1800, stale-while-revalidate=3600');
     return res.json({
       success: true,
       count: sorted.length,
