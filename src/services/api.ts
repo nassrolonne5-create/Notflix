@@ -146,19 +146,46 @@ export function formatMediaItem(raw: any, defaultType: 'movie' | 'tv' = 'movie')
   };
 }
 
-// Fetch from Backend TMDB proxy
+const TMDB_DIRECT_KEY = '8265bd1679663a7ea12ac168da84d2e8';
+const TMDB_DIRECT_BASE = 'https://api.themoviedb.org/3';
+const SCRAPER_PRIMARY = 'https://tmdb-embed-api-hcz6.onrender.com';
+const SCRAPER_CINEPRO = 'https://cinepro-core-991g.onrender.com';
+
+// Fetch from Backend TMDB proxy, with seamless direct client fallback for static hosting (Drag & Drop)
 export async function tmdbFetch(endpoint: string, params: Record<string, string> = {}): Promise<any> {
   const cleanEndpoint = endpoint.startsWith('/') ? endpoint.slice(1) : endpoint;
   const searchParams = new URLSearchParams(params);
   if (!searchParams.has('include_adult')) searchParams.set('include_adult', 'false');
   if (!searchParams.has('without_genres')) searchParams.set('without_genres', '10749');
-  const url = `/api/tmdb/${cleanEndpoint}${searchParams.toString() ? '?' + searchParams.toString() : ''}`;
 
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`API Error: ${res.status} ${res.statusText}`);
+  // Try backend proxy first (/api/tmdb/...)
+  try {
+    const url = `/api/tmdb/${cleanEndpoint}${searchParams.toString() ? '?' + searchParams.toString() : ''}`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.results)) {
+        data.results = data.results.filter(isSafe);
+      }
+      return data;
+    }
+  } catch {
+    // Backend not available (e.g. static drag & drop), continue to direct TMDB API
   }
-  return res.json();
+
+  // Direct client-side TMDB fallback (works in pure static drag & drop environments)
+  searchParams.set('api_key', TMDB_DIRECT_KEY);
+  searchParams.set('language', searchParams.get('language') || 'en-US');
+  const directUrl = `${TMDB_DIRECT_BASE}/${cleanEndpoint}?${searchParams.toString()}`;
+  const directRes = await fetch(directUrl);
+  if (!directRes.ok) {
+    throw new Error(`TMDB Error: ${directRes.status} ${directRes.statusText}`);
+  }
+  const data = await directRes.json();
+  if (Array.isArray(data.results)) {
+    data.results = data.results.filter(isSafe);
+  }
+  return data;
 }
 
 // Home content aggregator
@@ -362,16 +389,104 @@ export async function fetchMediaDetails(type: 'movie' | 'tv', id: number) {
   }
 }
 
-// Backend Stream Finder
-export async function fetchStreams(type: 'movie' | 'tv', id: number, s = 1, e = 1): Promise<StreamSource[]> {
-  const query = type === 'tv' ? `?s=${s}&e=${e}` : '';
-  const res = await fetch(`/api/streams/${type}/${id}${query}`);
-  if (!res.ok) throw new Error('Failed to fetch streams from backend');
-  const data = await res.json();
-  return data.streams || [];
+function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
+  let list: any[] = [];
+  if (!data) return list;
+  if (Array.isArray(data.streams)) list = data.streams;
+  else if (Array.isArray(data.sources)) list = data.sources;
+  else if (Array.isArray(data.results)) list = data.results;
+  else if (Array.isArray(data.data)) list = data.data;
+  else if (Array.isArray(data)) list = data;
+
+  const result: StreamSource[] = [];
+  for (const s of list) {
+    if (!s) continue;
+    let streamUrl = s?.url || s?.stream_url || s?.link || s?.playlist || '';
+    if (typeof streamUrl !== 'string' || !streamUrl.startsWith('http')) continue;
+    streamUrl = streamUrl.replace('http://localhost:10000', SCRAPER_CINEPRO);
+
+    if (streamUrl.toLowerCase().endsWith('.mkv') || s?.type === 'mkv') {
+      continue;
+    }
+
+    const rawProvider = s?.provider;
+    const providerName =
+      rawProvider && typeof rawProvider === 'object'
+        ? rawProvider.name || rawProvider.id || apiName
+        : rawProvider || s.source || s.name || apiName;
+
+    const quality = (s?.quality || s?.resolution || s?.label || 'AUTO').toUpperCase();
+    const isM3U8 =
+      !streamUrl.includes('.mp4') &&
+      (streamUrl.includes('.m3u8') || !streamUrl.match(/\.(mp4|webm|mkv)/i));
+
+    result.push({
+      url: streamUrl,
+      quality,
+      provider: providerName,
+      intro: s?.intro,
+      apiName,
+      isM3U8,
+      isEmbed: false,
+      rawTitle: s?.title || s?.name || '',
+    });
+  }
+  return result;
 }
 
-// Backend Subtitles Finder
+// Backend Stream Finder with Direct Client Fallback (Drag & Drop Compatible)
+export async function fetchStreams(type: 'movie' | 'tv', id: number, s = 1, e = 1): Promise<StreamSource[]> {
+  const query = type === 'tv' ? `?s=${s}&e=${e}` : '';
+
+  // 1. Try Backend Proxy
+  try {
+    const res = await fetch(`/api/streams/${type}/${id}${query}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.streams) && data.streams.length > 0) {
+        return data.streams;
+      }
+    }
+  } catch {
+    // Backend unavailable, fallback to direct scraper calls
+  }
+
+  // 2. Direct Scraper Fallback (Works on static hosting like Cloudflare Drag & Drop, Netlify, Vercel)
+  try {
+    const isTV = type === 'tv';
+    const primaryUrl = isTV
+      ? `${SCRAPER_PRIMARY}/api/streams/tv/${id}?s=${s}&e=${e}`
+      : `${SCRAPER_PRIMARY}/api/streams/movie/${id}`;
+    const cineproUrl = isTV
+      ? `${SCRAPER_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}`
+      : `${SCRAPER_CINEPRO}/v1/movies/${id}`;
+
+    const [res1, res2] = await Promise.allSettled([
+      fetch(primaryUrl).then((r) => (r.ok ? r.json() : null)),
+      fetch(cineproUrl).then((r) => (r.ok ? r.json() : null)),
+    ]);
+
+    let combined: StreamSource[] = [];
+    if (res1.status === 'fulfilled' && res1.value) {
+      combined = combined.concat(normalizeClientStreams(res1.value, 'Primary'));
+    }
+    if (res2.status === 'fulfilled' && res2.value) {
+      combined = combined.concat(normalizeClientStreams(res2.value, 'CinePro'));
+    }
+
+    const multiFiltered = combined.filter((st) => {
+      const str = `${st.provider || ''} ${st.quality || ''} ${st.rawTitle || ''}`.toUpperCase();
+      return str.includes('MULTI') || str.includes('DUAL');
+    });
+
+    return multiFiltered.length > 0 ? multiFiltered : combined;
+  } catch (err) {
+    console.error('Direct scraper fallback error:', err);
+    return [];
+  }
+}
+
+// Subtitles Finder with Direct Client Fallback (Drag & Drop Compatible)
 export async function fetchSubtitles(
   imdbId: string | undefined,
   tmdbId: number,
@@ -379,16 +494,49 @@ export async function fetchSubtitles(
   s = 1,
   e = 1
 ): Promise<Record<string, SubtitleTrack[]>> {
-  try {
-    const params = new URLSearchParams({
-      type,
-      s: s.toString(),
-      e: e.toString(),
-      tmdbId: tmdbId.toString(),
-    });
-    if (imdbId) params.set('imdbId', imdbId);
+  if (!imdbId) return {};
 
+  const params = new URLSearchParams({
+    type,
+    s: s.toString(),
+    e: e.toString(),
+    tmdbId: tmdbId.toString(),
+    imdbId,
+  });
+
+  // 1. Try Backend Proxy
+  try {
     const res = await fetch(`/api/subtitles/search?${params.toString()}`);
+    if (res.ok) {
+      const data = await res.json();
+      const groups: Record<string, SubtitleTrack[]> = {};
+      if (Array.isArray(data.subtitles)) {
+        data.subtitles.forEach((sub: any) => {
+          const lang = sub.lang || 'Unknown';
+          if (!groups[lang]) groups[lang] = [];
+          groups[lang].push({
+            id: sub.id,
+            lang,
+            url: sub.url.startsWith('/api')
+              ? sub.url
+              : `/api/subtitles/proxy?url=${encodeURIComponent(sub.url)}`,
+          });
+        });
+        return groups;
+      }
+    }
+  } catch {
+    // Backend unavailable, fallback to direct OpenSubtitles
+  }
+
+  // 2. Direct OpenSubtitles Fallback
+  try {
+    const subUrl =
+      type === 'tv'
+        ? `https://opensubtitles-v3.strem.io/subtitles/series/${imdbId}:${s}:${e}.json`
+        : `https://opensubtitles-v3.strem.io/subtitles/movie/${imdbId}.json`;
+
+    const res = await fetch(subUrl);
     if (!res.ok) return {};
     const data = await res.json();
     const groups: Record<string, SubtitleTrack[]> = {};
@@ -399,15 +547,13 @@ export async function fetchSubtitles(
         groups[lang].push({
           id: sub.id,
           lang,
-          url: sub.url.startsWith('/api')
-            ? sub.url
-            : `/api/subtitles/proxy?url=${encodeURIComponent(sub.url)}`,
+          url: sub.url,
         });
       });
     }
     return groups;
   } catch (err) {
-    console.warn('Failed to fetch subtitles', err);
+    console.warn('Failed to fetch subtitles directly:', err);
     return {};
   }
 }

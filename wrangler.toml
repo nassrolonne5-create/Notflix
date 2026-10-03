@@ -1,6 +1,0 @@
-name = "notflix"
-compatibility_date = "2024-09-23"
-pages_build_output_dir = "./dist"
-
-[vars]
-TMDB_API_KEY = "8265bd1679663a7ea12ac168da84d2e8"
