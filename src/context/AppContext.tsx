@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
 import { MediaItem, UserData, UserPlaybackData } from '../types';
 import { fetchUserData, syncUserData, isSafe } from '../services/api';
+import { triggerAd } from '../services/adService';
 
 export type TabType = 'home' | 'movies' | 'tv' | 'anime' | 'library' | 'search';
 
@@ -12,7 +13,7 @@ interface ToastState {
 
 interface AppContextType {
   activeTab: TabType;
-  setActiveTab: (tab: TabType) => void;
+  setActiveTab: (tab: TabType, skipAd?: boolean) => void;
   activeModalItem: MediaItem | null;
   activeSeason: number;
   activeEpisode: number;
@@ -54,7 +55,18 @@ const defaultUserData: UserData = {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [activeTab, setActiveTab] = useState<TabType>('home');
+  const [activeTab, setActiveTabState] = useState<TabType>('home');
+
+  const setActiveTab = useCallback((tab: TabType, skipAd = false) => {
+    setActiveTabState((prev) => {
+      if (!skipAd && tab !== prev) {
+        triggerAd('tab');
+      }
+      return tab;
+    });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
+
   const [activeModalItem, setActiveModalItem] = useState<MediaItem | null>(null);
   const [activeSeason, setActiveSeason] = useState<number>(1);
   const [activeEpisode, setActiveEpisode] = useState<number>(1);
@@ -132,6 +144,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const openPlayer = (item: MediaItem, season?: number, episode?: number) => {
+    triggerAd('poster');
     if ('vibrate' in navigator) navigator.vibrate(12);
 
     if (!isSafe(item)) {

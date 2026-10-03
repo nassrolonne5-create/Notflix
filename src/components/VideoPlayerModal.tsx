@@ -37,6 +37,7 @@ import {
 } from '../services/api';
 import { StreamSource, SubtitleTrack, Season, Episode, CastMember, MediaItem } from '../types';
 import { MediaCard } from './MediaCard';
+import { triggerAd, initAdResumeListeners } from '../services/adService';
 
 const formatTime = (seconds: number) => {
   if (!isFinite(seconds) || seconds < 0) return '0:00';
@@ -681,7 +682,14 @@ export const VideoPlayerModal: React.FC = () => {
     }
   };
 
+  // Ad return auto-resume listener
+  useEffect(() => {
+    const cleanup = initAdResumeListeners(() => videoRef.current);
+    return cleanup;
+  }, []);
+
   const togglePlay = () => {
+    triggerAd('play', videoRef.current);
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) {
@@ -702,20 +710,69 @@ export const VideoPlayerModal: React.FC = () => {
     showControlsTemporarily();
   };
 
-  const toggleFullscreen = () => {
+  const toggleFullscreen = async () => {
+    // 1. Trigger the fullscreen ad in external page
+    triggerAd('fullscreen', videoRef.current);
+
     const container = document.getElementById('playerContainer');
+    const video = videoRef.current;
     if (!container) return;
 
-    if (!document.fullscreenElement) {
-      container.requestFullscreen?.().catch(() => {});
+    const isCurrentlyFs = Boolean(document.fullscreenElement || (document as any).webkitFullscreenElement);
+
+    if (!isCurrentlyFs) {
+      try {
+        if (container.requestFullscreen) {
+          await container.requestFullscreen();
+        } else if ((container as any).webkitRequestFullscreen) {
+          await (container as any).webkitRequestFullscreen();
+        } else if ((video as any)?.webkitEnterFullscreen) {
+          (video as any).webkitEnterFullscreen();
+        }
+      } catch (err) {
+        console.warn('Fullscreen request failed:', err);
+      }
       setIsFullscreen(true);
+
+      // Force rotate screen to landscape on supported devices
+      try {
+        if (screen.orientation && typeof (screen.orientation as any).lock === 'function') {
+          await (screen.orientation as any).lock('landscape').catch(() => {});
+        } else if ((screen as any).lockOrientation) {
+          (screen as any).lockOrientation('landscape');
+        } else if ((screen as any).mozLockOrientation) {
+          (screen as any).mozLockOrientation('landscape');
+        } else if ((screen as any).msLockOrientation) {
+          (screen as any).msLockOrientation('landscape');
+        }
+      } catch (err) {
+        console.warn('Screen orientation lock failed:', err);
+      }
     } else {
-      document.exitFullscreen?.().catch(() => {});
+      try {
+        if (document.exitFullscreen) {
+          await document.exitFullscreen();
+        } else if ((document as any).webkitExitFullscreen) {
+          await (document as any).webkitExitFullscreen();
+        }
+      } catch (err) {
+        console.warn('Exit fullscreen failed:', err);
+      }
       setIsFullscreen(false);
+
+      // Unlock orientation
+      try {
+        if (screen.orientation && typeof screen.orientation.unlock === 'function') {
+          screen.orientation.unlock();
+        } else if ((screen as any).unlockOrientation) {
+          (screen as any).unlockOrientation();
+        }
+      } catch {}
     }
   };
 
   const togglePip = async () => {
+    triggerAd('pip', videoRef.current);
     const video = videoRef.current;
     if (!video) return;
     try {
@@ -726,6 +783,22 @@ export const VideoPlayerModal: React.FC = () => {
       }
     } catch (err) {
       showToast('Picture-in-Picture not supported on this device');
+    }
+  };
+
+  const handleDownload = (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (triggerAd('download', videoRef.current)) {
+      return;
+    }
+    const dlUrl = isTV
+      ? `https://vidvault.ru/tv/${activeModalItem?.id}/${currentSeason}/${currentEpisode}`
+      : `https://vidvault.ru/movie/${activeModalItem?.id}`;
+
+    if ((window as any).AndroidInterface?.openExternal) {
+      (window as any).AndroidInterface.openExternal(dlUrl);
+    } else {
+      window.open(dlUrl, '_blank', 'noopener,noreferrer');
     }
   };
 
@@ -770,16 +843,59 @@ export const VideoPlayerModal: React.FC = () => {
     }
   };
 
-  // Keep isFullscreen in sync with native browser fullscreen state
+  // Keep isFullscreen in sync with native browser fullscreen state & orientation
   useEffect(() => {
     const handleFullscreenChange = () => {
-      setIsFullscreen(Boolean(document.fullscreenElement));
+      const isFs = Boolean(document.fullscreenElement || (document as any).webkitFullscreenElement);
+      setIsFullscreen(isFs);
+      if (!isFs) {
+        try {
+          if (screen.orientation && typeof screen.orientation.unlock === 'function') {
+            screen.orientation.unlock();
+          } else if ((screen as any).unlockOrientation) {
+            (screen as any).unlockOrientation();
+          }
+        } catch {}
+      }
     };
+
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+
+    // Auto-fullscreen when device is physically turned sideways to landscape
+    const mql = window.matchMedia('(orientation: landscape)');
+    const handleOrientationChange = (e: MediaQueryListEvent | MediaQueryList) => {
+      const container = document.getElementById('playerContainer');
+      const isFs = Boolean(document.fullscreenElement || (document as any).webkitFullscreenElement);
+      if (e.matches && !isFs && container) {
+        if (container.requestFullscreen) {
+          container.requestFullscreen().catch(() => {});
+        } else if ((container as any).webkitRequestFullscreen) {
+          (container as any).webkitRequestFullscreen();
+        }
+      } else if (!e.matches && isFs) {
+        if (document.exitFullscreen) {
+          document.exitFullscreen().catch(() => {});
+        } else if ((document as any).webkitExitFullscreen) {
+          (document as any).webkitExitFullscreen();
+        }
+      }
+    };
+
+    if (mql.addEventListener) {
+      mql.addEventListener('change', handleOrientationChange);
+    } else if ((mql as any).addListener) {
+      (mql as any).addListener(handleOrientationChange);
+    }
+
     return () => {
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
       document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+      if (mql.removeEventListener) {
+        mql.removeEventListener('change', handleOrientationChange);
+      } else if ((mql as any).removeListener) {
+        (mql as any).removeListener(handleOrientationChange);
+      }
     };
   }, []);
 
@@ -1508,19 +1624,13 @@ export const VideoPlayerModal: React.FC = () => {
               {/* Action Buttons Right */}
               <div className="flex items-center gap-1 md:gap-1.5">
                 {/* Download Button (VidVault) */}
-                <a
-                  href={
-                    isTV
-                      ? `https://vidvault.to/tv/${activeModalItem.id}/${currentSeason}/${currentEpisode}`
-                      : `https://vidvault.to/movie/${activeModalItem.id}`
-                  }
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <button
+                  onClick={handleDownload}
                   title="Download Video"
                   className="w-8 h-8 md:w-9 md:h-9 rounded-lg md:rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 active:scale-95 text-emerald-400 hover:text-emerald-300 flex items-center justify-center transition-all cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5 md:w-4 md:h-4 text-emerald-400" />
-                </a>
+                </button>
 
                 {/* Audio Track Selector (when multiple audio tracks present) */}
                 {audioTracks.length > 1 && (
@@ -1802,6 +1912,7 @@ export const VideoPlayerModal: React.FC = () => {
                             <button
                               key={ep.episode_number}
                               onClick={() => {
+                                triggerAd('episode', videoRef.current);
                                 setCurrentEpisode(ep.episode_number);
                                 setActivePanel(null);
                               }}
