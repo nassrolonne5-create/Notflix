@@ -1,0 +1,69 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-display: 'Bebas Neue', 'Arial Black', sans-serif;
+    --font-body: 'Inter', system-ui, sans-serif;
+
+    --bg-main: #0b0f19;
+    --surface-1: #131a2a;
+    --surface-2: #1e293b;
+    --surface-3: #334155;
+    
+    --brand-red: #e50914;
+    --brand-blue: #3b82f6;
+    --brand-teal: #2dd4bf;
+  }
+
+  body {
+    background-color: var(--bg-main);
+    color: #f8fafc;
+    font-family: var(--font-body);
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+/* Custom scrollbars hidden */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Video Subtitles styling */
+video::cue {
+  background: rgba(0, 0, 0, 0.75);
+  box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.8);
+  color: #fff;
+  font-size: 0.95rem;
+  font-family: var(--font-body);
+  text-shadow:
+    1px 1px 3px rgba(0, 0, 0, 1),
+    -1px -1px 3px rgba(0, 0, 0, 1),
+    1px -1px 3px rgba(0, 0, 0, 1),
+    -1px 1px 3px rgba(0, 0, 0, 1);
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+/* Shimmer Skeleton */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(90deg, #131a2a 25%, #1e293b 50%, #131a2a 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s infinite ease-in-out;
+}
