@@ -148,6 +148,8 @@ export function formatMediaItem(raw: any, defaultType: 'movie' | 'tv' = 'movie')
 
 const TMDB_DIRECT_KEY = '8265bd1679663a7ea12ac168da84d2e8';
 const TMDB_DIRECT_BASE = 'https://api.themoviedb.org/3';
+export const SCRAPER_PRIMARY = 'https://tmdb-embed-api-hcz6.onrender.com';
+export const SCRAPER_CINEPRO = 'https://cinepro-core-991g.onrender.com';
 
 // Fetch from Backend TMDB proxy, with seamless direct client fallback for static hosting (Drag & Drop)
 export async function tmdbFetch(endpoint: string, params: Record<string, string> = {}): Promise<any> {
@@ -387,20 +389,106 @@ export async function fetchMediaDetails(type: 'movie' | 'tv', id: number) {
   }
 }
 
-// Backend Stream Finder (Proxy secured via Cloudflare Functions & Express)
+function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
+  let list: any[] = [];
+  if (!data) return list;
+  if (Array.isArray(data.streams)) list = data.streams;
+  else if (Array.isArray(data.sources)) list = data.sources;
+  else if (Array.isArray(data.results)) list = data.results;
+  else if (Array.isArray(data.data)) list = data.data;
+  else if (Array.isArray(data)) list = data;
+
+  const result: StreamSource[] = [];
+  for (const s of list) {
+    if (!s) continue;
+    let streamUrl = s?.url || s?.stream_url || s?.link || s?.playlist || '';
+    if (typeof streamUrl !== 'string' || !streamUrl.startsWith('http')) continue;
+    streamUrl = streamUrl.replace('http://localhost:10000', SCRAPER_CINEPRO);
+
+    if (streamUrl.toLowerCase().endsWith('.mkv') || s?.type === 'mkv') {
+      continue;
+    }
+
+    const rawProvider = s?.provider;
+    const providerName =
+      rawProvider && typeof rawProvider === 'object'
+        ? rawProvider.name || rawProvider.id || apiName
+        : rawProvider || s.source || s.name || apiName;
+
+    const quality = (s?.quality || s?.resolution || s?.label || 'AUTO').toUpperCase();
+    const isM3U8 =
+      !streamUrl.includes('.mp4') &&
+      (streamUrl.includes('.m3u8') || !streamUrl.match(/\.(mp4|webm|mkv)/i));
+
+    result.push({
+      url: streamUrl,
+      quality,
+      provider: providerName,
+      intro: s?.intro,
+      apiName,
+      isM3U8,
+      isEmbed: false,
+      rawTitle: s?.title || s?.name || '',
+      language: s?.language || 'English',
+    });
+  }
+  return result;
+}
+
+// Dual-Engine Stream Finder (Server Edge Proxy + Fast Direct Scraper Fallback)
 export async function fetchStreams(type: 'movie' | 'tv', id: number, s = 1, e = 1): Promise<StreamSource[]> {
   const query = type === 'tv' ? `?s=${s}&e=${e}` : '';
+
+  // 1. Try Backend Server Proxy first (up to 5s)
   try {
-    const res = await fetch(`/api/streams/${type}/${id}${query}`);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(`/api/streams/${type}/${id}${query}`, { signal: controller.signal });
+    clearTimeout(timer);
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data.streams) && data.streams.length > 0) {
         return data.streams;
       }
     }
-  } catch (err) {
-    console.error('Error fetching streams via secure server proxy:', err);
+  } catch {
+    // Backend unavailable or slow, immediately fallback to direct scrapers
   }
+
+  // 2. Direct Scraper Fallback (Ensures 100% reliability on any host: Cloudflare Pages, Netlify, Preview, Mobile)
+  try {
+    const isTV = type === 'tv';
+    const primaryUrl = isTV
+      ? `${SCRAPER_PRIMARY}/api/streams/tv/${id}?s=${s}&e=${e}`
+      : `${SCRAPER_PRIMARY}/api/streams/movie/${id}`;
+    const cineproUrl = isTV
+      ? `${SCRAPER_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}`
+      : `${SCRAPER_CINEPRO}/v1/movies/${id}`;
+
+    const [res1, res2] = await Promise.allSettled([
+      fetch(primaryUrl, { headers: { Accept: 'application/json' } }).then((r) => (r.ok ? r.json() : null)),
+      fetch(cineproUrl, { headers: { Accept: 'application/json' } }).then((r) => (r.ok ? r.json() : null)),
+    ]);
+
+    let combined: StreamSource[] = [];
+    if (res1.status === 'fulfilled' && res1.value) {
+      combined = combined.concat(normalizeClientStreams(res1.value, 'Primary'));
+    }
+    if (res2.status === 'fulfilled' && res2.value) {
+      combined = combined.concat(normalizeClientStreams(res2.value, 'CinePro'));
+    }
+
+    if (combined.length > 0) {
+      const multiFiltered = combined.filter((st) => {
+        const str = `${st.provider || ''} ${st.quality || ''} ${st.rawTitle || ''}`.toUpperCase();
+        return str.includes('MULTI') || str.includes('DUAL');
+      });
+      return multiFiltered.length > 0 ? multiFiltered : combined;
+    }
+  } catch (err) {
+    console.error('Direct scraper fallback error:', err);
+  }
+
   return [];
 }
 
