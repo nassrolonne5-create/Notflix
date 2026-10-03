@@ -21,8 +21,8 @@ const TMDB_BASE = 'https://api.themoviedb.org/3';
 const DEFAULT_TMDB_KEY = '8265bd1679663a7ea12ac168da84d2e8';
 const TMDB_API_KEY = process.env.TMDB_API_KEY || DEFAULT_TMDB_KEY;
 
-const SCRAPER_API_PRIMARY = 'https://tmdb-embed-api-hcz6.onrender.com';
-const SCRAPER_API_CINEPRO = 'https://cinepro-core-991g.onrender.com';
+const SCRAPER_API_PRIMARY = process.env.SCRAPER_PRIMARY_URL || 'https://tmdb-embed-api-hcz6.onrender.com';
+const SCRAPER_API_CINEPRO = process.env.SCRAPER_CINEPRO_URL || 'https://cinepro-core-991g.onrender.com';
 
 // In-Memory Server Cache with 5-minute TTL
 interface CacheEntry {

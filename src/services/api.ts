@@ -148,8 +148,6 @@ export function formatMediaItem(raw: any, defaultType: 'movie' | 'tv' = 'movie')
 
 const TMDB_DIRECT_KEY = '8265bd1679663a7ea12ac168da84d2e8';
 const TMDB_DIRECT_BASE = 'https://api.themoviedb.org/3';
-const SCRAPER_PRIMARY = 'https://tmdb-embed-api-hcz6.onrender.com';
-const SCRAPER_CINEPRO = 'https://cinepro-core-991g.onrender.com';
 
 // Fetch from Backend TMDB proxy, with seamless direct client fallback for static hosting (Drag & Drop)
 export async function tmdbFetch(endpoint: string, params: Record<string, string> = {}): Promise<any> {
@@ -389,56 +387,9 @@ export async function fetchMediaDetails(type: 'movie' | 'tv', id: number) {
   }
 }
 
-function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
-  let list: any[] = [];
-  if (!data) return list;
-  if (Array.isArray(data.streams)) list = data.streams;
-  else if (Array.isArray(data.sources)) list = data.sources;
-  else if (Array.isArray(data.results)) list = data.results;
-  else if (Array.isArray(data.data)) list = data.data;
-  else if (Array.isArray(data)) list = data;
-
-  const result: StreamSource[] = [];
-  for (const s of list) {
-    if (!s) continue;
-    let streamUrl = s?.url || s?.stream_url || s?.link || s?.playlist || '';
-    if (typeof streamUrl !== 'string' || !streamUrl.startsWith('http')) continue;
-    streamUrl = streamUrl.replace('http://localhost:10000', SCRAPER_CINEPRO);
-
-    if (streamUrl.toLowerCase().endsWith('.mkv') || s?.type === 'mkv') {
-      continue;
-    }
-
-    const rawProvider = s?.provider;
-    const providerName =
-      rawProvider && typeof rawProvider === 'object'
-        ? rawProvider.name || rawProvider.id || apiName
-        : rawProvider || s.source || s.name || apiName;
-
-    const quality = (s?.quality || s?.resolution || s?.label || 'AUTO').toUpperCase();
-    const isM3U8 =
-      !streamUrl.includes('.mp4') &&
-      (streamUrl.includes('.m3u8') || !streamUrl.match(/\.(mp4|webm|mkv)/i));
-
-    result.push({
-      url: streamUrl,
-      quality,
-      provider: providerName,
-      intro: s?.intro,
-      apiName,
-      isM3U8,
-      isEmbed: false,
-      rawTitle: s?.title || s?.name || '',
-    });
-  }
-  return result;
-}
-
-// Backend Stream Finder with Direct Client Fallback (Drag & Drop Compatible)
+// Backend Stream Finder (Proxy secured via Cloudflare Functions & Express)
 export async function fetchStreams(type: 'movie' | 'tv', id: number, s = 1, e = 1): Promise<StreamSource[]> {
   const query = type === 'tv' ? `?s=${s}&e=${e}` : '';
-
-  // 1. Try Backend Proxy
   try {
     const res = await fetch(`/api/streams/${type}/${id}${query}`);
     if (res.ok) {
@@ -447,43 +398,10 @@ export async function fetchStreams(type: 'movie' | 'tv', id: number, s = 1, e = 
         return data.streams;
       }
     }
-  } catch {
-    // Backend unavailable, fallback to direct scraper calls
-  }
-
-  // 2. Direct Scraper Fallback (Works on static hosting like Cloudflare Drag & Drop, Netlify, Vercel)
-  try {
-    const isTV = type === 'tv';
-    const primaryUrl = isTV
-      ? `${SCRAPER_PRIMARY}/api/streams/tv/${id}?s=${s}&e=${e}`
-      : `${SCRAPER_PRIMARY}/api/streams/movie/${id}`;
-    const cineproUrl = isTV
-      ? `${SCRAPER_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}`
-      : `${SCRAPER_CINEPRO}/v1/movies/${id}`;
-
-    const [res1, res2] = await Promise.allSettled([
-      fetch(primaryUrl).then((r) => (r.ok ? r.json() : null)),
-      fetch(cineproUrl).then((r) => (r.ok ? r.json() : null)),
-    ]);
-
-    let combined: StreamSource[] = [];
-    if (res1.status === 'fulfilled' && res1.value) {
-      combined = combined.concat(normalizeClientStreams(res1.value, 'Primary'));
-    }
-    if (res2.status === 'fulfilled' && res2.value) {
-      combined = combined.concat(normalizeClientStreams(res2.value, 'CinePro'));
-    }
-
-    const multiFiltered = combined.filter((st) => {
-      const str = `${st.provider || ''} ${st.quality || ''} ${st.rawTitle || ''}`.toUpperCase();
-      return str.includes('MULTI') || str.includes('DUAL');
-    });
-
-    return multiFiltered.length > 0 ? multiFiltered : combined;
   } catch (err) {
-    console.error('Direct scraper fallback error:', err);
-    return [];
+    console.error('Error fetching streams via secure server proxy:', err);
   }
+  return [];
 }
 
 // Subtitles Finder with Direct Client Fallback (Drag & Drop Compatible)

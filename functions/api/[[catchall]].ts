@@ -4,12 +4,14 @@
 interface Env {
   TMDB_API_KEY?: string;
   NOTFLIX_KV?: any;
+  SCRAPER_PRIMARY_URL?: string;
+  SCRAPER_CINEPRO_URL?: string;
 }
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const DEFAULT_TMDB_KEY = '8265bd1679663a7ea12ac168da84d2e8';
-const SCRAPER_API_PRIMARY = 'https://tmdb-embed-api-hcz6.onrender.com';
-const SCRAPER_API_CINEPRO = 'https://cinepro-core-991g.onrender.com';
+const DEFAULT_SCRAPER_PRIMARY = 'https://tmdb-embed-api-hcz6.onrender.com';
+const DEFAULT_SCRAPER_CINEPRO = 'https://cinepro-core-991g.onrender.com';
 
 // Explicit adult, romance, and sexually suggestive content classifications
 // Blocks pornography, erotic movies/shows, romance, and suggestive themes WITHOUT blocking violent/bloody action movies
@@ -87,7 +89,7 @@ async function fetchWithTimeout(url: string, ms = 4500): Promise<any> {
   }
 }
 
-function normalizeStreams(data: any, apiName: string) {
+function normalizeStreams(data: any, apiName: string, cineproBaseUrl: string = DEFAULT_SCRAPER_CINEPRO) {
   let list: any[] = [];
   if (!data) return list;
   if (Array.isArray(data.streams)) list = data.streams;
@@ -105,7 +107,7 @@ function normalizeStreams(data: any, apiName: string) {
           : rawProvider || s.source || s.name || apiName;
 
       let streamUrl = s?.url || s?.stream_url || s?.link || s?.playlist || '';
-      streamUrl = streamUrl.replace('http://localhost:10000', SCRAPER_API_CINEPRO);
+      streamUrl = streamUrl.replace('http://localhost:10000', cineproBaseUrl);
 
       if (streamUrl.toLowerCase().endsWith('.mkv') || s?.type === 'mkv') {
         return null;
@@ -208,13 +210,16 @@ export async function onRequest(context: { request: Request; env: Env; params: {
     const s = url.searchParams.get('s') || '1';
     const e = url.searchParams.get('e') || '1';
 
+    const scraperPrimary = env.SCRAPER_PRIMARY_URL || DEFAULT_SCRAPER_PRIMARY;
+    const scraperCinepro = env.SCRAPER_CINEPRO_URL || DEFAULT_SCRAPER_CINEPRO;
+
     const primaryUrl = isTV
-      ? `${SCRAPER_API_PRIMARY}/api/streams/tv/${id}?s=${s}&e=${e}`
-      : `${SCRAPER_API_PRIMARY}/api/streams/movie/${id}`;
+      ? `${scraperPrimary}/api/streams/tv/${id}?s=${s}&e=${e}`
+      : `${scraperPrimary}/api/streams/movie/${id}`;
 
     const cineproUrl = isTV
-      ? `${SCRAPER_API_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}`
-      : `${SCRAPER_API_CINEPRO}/v1/movies/${id}`;
+      ? `${scraperCinepro}/v1/tv/${id}/seasons/${s}/episodes/${e}`
+      : `${scraperCinepro}/v1/movies/${id}`;
 
     const results = await Promise.allSettled([
       fetchWithTimeout(primaryUrl, 10000),
@@ -223,10 +228,10 @@ export async function onRequest(context: { request: Request; env: Env; params: {
 
     let combined: any[] = [];
     if (results[0].status === 'fulfilled' && results[0].value) {
-      combined = combined.concat(normalizeStreams(results[0].value, 'Primary'));
+      combined = combined.concat(normalizeStreams(results[0].value, 'Primary', scraperCinepro));
     }
     if (results[1].status === 'fulfilled' && results[1].value) {
-      combined = combined.concat(normalizeStreams(results[1].value, 'CinePro'));
+      combined = combined.concat(normalizeStreams(results[1].value, 'CinePro', scraperCinepro));
     }
 
     // MULTI Filter matching original HTML
