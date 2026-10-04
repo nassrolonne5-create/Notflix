@@ -10,8 +10,8 @@ interface Env {
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const DEFAULT_TMDB_KEY = '8265bd1679663a7ea12ac168da84d2e8';
-const DEFAULT_SCRAPER_PRIMARY = 'https://tmdb-embed-api-hcz6.onrender.com';
-const DEFAULT_SCRAPER_CINEPRO = 'https://cinepro-core-991g.onrender.com';
+const DEFAULT_SCRAPER_PRIMARY = 'http://62.171.179.144:3000';
+const DEFAULT_SCRAPER_CINEPRO = 'http://62.171.179.144:3000';
 
 // Explicit adult, romance, and sexually suggestive content classifications
 // Blocks pornography, erotic movies/shows, romance, and suggestive themes WITHOUT blocking violent/bloody action movies
@@ -107,7 +107,7 @@ function normalizeStreams(data: any, apiName: string, cineproBaseUrl: string = D
           : rawProvider || s.source || s.name || apiName;
 
       let streamUrl = s?.url || s?.stream_url || s?.link || s?.playlist || '';
-      streamUrl = streamUrl.replace('http://localhost:10000', cineproBaseUrl);
+      streamUrl = streamUrl.replace(/http:\/\/localhost:(3000|10000)/g, cineproBaseUrl);
 
       if (streamUrl.toLowerCase().endsWith('.mkv') || s?.type === 'mkv') {
         return null;
@@ -213,25 +213,33 @@ export async function onRequest(context: { request: Request; env: Env; params: {
     const scraperPrimary = env.SCRAPER_PRIMARY_URL || DEFAULT_SCRAPER_PRIMARY;
     const scraperCinepro = env.SCRAPER_CINEPRO_URL || DEFAULT_SCRAPER_CINEPRO;
 
+    const isPrimaryCinepro = scraperPrimary.includes('62.171.179.144') || scraperPrimary === scraperCinepro;
     const primaryUrl = isTV
-      ? `${scraperPrimary}/api/streams/tv/${id}?s=${s}&e=${e}`
-      : `${scraperPrimary}/api/streams/movie/${id}`;
+      ? (isPrimaryCinepro ? `${scraperPrimary}/v1/tv/${id}/seasons/${s}/episodes/${e}` : `${scraperPrimary}/api/streams/tv/${id}?s=${s}&e=${e}`)
+      : (isPrimaryCinepro ? `${scraperPrimary}/v1/movies/${id}` : `${scraperPrimary}/api/streams/movie/${id}`);
 
     const cineproUrl = isTV
       ? `${scraperCinepro}/v1/tv/${id}/seasons/${s}/episodes/${e}`
       : `${scraperCinepro}/v1/movies/${id}`;
 
-    const results = await Promise.allSettled([
-      fetchWithTimeout(primaryUrl, 10000),
-      fetchWithTimeout(cineproUrl, 10000),
-    ]);
-
     let combined: any[] = [];
-    if (results[0].status === 'fulfilled' && results[0].value) {
-      combined = combined.concat(normalizeStreams(results[0].value, 'Primary', scraperCinepro));
-    }
-    if (results[1].status === 'fulfilled' && results[1].value) {
-      combined = combined.concat(normalizeStreams(results[1].value, 'CinePro', scraperCinepro));
+    if (primaryUrl === cineproUrl) {
+      const data = await fetchWithTimeout(cineproUrl, 30000);
+      if (data) {
+        combined = normalizeStreams(data, 'CinePro', scraperCinepro);
+      }
+    } else {
+      const results = await Promise.allSettled([
+        fetchWithTimeout(primaryUrl, 30000),
+        fetchWithTimeout(cineproUrl, 30000),
+      ]);
+
+      if (results[0].status === 'fulfilled' && results[0].value) {
+        combined = combined.concat(normalizeStreams(results[0].value, 'Primary', scraperCinepro));
+      }
+      if (results[1].status === 'fulfilled' && results[1].value) {
+        combined = combined.concat(normalizeStreams(results[1].value, 'CinePro', scraperCinepro));
+      }
     }
 
     // MULTI Filter matching original HTML

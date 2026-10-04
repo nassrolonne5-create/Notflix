@@ -148,8 +148,8 @@ export function formatMediaItem(raw: any, defaultType: 'movie' | 'tv' = 'movie')
 
 const TMDB_DIRECT_KEY = '8265bd1679663a7ea12ac168da84d2e8';
 const TMDB_DIRECT_BASE = 'https://api.themoviedb.org/3';
-export const SCRAPER_PRIMARY = 'https://tmdb-embed-api-hcz6.onrender.com';
-export const SCRAPER_CINEPRO = 'https://cinepro-core-991g.onrender.com';
+export const SCRAPER_PRIMARY = 'http://62.171.179.144:3000';
+export const SCRAPER_CINEPRO = 'http://62.171.179.144:3000';
 
 // Fetch from Backend TMDB proxy, with seamless direct client fallback for static hosting (Drag & Drop)
 export async function tmdbFetch(endpoint: string, params: Record<string, string> = {}): Promise<any> {
@@ -403,7 +403,7 @@ function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
     if (!s) continue;
     let streamUrl = s?.url || s?.stream_url || s?.link || s?.playlist || '';
     if (typeof streamUrl !== 'string' || !streamUrl.startsWith('http')) continue;
-    streamUrl = streamUrl.replace('http://localhost:10000', SCRAPER_CINEPRO);
+    streamUrl = streamUrl.replace(/http:\/\/localhost:(3000|10000)/g, SCRAPER_CINEPRO);
 
     if (streamUrl.toLowerCase().endsWith('.mkv') || s?.type === 'mkv') {
       continue;
@@ -448,10 +448,10 @@ export async function fetchStreams(type: 'movie' | 'tv', id: number, s = 1, e = 
 
   const query = type === 'tv' ? `?s=${s}&e=${e}` : '';
 
-  // 1. Try Backend Server Proxy first (up to 5s)
+  // 1. Try Backend Server Proxy first (up to 35s for thorough 19-provider scraping)
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
+    const timer = setTimeout(() => controller.abort(), 35000);
     const res = await fetch(`/api/streams/${type}/${id}${query}`, { signal: controller.signal });
     clearTimeout(timer);
     if (res.ok) {
@@ -468,34 +468,52 @@ export async function fetchStreams(type: 'movie' | 'tv', id: number, s = 1, e = 
   // 2. Direct Scraper Fallback (Ensures 100% reliability on any host: Cloudflare Pages, Netlify, Preview, Mobile)
   try {
     const isTV = type === 'tv';
+    const isPrimaryCinepro = SCRAPER_PRIMARY.includes('62.171.179.144') || SCRAPER_PRIMARY === SCRAPER_CINEPRO;
     const primaryUrl = isTV
-      ? `${SCRAPER_PRIMARY}/api/streams/tv/${id}?s=${s}&e=${e}`
-      : `${SCRAPER_PRIMARY}/api/streams/movie/${id}`;
+      ? (isPrimaryCinepro ? `${SCRAPER_PRIMARY}/v1/tv/${id}/seasons/${s}/episodes/${e}` : `${SCRAPER_PRIMARY}/api/streams/tv/${id}?s=${s}&e=${e}`)
+      : (isPrimaryCinepro ? `${SCRAPER_PRIMARY}/v1/movies/${id}` : `${SCRAPER_PRIMARY}/api/streams/movie/${id}`);
     const cineproUrl = isTV
       ? `${SCRAPER_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}`
       : `${SCRAPER_CINEPRO}/v1/movies/${id}`;
 
-    const [res1, res2] = await Promise.allSettled([
-      fetch(primaryUrl, { headers: { Accept: 'application/json' } }).then((r) => (r.ok ? r.json() : null)),
-      fetch(cineproUrl, { headers: { Accept: 'application/json' } }).then((r) => (r.ok ? r.json() : null)),
-    ]);
-
     let combined: StreamSource[] = [];
-    if (res1.status === 'fulfilled' && res1.value) {
-      combined = combined.concat(normalizeClientStreams(res1.value, 'Primary'));
-    }
-    if (res2.status === 'fulfilled' && res2.value) {
-      combined = combined.concat(normalizeClientStreams(res2.value, 'CinePro'));
+    if (primaryUrl === cineproUrl) {
+      const data = await fetch(cineproUrl, { headers: { Accept: 'application/json' } }).then((r) => (r.ok ? r.json() : null));
+      if (data) {
+        combined = normalizeClientStreams(data, 'CinePro');
+      }
+    } else {
+      const [res1, res2] = await Promise.allSettled([
+        fetch(primaryUrl, { headers: { Accept: 'application/json' } }).then((r) => (r.ok ? r.json() : null)),
+        fetch(cineproUrl, { headers: { Accept: 'application/json' } }).then((r) => (r.ok ? r.json() : null)),
+      ]);
+
+      if (res1.status === 'fulfilled' && res1.value) {
+        combined = combined.concat(normalizeClientStreams(res1.value, 'Primary'));
+      }
+      if (res2.status === 'fulfilled' && res2.value) {
+        combined = combined.concat(normalizeClientStreams(res2.value, 'CinePro'));
+      }
     }
 
     if (combined.length > 0) {
-      const multiFiltered = combined.filter((st) => {
-        const str = `${st.provider || ''} ${st.quality || ''} ${st.rawTitle || ''}`.toUpperCase();
-        return str.includes('MULTI') || str.includes('DUAL');
+      const sorted = [...combined].sort((a, b) => {
+        const strA = `${a.provider || ''} ${a.quality || ''} ${a.rawTitle || ''}`.toUpperCase();
+        const strB = `${b.provider || ''} ${b.quality || ''} ${b.rawTitle || ''}`.toUpperCase();
+        const aMulti = strA.includes('MULTI') || strA.includes('DUAL') ? 1 : 0;
+        const bMulti = strB.includes('MULTI') || strB.includes('DUAL') ? 1 : 0;
+        if (aMulti !== bMulti) return bMulti - aMulti;
+
+        const a4K = strA.includes('4K') || strA.includes('2160') ? 1 : 0;
+        const b4K = strB.includes('4K') || strB.includes('2160') ? 1 : 0;
+        if (a4K !== b4K) return b4K - a4K;
+
+        const a1080 = strA.includes('1080') ? 1 : 0;
+        const b1080 = strB.includes('1080') ? 1 : 0;
+        return b1080 - a1080;
       });
-      const finalStreams = multiFiltered.length > 0 ? multiFiltered : combined;
-      streamClientCache.set(cacheKey, { streams: finalStreams, timestamp: Date.now() });
-      return finalStreams;
+      streamClientCache.set(cacheKey, { streams: sorted, timestamp: Date.now() });
+      return sorted;
     }
   } catch (err) {
     console.error('Direct scraper fallback error:', err);

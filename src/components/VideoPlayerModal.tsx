@@ -1470,8 +1470,12 @@ export const VideoPlayerModal: React.FC = () => {
 
           {/* Stream Loader Overlay (while loading) */}
           {isLoadingStreams && (
-            <div className="absolute inset-0 z-30 bg-black/60 backdrop-blur-xs flex items-center justify-center text-white pointer-events-none">
-              <div className="w-9 h-9 rounded-full border-2 border-red-500 border-t-transparent animate-spin" />
+            <div className="absolute inset-0 z-30 bg-black/75 backdrop-blur-sm flex flex-col items-center justify-center gap-3 text-white pointer-events-none p-4">
+              <div className="w-10 h-10 rounded-full border-3 border-red-500 border-t-transparent animate-spin shadow-lg" />
+              <div className="text-center">
+                <p className="text-sm font-semibold text-white tracking-wide">Searching 19 streaming servers...</p>
+                <p className="text-[11px] text-white/60 mt-0.5 font-mono">Querying CineSu, EmbedSU, PurStream, VidVault & more</p>
+              </div>
             </div>
           )}
 

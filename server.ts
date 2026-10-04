@@ -21,8 +21,8 @@ const TMDB_BASE = 'https://api.themoviedb.org/3';
 const DEFAULT_TMDB_KEY = '8265bd1679663a7ea12ac168da84d2e8';
 const TMDB_API_KEY = process.env.TMDB_API_KEY || DEFAULT_TMDB_KEY;
 
-const SCRAPER_API_PRIMARY = process.env.SCRAPER_PRIMARY_URL || 'https://tmdb-embed-api-hcz6.onrender.com';
-const SCRAPER_API_CINEPRO = process.env.SCRAPER_CINEPRO_URL || 'https://cinepro-core-991g.onrender.com';
+const SCRAPER_API_PRIMARY = process.env.SCRAPER_PRIMARY_URL || 'http://62.171.179.144:3000';
+const SCRAPER_API_CINEPRO = process.env.SCRAPER_CINEPRO_URL || 'http://62.171.179.144:3000';
 
 // In-Memory Server Cache with 5-minute TTL
 interface CacheEntry {
@@ -250,7 +250,7 @@ function normalizeStreams(data: any, apiName: string) {
           : rawProvider || s.source || s.name || apiName;
 
       let streamUrl = s?.url || s?.stream_url || s?.link || s?.playlist || '';
-      streamUrl = streamUrl.replace('http://localhost:10000', SCRAPER_API_CINEPRO);
+      streamUrl = streamUrl.replace(/http:\/\/localhost:(3000|10000)/g, SCRAPER_API_CINEPRO);
 
       // Check format
       const isM3U8 =
@@ -386,28 +386,39 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
     const s = parseInt((req.query.s as string) || '1', 10);
     const e = parseInt((req.query.e as string) || '1', 10);
 
+    const isPrimaryCinepro = SCRAPER_API_PRIMARY.includes('62.171.179.144') || SCRAPER_API_PRIMARY === SCRAPER_API_CINEPRO;
     const primaryUrl = isTV
-      ? `${SCRAPER_API_PRIMARY}/api/streams/tv/${id}?s=${s}&e=${e}`
-      : `${SCRAPER_API_PRIMARY}/api/streams/movie/${id}`;
+      ? (isPrimaryCinepro ? `${SCRAPER_API_PRIMARY}/v1/tv/${id}/seasons/${s}/episodes/${e}` : `${SCRAPER_API_PRIMARY}/api/streams/tv/${id}?s=${s}&e=${e}`)
+      : (isPrimaryCinepro ? `${SCRAPER_API_PRIMARY}/v1/movies/${id}` : `${SCRAPER_API_PRIMARY}/api/streams/movie/${id}`);
 
     const cineproUrl = isTV
       ? `${SCRAPER_API_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}`
       : `${SCRAPER_API_CINEPRO}/v1/movies/${id}`;
 
-    // Scrape from the two original APIs simultaneously
-    const results = await Promise.allSettled([
-      fetchWithTimeout(primaryUrl, 10000),
-      fetchWithTimeout(cineproUrl, 10000),
-    ]);
-
+    // Scrape from APIs (up to 30s for scraping 19 providers)
     let combined: any[] = [];
-    if (results[0].status === 'fulfilled' && results[0].value) {
-      combined = combined.concat(normalizeStreams(results[0].value, 'Primary'));
-    }
-    if (results[1].status === 'fulfilled' && results[1].value) {
-      combined = combined.concat(normalizeStreams(results[1].value, 'CinePro'));
-      if (Array.isArray(results[1].value.subtitles)) {
-        subtitleCache.set(`${type}-${id}-${s}-${e}`, results[1].value.subtitles);
+    if (primaryUrl === cineproUrl) {
+      const data = await fetchWithTimeout(cineproUrl, 30000);
+      if (data) {
+        combined = normalizeStreams(data, 'CinePro');
+        if (Array.isArray(data.subtitles)) {
+          subtitleCache.set(`${type}-${id}-${s}-${e}`, data.subtitles);
+        }
+      }
+    } else {
+      const results = await Promise.allSettled([
+        fetchWithTimeout(primaryUrl, 30000),
+        fetchWithTimeout(cineproUrl, 30000),
+      ]);
+
+      if (results[0].status === 'fulfilled' && results[0].value) {
+        combined = combined.concat(normalizeStreams(results[0].value, 'Primary'));
+      }
+      if (results[1].status === 'fulfilled' && results[1].value) {
+        combined = combined.concat(normalizeStreams(results[1].value, 'CinePro'));
+        if (Array.isArray(results[1].value.subtitles)) {
+          subtitleCache.set(`${type}-${id}-${s}-${e}`, results[1].value.subtitles);
+        }
       }
     }
 
