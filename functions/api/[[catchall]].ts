@@ -72,7 +72,7 @@ function isSafe(item: any): boolean {
   return true;
 }
 
-async function fetchWithTimeout(url: string, ms = 4500): Promise<any> {
+async function fetchWithTimeout(url: string, ms = 25000): Promise<any> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
   try {
@@ -81,12 +81,81 @@ async function fetchWithTimeout(url: string, ms = 4500): Promise<any> {
       headers: { Accept: 'application/json' },
     });
     clearTimeout(timer);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) return null;
     return await response.json();
   } catch (e) {
     clearTimeout(timer);
-    throw e;
+    return null;
   }
+}
+
+function rankStreams(streams: any[], isTV: boolean) {
+  const getRank = (s: any) => {
+    const rawT = (s.rawTitle || '').toString().toUpperCase();
+    const prov = (s.provider || '').toString().toUpperCase();
+    const lang = (s.language || '').toString().toUpperCase();
+    const q = (s.quality || '').toString().toUpperCase();
+    const aName = (s.apiName || '').toString().toLowerCase();
+
+    const fullText = `${rawT} ${prov} ${lang}`;
+
+    const isExplicitForeignOnly =
+      (fullText.includes('HINDI') ||
+       fullText.includes('LATINO') ||
+       fullText.includes('ESPANOL') ||
+       fullText.includes('CASTILIAN') ||
+       fullText.includes('FRENCH') ||
+       fullText.includes('VF') ||
+       fullText.includes('VFF') ||
+       fullText.includes('RUSSIAN') ||
+       fullText.includes('GERMAN') ||
+       fullText.includes('DEUTSCH') ||
+       fullText.includes('ITALIAN') ||
+       fullText.includes('TAMIL') ||
+       fullText.includes('TELUGU')) &&
+      !fullText.includes('ENG') &&
+      !fullText.includes('ENGLISH');
+
+    const isExplicitEnglish =
+      fullText.includes('ENG') ||
+      fullText.includes('ENGLISH') ||
+      fullText.includes('ORIGINAL') ||
+      fullText.includes('VO') ||
+      lang === 'EN' ||
+      lang === 'ENG' ||
+      lang === 'ENGLISH';
+
+    const isMultiAudio = fullText.includes('MULTI') || fullText.includes('DUAL');
+
+    let langScore = 2;
+    if (isExplicitEnglish) {
+      langScore = 0;
+    } else if (isMultiAudio) {
+      langScore = 1;
+    } else if (isExplicitForeignOnly) {
+      langScore = 4;
+    } else {
+      langScore = 2;
+    }
+
+    let pScore = 50;
+    if (aName.includes('cinepro') || prov.includes('CINEPRO')) pScore = 1;
+    else if (aName.includes('primary') || prov.includes('PRIMARY')) pScore = 2;
+    else if (prov.includes('TORRENTIO')) pScore = 3;
+
+    let qScore = 500;
+    if (q.includes('LORDFIX')) qScore = 0;
+    else if (q.includes('1080') || q.includes('FHD')) qScore = 10;
+    else if (q.includes('2160') || q.includes('4K') || q.includes('UHD')) qScore = 20;
+    else if (q.includes('720') || q.includes('HD')) qScore = 30;
+    else if (q.includes('480')) qScore = 40;
+    else if (q.includes('360')) qScore = 50;
+    else if (q === 'AUTO') qScore = 60;
+
+    return langScore * 10000000 + pScore * 10000 + qScore;
+  };
+
+  return [...streams].sort((a, b) => getRank(a) - getRank(b));
 }
 
 function normalizeStreams(data: any, apiName: string, cineproBaseUrl: string = DEFAULT_SCRAPER_CINEPRO) {
@@ -242,19 +311,14 @@ export async function onRequest(context: { request: Request; env: Env; params: {
       }
     }
 
-    // MULTI Filter matching original HTML
-    const multiFiltered = combined.filter((st) => {
-      const str = `${st.provider || ''} ${st.quality || ''} ${st.rawTitle || ''}`.toUpperCase();
-      return str.includes('MULTI') || str.includes('DUAL');
-    });
-
-    const candidateList = multiFiltered.length > 0 ? multiFiltered : combined;
+    // Rank all candidate streams with English language prioritized first (never discard sources)
+    const sorted = rankStreams(combined, isTV);
 
     return new Response(
       JSON.stringify({
         success: true,
-        count: candidateList.length,
-        streams: candidateList,
+        count: sorted.length,
+        streams: sorted,
       }),
       {
         headers: {
