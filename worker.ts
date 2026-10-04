@@ -12,6 +12,7 @@ const TMDB_BASE = 'https://api.themoviedb.org/3';
 const DEFAULT_TMDB_KEY = '8265bd1679663a7ea12ac168da84d2e8';
 const DEFAULT_SCRAPER_PRIMARY = 'http://62.171.179.144:3000';
 const DEFAULT_SCRAPER_CINEPRO = 'http://62.171.179.144:3000';
+const DEFAULT_COOLIFY_GATEWAY = 'http://kufenvi0cy9unwwgipjiluoh.62.171.179.144.sslip.io';
 
 const ADULT_BLOCKLIST = [
   'romance', 'romantic', 'rom-com', 'erotic', 'sexy', 'sensual', 'love story', 'erotica', 'nsfw',
@@ -285,6 +286,18 @@ export default {
           }
           if (results[1].status === 'fulfilled' && results[1].value) {
             combined = combined.concat(normalizeStreams(results[1].value, 'CinePro', scraperCinepro));
+          }
+        }
+
+        // If port 3000 was unreachable or blocked by Cloudflare, query via Coolify standard port 80 gateway
+        if (combined.length === 0) {
+          const query = isTV ? `?s=${s}&e=${e}` : '';
+          const gatewayData = await fetchWithTimeout(
+            `${DEFAULT_COOLIFY_GATEWAY}/api/streams/${type}/${id}${query}`,
+            30000
+          );
+          if (gatewayData && Array.isArray(gatewayData.streams) && gatewayData.streams.length > 0) {
+            combined = gatewayData.streams;
           }
         }
 
