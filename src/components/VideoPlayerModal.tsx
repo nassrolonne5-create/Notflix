@@ -1645,7 +1645,7 @@ export const VideoPlayerModal: React.FC = () => {
                     setStreamError(null);
                     attemptedIndicesRef.current.clear();
                     setActiveStreamIndex(0);
-                    fetchStreams(activeModalItem.type, activeModalItem.id, currentSeason, currentEpisode)
+                    fetchStreams(activeModalItem.type, activeModalItem.id, currentSeason, currentEpisode, true)
                       .then((sList) => {
                         setStreams(sList);
                         setIsLoadingStreams(false);

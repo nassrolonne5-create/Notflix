@@ -258,20 +258,20 @@ export default {
         const s = url.searchParams.get('s') || '1';
         const e = url.searchParams.get('e') || '1';
 
-        const scraperCinepro = env.SCRAPER_CINEPRO_URL || DEFAULT_SCRAPER_CINEPRO;
-        const scraperTmdbEmbed = env.SCRAPER_TMDB_EMBED_URL || env.SCRAPER_PRIMARY_URL || DEFAULT_SCRAPER_TMDB_EMBED;
+        const scraperCinepro = (env.SCRAPER_CINEPRO_URL || DEFAULT_SCRAPER_CINEPRO).replace(/^https:\/\//i, 'http://');
+        const scraperTmdbEmbed = (env.SCRAPER_TMDB_EMBED_URL || env.SCRAPER_PRIMARY_URL || DEFAULT_SCRAPER_TMDB_EMBED).replace(/^https:\/\//i, 'http://');
 
         const cineproUrl = isTV
           ? `${scraperCinepro}/v1/tv/${id}/seasons/${s}/episodes/${e}`
           : `${scraperCinepro}/v1/movies/${id}`;
 
-        const tasks: Promise<any>[] = [fetchWithTimeout(cineproUrl, 4000)];
+        const tasks: Promise<any>[] = [fetchWithTimeout(cineproUrl, 10000)];
 
         if (scraperTmdbEmbed && scraperTmdbEmbed !== scraperCinepro) {
           const tmdbEmbedUrl = isTV
             ? `${scraperTmdbEmbed}/api/streams/series/${id}?s=${s}&e=${e}`
             : `${scraperTmdbEmbed}/api/streams/movie/${id}`;
-          tasks.push(fetchWithTimeout(tmdbEmbedUrl, 4000));
+          tasks.push(fetchWithTimeout(tmdbEmbedUrl, 10000));
         }
 
         const results = await Promise.allSettled(tasks);
@@ -364,7 +364,8 @@ export default {
             headers: {
               ...corsHeaders,
               'Content-Type': 'application/json',
-              'Cache-Control': 'public, max-age=600, s-maxage=1800, stale-while-revalidate=3600',
+              'Cache-Control': sorted.length > 0 ? 'public, max-age=300, s-maxage=600' : 'no-store, no-cache, must-revalidate',
+              ...(sorted.length === 0 ? { 'Pragma': 'no-cache', 'Expires': '0' } : {}),
             },
           }
         );

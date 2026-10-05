@@ -149,7 +149,7 @@ export function formatMediaItem(raw: any, defaultType: 'movie' | 'tv' = 'movie')
 const TMDB_DIRECT_KEY = '8265bd1679663a7ea12ac168da84d2e8';
 const TMDB_DIRECT_BASE = 'https://api.themoviedb.org/3';
 export const SCRAPER_CINEPRO = 'http://62.171.179.144:3000';
-export const SCRAPER_TMDB_EMBED = (import.meta.env.VITE_SCRAPER_TMDB_EMBED_URL as string) || (import.meta.env.VITE_SCRAPER_PRIMARY_URL as string) || 'http://62.171.179.144:3005';
+export const SCRAPER_TMDB_EMBED = ((import.meta.env.VITE_SCRAPER_TMDB_EMBED_URL as string) || (import.meta.env.VITE_SCRAPER_PRIMARY_URL as string) || 'http://62.171.179.144:3005').replace(/^https:\/\//i, 'http://');
 
 // Fetch from Backend TMDB proxy, with seamless direct client fallback for static hosting (Drag & Drop)
 export async function tmdbFetch(endpoint: string, params: Record<string, string> = {}): Promise<any> {
@@ -500,20 +500,40 @@ function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
 const streamClientCache = new Map<string, { streams: StreamSource[]; timestamp: number }>();
 
 // Dual-Engine Stream Finder (Server Edge Proxy + Fast Direct Scraper Fallback)
-export async function fetchStreams(type: 'movie' | 'tv', id: number, s = 1, e = 1): Promise<StreamSource[]> {
+export async function fetchStreams(
+  type: 'movie' | 'tv',
+  id: number,
+  s = 1,
+  e = 1,
+  forceRefresh = false
+): Promise<StreamSource[]> {
   const cacheKey = `${type}-${id}-${s}-${e}`;
-  const cached = streamClientCache.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < 15 * 60 * 1000 && cached.streams.length > 0) {
-    return cached.streams;
+  if (!forceRefresh) {
+    const cached = streamClientCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < 15 * 60 * 1000 && cached.streams.length > 0) {
+      return cached.streams;
+    }
+  } else {
+    streamClientCache.delete(cacheKey);
   }
 
-  const query = type === 'tv' ? `?s=${s}&e=${e}` : '';
+  const queryParts = [];
+  if (type === 'tv') {
+    queryParts.push(`s=${s}`, `e=${e}`);
+  }
+  if (forceRefresh) {
+    queryParts.push(`refresh=1`, `_t=${Date.now()}`);
+  }
+  const queryString = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
 
-  // 1. Try Backend Server Proxy first (up to 35s for thorough 19-provider scraping)
+  // 1. Try Backend Server Proxy first
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 35000);
-    const res = await fetch(`/api/streams/${type}/${id}${query}`, { signal: controller.signal });
+    const timer = setTimeout(() => controller.abort(), 14000);
+    const res = await fetch(`/api/streams/${type}/${id}${queryString}`, {
+      signal: controller.signal,
+      cache: forceRefresh ? 'no-cache' : 'default',
+    });
     clearTimeout(timer);
     if (res.ok) {
       const data = await res.json();

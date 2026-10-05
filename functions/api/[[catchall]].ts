@@ -281,8 +281,8 @@ export async function onRequest(context: { request: Request; env: Env; params: {
     const s = url.searchParams.get('s') || '1';
     const e = url.searchParams.get('e') || '1';
 
-    const scraperCinepro = env.SCRAPER_CINEPRO_URL || DEFAULT_SCRAPER_CINEPRO;
-    const scraperTmdbEmbed = env.SCRAPER_TMDB_EMBED_URL || env.SCRAPER_PRIMARY_URL || DEFAULT_SCRAPER_TMDB_EMBED;
+    const scraperCinepro = (env.SCRAPER_CINEPRO_URL || DEFAULT_SCRAPER_CINEPRO).replace(/^https:\/\//i, 'http://');
+    const scraperTmdbEmbed = (env.SCRAPER_TMDB_EMBED_URL || env.SCRAPER_PRIMARY_URL || DEFAULT_SCRAPER_TMDB_EMBED).replace(/^https:\/\//i, 'http://');
 
     const cineproUrl = isTV
       ? `${scraperCinepro}/v1/tv/${id}/seasons/${s}/episodes/${e}`

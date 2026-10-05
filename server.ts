@@ -21,8 +21,8 @@ const TMDB_BASE = 'https://api.themoviedb.org/3';
 const DEFAULT_TMDB_KEY = '8265bd1679663a7ea12ac168da84d2e8';
 const TMDB_API_KEY = process.env.TMDB_API_KEY || DEFAULT_TMDB_KEY;
 
-const SCRAPER_API_CINEPRO = process.env.SCRAPER_CINEPRO_URL || 'http://62.171.179.144:3000';
-const SCRAPER_API_TMDB_EMBED = process.env.SCRAPER_TMDB_EMBED_URL || process.env.SCRAPER_PRIMARY_URL || 'http://62.171.179.144:3005';
+const SCRAPER_API_CINEPRO = (process.env.SCRAPER_CINEPRO_URL || 'http://62.171.179.144:3000').replace(/^https:\/\//i, 'http://');
+const SCRAPER_API_TMDB_EMBED = (process.env.SCRAPER_TMDB_EMBED_URL || process.env.SCRAPER_PRIMARY_URL || 'http://62.171.179.144:3005').replace(/^https:\/\//i, 'http://');
 
 // Allow connecting to upstream scrapers using HTTPS with self-signed / internal certificates
 if (!process.env.NODE_TLS_REJECT_UNAUTHORIZED) {
@@ -441,11 +441,12 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
     const isTV = type === 'tv';
     const s = parseInt((req.query.s as string) || '1', 10);
     const e = parseInt((req.query.e as string) || '1', 10);
+    const forceRefresh = req.query.refresh === '1' || req.query._t !== undefined;
 
     const cacheKey = `streams-${type}-${id}-${s}-${e}`;
     const cached = apiCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < 15 * 60 * 1000) {
-      res.setHeader('Cache-Control', 'public, max-age=600, s-maxage=1800, stale-while-revalidate=3600');
+    if (!forceRefresh && cached && Date.now() - cached.timestamp < 15 * 60 * 1000 && Array.isArray(cached.data?.streams) && cached.data.streams.length > 0) {
+      res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=600');
       return res.json(cached.data);
     }
 
@@ -453,15 +454,15 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
       ? `${SCRAPER_API_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}`
       : `${SCRAPER_API_CINEPRO}/v1/movies/${id}`;
 
-    // Lightning-fast 4-second timeout instead of blocking for 30s
-    const tasks: Promise<any>[] = [fetchWithTimeout(cineproUrl, 4000)];
+    // 10-second timeout allows scrapers on cold/uncached titles enough time to finish all 19 providers
+    const tasks: Promise<any>[] = [fetchWithTimeout(cineproUrl, 10000)];
 
     let tmdbEmbedUrl = '';
     if (SCRAPER_API_TMDB_EMBED && SCRAPER_API_TMDB_EMBED !== SCRAPER_API_CINEPRO) {
       tmdbEmbedUrl = isTV
         ? `${SCRAPER_API_TMDB_EMBED}/api/streams/series/${id}?s=${s}&e=${e}`
         : `${SCRAPER_API_TMDB_EMBED}/api/streams/movie/${id}`;
-      tasks.push(fetchWithTimeout(tmdbEmbedUrl, 4000));
+      tasks.push(fetchWithTimeout(tmdbEmbedUrl, 10000));
     }
 
     const results = await Promise.allSettled(tasks);
@@ -478,7 +479,6 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
     // TMDB Embed Scraper streams
     if (results[1] && results[1].status === 'fulfilled' && results[1].value) {
       combined = combined.concat(normalizeStreams(results[1].value, 'TMDB Embed'));
-      // Collect subtitles if provided by TMDB Embed
       if (Array.isArray(results[1].value.streams)) {
         for (const sItem of results[1].value.streams) {
           if (Array.isArray(sItem.subtitles) && sItem.subtitles.length > 0) {
@@ -487,6 +487,18 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
             break;
           }
         }
+      }
+    }
+
+    // If scrapers returned 0 streams, check Coolify gateway mirror
+    if (combined.length === 0) {
+      const query = isTV ? `?s=${s}&e=${e}` : '';
+      const gatewayData = await fetchWithTimeout(
+        `http://kufenvi0cy9unwwgipjiluoh.62.171.179.144.sslip.io/api/streams/${type}/${id}${query}`,
+        8000
+      );
+      if (gatewayData && Array.isArray(gatewayData.streams) && gatewayData.streams.length > 0) {
+        combined = gatewayData.streams;
       }
     }
 
@@ -501,11 +513,18 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
 
     if (sorted.length > 0) {
       apiCache.set(cacheKey, { timestamp: Date.now(), data: responseData });
+      res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=600');
+    } else {
+      // CRITICAL: NEVER cache 0-stream responses!
+      // Prevents Cloudflare and browsers from caching empty results for famous titles
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
     }
 
-    res.setHeader('Cache-Control', 'public, max-age=600, s-maxage=1800, stale-while-revalidate=3600');
     return res.json(responseData);
   } catch {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     return res.json({ success: true, count: 0, streams: [] });
   }
 });
