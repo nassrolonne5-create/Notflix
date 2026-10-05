@@ -1,9 +1,8 @@
-# Nixpacks configuration for Coolify
 [phases.setup]
 nixPkgs = ["nodejs_22"]
 
 [phases.install]
-cmds = ["npm install --include=optional --include=dev"]
+cmds = ["npm ci"]
 
 [phases.build]
 cmds = ["npm run build"]

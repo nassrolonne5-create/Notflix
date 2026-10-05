@@ -788,7 +788,9 @@ app.post('/api/user/sync', (req: Request, res: Response) => {
 // 6. DEV & PROD VITE STATIC INTEGRATION
 // ==========================================
 async function startServer() {
-  const isProd = process.env.NODE_ENV === 'production';
+  const distPath = path.join(__dirname, 'dist');
+  const hasDist = fs.existsSync(path.join(distPath, 'index.html'));
+  const isProd = process.env.NODE_ENV === 'production' || (hasDist && process.env.NODE_ENV !== 'development');
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
@@ -799,7 +801,6 @@ async function startServer() {
     app.use(vite.middlewares);
     console.log('⚡ Vite dev middleware attached in development mode');
   } else {
-    const distPath = path.join(__dirname, 'dist');
     app.use(express.static(distPath));
     app.get('*', (req: Request, res: Response) => {
       res.sendFile(path.join(distPath, 'index.html'));
