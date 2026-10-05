@@ -135,13 +135,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     syncUserData(newData);
   };
 
-  const showToast = (message: string, icon = '') => {
+  const showToast = useCallback((message: string, icon = '') => {
     setToast({ show: true, message, icon });
     window.clearTimeout((window as any)._toastTimeout);
     (window as any)._toastTimeout = window.setTimeout(() => {
       setToast({ show: false, message: '' });
     }, 3000);
-  };
+  }, []);
 
   const openPlayer = (item: MediaItem, season?: number, episode?: number) => {
     triggerAd('poster');

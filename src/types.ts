@@ -41,12 +41,14 @@ export interface Episode {
 
 export interface StreamSource {
   url: string;
+  proxyUrl?: string;
+  headers?: Record<string, string>;
   quality: string;
   provider: string;
   language?: string;
   apiName?: string;
   isM3U8?: boolean;
-  isEmbed?: boolean;
+  isDASH?: boolean;
   rawTitle?: string;
   intro?: {
     start?: number;

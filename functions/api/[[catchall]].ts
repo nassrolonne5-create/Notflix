@@ -6,12 +6,13 @@ interface Env {
   NOTFLIX_KV?: any;
   SCRAPER_PRIMARY_URL?: string;
   SCRAPER_CINEPRO_URL?: string;
+  SCRAPER_TMDB_EMBED_URL?: string;
 }
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const DEFAULT_TMDB_KEY = '8265bd1679663a7ea12ac168da84d2e8';
-const DEFAULT_SCRAPER_PRIMARY = 'http://62.171.179.144:3000';
 const DEFAULT_SCRAPER_CINEPRO = 'http://62.171.179.144:3000';
+const DEFAULT_SCRAPER_TMDB_EMBED = 'http://62.171.179.144:3005';
 const DEFAULT_COOLIFY_GATEWAY = 'http://kufenvi0cy9unwwgipjiluoh.62.171.179.144.sslip.io';
 
 // Explicit adult, romance, and sexually suggestive content classifications
@@ -280,36 +281,30 @@ export async function onRequest(context: { request: Request; env: Env; params: {
     const s = url.searchParams.get('s') || '1';
     const e = url.searchParams.get('e') || '1';
 
-    const scraperPrimary = env.SCRAPER_PRIMARY_URL || DEFAULT_SCRAPER_PRIMARY;
     const scraperCinepro = env.SCRAPER_CINEPRO_URL || DEFAULT_SCRAPER_CINEPRO;
-
-    const isPrimaryCinepro = scraperPrimary.includes('62.171.179.144') || scraperPrimary === scraperCinepro;
-    const primaryUrl = isTV
-      ? (isPrimaryCinepro ? `${scraperPrimary}/v1/tv/${id}/seasons/${s}/episodes/${e}` : `${scraperPrimary}/api/streams/tv/${id}?s=${s}&e=${e}`)
-      : (isPrimaryCinepro ? `${scraperPrimary}/v1/movies/${id}` : `${scraperPrimary}/api/streams/movie/${id}`);
+    const scraperTmdbEmbed = env.SCRAPER_TMDB_EMBED_URL || env.SCRAPER_PRIMARY_URL || DEFAULT_SCRAPER_TMDB_EMBED;
 
     const cineproUrl = isTV
       ? `${scraperCinepro}/v1/tv/${id}/seasons/${s}/episodes/${e}`
       : `${scraperCinepro}/v1/movies/${id}`;
 
-    let combined: any[] = [];
-    if (primaryUrl === cineproUrl) {
-      const data = await fetchWithTimeout(cineproUrl, 30000);
-      if (data) {
-        combined = normalizeStreams(data, 'CinePro', scraperCinepro);
-      }
-    } else {
-      const results = await Promise.allSettled([
-        fetchWithTimeout(primaryUrl, 30000),
-        fetchWithTimeout(cineproUrl, 30000),
-      ]);
+    const tasks: Promise<any>[] = [fetchWithTimeout(cineproUrl, 30000)];
 
-      if (results[0].status === 'fulfilled' && results[0].value) {
-        combined = combined.concat(normalizeStreams(results[0].value, 'Primary', scraperCinepro));
-      }
-      if (results[1].status === 'fulfilled' && results[1].value) {
-        combined = combined.concat(normalizeStreams(results[1].value, 'CinePro', scraperCinepro));
-      }
+    if (scraperTmdbEmbed && scraperTmdbEmbed !== scraperCinepro) {
+      const tmdbEmbedUrl = isTV
+        ? `${scraperTmdbEmbed}/api/streams/series/${id}?s=${s}&e=${e}`
+        : `${scraperTmdbEmbed}/api/streams/movie/${id}`;
+      tasks.push(fetchWithTimeout(tmdbEmbedUrl, 30000));
+    }
+
+    const results = await Promise.allSettled(tasks);
+    let combined: any[] = [];
+
+    if (results[0].status === 'fulfilled' && results[0].value) {
+      combined = combined.concat(normalizeStreams(results[0].value, 'CinePro', scraperCinepro));
+    }
+    if (results[1] && results[1].status === 'fulfilled' && results[1].value) {
+      combined = combined.concat(normalizeStreams(results[1].value, 'TMDB Embed', scraperCinepro));
     }
 
     // If port 3000 was unreachable or blocked by Cloudflare, query via Coolify standard port 80 gateway
@@ -322,6 +317,62 @@ export async function onRequest(context: { request: Request; env: Env; params: {
       if (gatewayData && Array.isArray(gatewayData.streams) && gatewayData.streams.length > 0) {
         combined = gatewayData.streams;
       }
+    }
+
+    // If scrapers are unreachable or returned empty, attach resilient backup streams
+    if (combined.length === 0) {
+      combined = [
+        {
+          url: isTV ? `https://vidlink.pro/tv/${id}/${s}/${e}` : `https://vidlink.pro/movie/${id}`,
+          quality: '1080P',
+          provider: 'Server 1 (Fast)',
+          apiName: 'Cloud',
+          isM3U8: false,
+          isEmbed: true,
+          rawTitle: 'VidLink Fast Mirror',
+          language: 'English',
+        },
+        {
+          url: isTV ? `https://vidsrc.cc/v2/embed/tv/${id}/${s}/${e}` : `https://vidsrc.cc/v2/embed/movie/${id}`,
+          quality: '1080P',
+          provider: 'Server 2 (HD)',
+          apiName: 'Cloud',
+          isM3U8: false,
+          isEmbed: true,
+          rawTitle: 'VidSrc Mirror',
+          language: 'English',
+        },
+        {
+          url: isTV ? `https://embed.su/embed/tv/${id}/${s}/${e}` : `https://embed.su/embed/movie/${id}`,
+          quality: '1080P',
+          provider: 'Server 3 (Multi)',
+          apiName: 'Cloud',
+          isM3U8: false,
+          isEmbed: true,
+          rawTitle: 'EmbedSU Mirror',
+          language: 'English',
+        },
+        {
+          url: isTV ? `https://multiembed.mov/?video_id=${id}&tmdb=1&s=${s}&e=${e}` : `https://multiembed.mov/?video_id=${id}&tmdb=1`,
+          quality: '720P',
+          provider: 'Server 4',
+          apiName: 'Cloud',
+          isM3U8: false,
+          isEmbed: true,
+          rawTitle: 'MultiEmbed Server',
+          language: 'English',
+        },
+        {
+          url: isTV ? `https://autoembed.co/tv/tmdb/${id}-${s}-${e}` : `https://autoembed.co/movie/tmdb/${id}`,
+          quality: '720P',
+          provider: 'Server 5',
+          apiName: 'Cloud',
+          isM3U8: false,
+          isEmbed: true,
+          rawTitle: 'AutoEmbed Server',
+          language: 'English',
+        },
+      ];
     }
 
     // Rank all candidate streams with English language prioritized first (never discard sources)

@@ -21,8 +21,13 @@ const TMDB_BASE = 'https://api.themoviedb.org/3';
 const DEFAULT_TMDB_KEY = '8265bd1679663a7ea12ac168da84d2e8';
 const TMDB_API_KEY = process.env.TMDB_API_KEY || DEFAULT_TMDB_KEY;
 
-const SCRAPER_API_PRIMARY = process.env.SCRAPER_PRIMARY_URL || 'http://62.171.179.144:3000';
 const SCRAPER_API_CINEPRO = process.env.SCRAPER_CINEPRO_URL || 'http://62.171.179.144:3000';
+const SCRAPER_API_TMDB_EMBED = process.env.SCRAPER_TMDB_EMBED_URL || process.env.SCRAPER_PRIMARY_URL || 'http://62.171.179.144:3005';
+
+// Allow connecting to upstream scrapers using HTTPS with self-signed / internal certificates
+if (!process.env.NODE_TLS_REJECT_UNAUTHORIZED) {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+}
 
 // In-Memory Server Cache with 5-minute TTL
 interface CacheEntry {
@@ -212,7 +217,7 @@ app.get('/api/tmdb/*', async (req: Request, res: Response) => {
 // ==========================================
 // 3. STREAM AGGREGATION & RESOLUTION PROXY
 // ==========================================
-async function fetchWithTimeout(url: string, ms = 4500): Promise<any> {
+async function fetchWithTimeout(url: string, ms = 25000): Promise<any> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
   try {
@@ -221,11 +226,11 @@ async function fetchWithTimeout(url: string, ms = 4500): Promise<any> {
       headers: { Accept: 'application/json' },
     });
     clearTimeout(timer);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) return null;
     return await response.json();
-  } catch (e) {
+  } catch {
     clearTimeout(timer);
-    throw e;
+    return null;
   }
 }
 
@@ -251,54 +256,105 @@ function normalizeStreams(data: any, apiName: string) {
 
       let streamUrl = s?.url || s?.stream_url || s?.link || s?.playlist || '';
       streamUrl = streamUrl.replace(/http:\/\/localhost:(3000|10000)/g, SCRAPER_API_CINEPRO);
+      streamUrl = streamUrl.replace(/http:\/\/localhost:3005/g, SCRAPER_API_TMDB_EMBED);
+      streamUrl = streamUrl.replace(/&amp;/g, '&');
 
-      // Check format
-      const isM3U8 =
-        !streamUrl.includes('.mp4') &&
-        (streamUrl.includes('.m3u8') || !streamUrl.match(/\.(mp4|webm|mkv)/i));
-
-      // Browser cannot play mkv files in HTML5 video
-      if (streamUrl.toLowerCase().endsWith('.mkv') || s?.type === 'mkv') {
-        return null;
+      // Relay CinePro proxy through our local HTTPS server to prevent Mixed Content blocking (HTTP or HTTPS)
+      streamUrl = streamUrl.replace(/^https?:\/\/62\.171\.179\.144(?::\d+)?\/v1\/proxy/i, '/v1/proxy');
+      const cineproOrigin = SCRAPER_API_CINEPRO.replace(/\/+$/, '');
+      if (streamUrl.startsWith(`${cineproOrigin}/v1/proxy`)) {
+        streamUrl = streamUrl.slice(cineproOrigin.length);
       }
 
-      const titleLower = (s?.title || s?.name || '').toLowerCase();
       const urlLower = streamUrl.toLowerCase();
       const provLower = String(providerName).toLowerCase();
+      const titleLower = (s?.title || s?.name || '').toLowerCase();
 
-      // Filter out obvious sample clips, troll videos, or trailers
+      // Filter out obvious rickroll troll videos only
       if (
-        titleLower.includes('sample') ||
-        titleLower.includes('trailer') ||
-        titleLower.includes('teaser') ||
         titleLower.includes('rickroll') ||
-        titleLower.includes('preview') ||
         titleLower.includes('rick astley') ||
-        urlLower.includes('sample.mp4') ||
-        urlLower.includes('sample.mkv') ||
-        urlLower.includes('rickroll') ||
-        provLower.includes('trailer')
+        urlLower.includes('rickroll')
       ) {
         return null;
       }
 
+      // Filter out dead CinePro scrapers (LMScript returns WRONG HASH, Icefy returns 500, finepulfe is Cloudflare blocked)
+      if (
+        provLower.includes('lmscript') ||
+        provLower.includes('icefy') ||
+        urlLower.includes('finepulfe.xyz')
+      ) {
+        return null;
+      }
+
+      // Filter out iframe / embed players completely
+      if (
+        Boolean(s?.isEmbed) ||
+        s?.type === 'embed' ||
+        s?.type === 'iframe' ||
+        urlLower.includes('/embed/') ||
+        urlLower.includes('/e/') ||
+        urlLower.includes('cloudorchestranova') ||
+        urlLower.includes('vidsrc') ||
+        urlLower.includes('autoembed') ||
+        urlLower.includes('2embed') ||
+        urlLower.includes('superembed') ||
+        urlLower.includes('multiembed') ||
+        urlLower.includes('embed.su') ||
+        urlLower.includes('player.') ||
+        urlLower.includes('vidlink')
+      ) {
+        return null;
+      }
+
+      const headers = s?.headers && typeof s.headers === 'object' ? s.headers : null;
+
+      const isDASH =
+        Boolean(s?.isDASH) ||
+        s?.type === 'dash' ||
+        s?.type === 'mpd' ||
+        urlLower.includes('.mpd');
+
+      const isM3U8 =
+        !isDASH &&
+        (s?.type === 'hls' ||
+          s?.type === 'm3u8' ||
+          urlLower.includes('.m3u8') ||
+          (!urlLower.match(/\.(mp4|webm|mkv|ogg|mov)$/i) && !urlLower.includes('.mpd')));
+
+      // Build streaming proxy URL for streams that require custom headers or restricted CDNs (skip if already using /v1/proxy)
+      let proxyUrl = '';
+      if (!streamUrl.startsWith('/v1/proxy') && (headers || urlLower.includes('boomchick') || urlLower.includes('hakunaymatata') || urlLower.includes('flwuok') || urlLower.includes('flcwuk') || urlLower.includes('hbsxcn') || urlLower.includes('flowxn') || urlLower.includes('fsonxn') || urlLower.includes('111477.xyz') || urlLower.includes('devcorp.me'))) {
+        proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrl)}${
+          headers ? `&headers=${encodeURIComponent(JSON.stringify(headers))}` : ''
+        }`;
+      }
+
       const quality = (s?.quality || s?.resolution || s?.label || 'AUTO').toUpperCase();
       const rawTitle = s?.title || s?.name || '';
-      const rawLang = s?.lang || s?.language || s?.audio || (rawTitle.match(/\b(ENG|ENGLISH|HINDI|LATINO|ESPANOL|FRENCH|GERMAN|RUSSIAN|MULTI|DUAL)\b/i)?.[0]) || 'English';
+      const rawLang =
+        s?.lang ||
+        s?.language ||
+        s?.audio ||
+        rawTitle.match(/\b(ENG|ENGLISH|HINDI|LATINO|ESPANOL|FRENCH|GERMAN|RUSSIAN|MULTI|DUAL)\b/i)?.[0] ||
+        'English';
 
       return {
         url: streamUrl,
+        proxyUrl: proxyUrl || undefined,
+        headers: headers || undefined,
         quality,
         provider: providerName,
         intro: s?.intro,
         apiName,
         isM3U8,
-        isEmbed: false,
+        isDASH,
         rawTitle,
         language: rawLang,
       };
     })
-    .filter((s): s is NonNullable<typeof s> => Boolean(s && s.url && s.url.startsWith('http')));
+    .filter((s): s is NonNullable<typeof s> => Boolean(s && s.url && (s.url.startsWith('http') || s.url.startsWith('/v1/proxy') || s.url.startsWith('/api/proxy'))));
 }
 
 function rankStreams(streams: any[], isTV: boolean) {
@@ -386,38 +442,50 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
     const s = parseInt((req.query.s as string) || '1', 10);
     const e = parseInt((req.query.e as string) || '1', 10);
 
-    const isPrimaryCinepro = SCRAPER_API_PRIMARY.includes('62.171.179.144') || SCRAPER_API_PRIMARY === SCRAPER_API_CINEPRO;
-    const primaryUrl = isTV
-      ? (isPrimaryCinepro ? `${SCRAPER_API_PRIMARY}/v1/tv/${id}/seasons/${s}/episodes/${e}` : `${SCRAPER_API_PRIMARY}/api/streams/tv/${id}?s=${s}&e=${e}`)
-      : (isPrimaryCinepro ? `${SCRAPER_API_PRIMARY}/v1/movies/${id}` : `${SCRAPER_API_PRIMARY}/api/streams/movie/${id}`);
+    const cacheKey = `streams-${type}-${id}-${s}-${e}`;
+    const cached = apiCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < 15 * 60 * 1000) {
+      res.setHeader('Cache-Control', 'public, max-age=600, s-maxage=1800, stale-while-revalidate=3600');
+      return res.json(cached.data);
+    }
 
     const cineproUrl = isTV
       ? `${SCRAPER_API_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}`
       : `${SCRAPER_API_CINEPRO}/v1/movies/${id}`;
 
-    // Scrape from APIs (up to 30s for scraping 19 providers)
-    let combined: any[] = [];
-    if (primaryUrl === cineproUrl) {
-      const data = await fetchWithTimeout(cineproUrl, 30000);
-      if (data) {
-        combined = normalizeStreams(data, 'CinePro');
-        if (Array.isArray(data.subtitles)) {
-          subtitleCache.set(`${type}-${id}-${s}-${e}`, data.subtitles);
-        }
-      }
-    } else {
-      const results = await Promise.allSettled([
-        fetchWithTimeout(primaryUrl, 30000),
-        fetchWithTimeout(cineproUrl, 30000),
-      ]);
+    // Lightning-fast 4-second timeout instead of blocking for 30s
+    const tasks: Promise<any>[] = [fetchWithTimeout(cineproUrl, 4000)];
 
-      if (results[0].status === 'fulfilled' && results[0].value) {
-        combined = combined.concat(normalizeStreams(results[0].value, 'Primary'));
+    let tmdbEmbedUrl = '';
+    if (SCRAPER_API_TMDB_EMBED && SCRAPER_API_TMDB_EMBED !== SCRAPER_API_CINEPRO) {
+      tmdbEmbedUrl = isTV
+        ? `${SCRAPER_API_TMDB_EMBED}/api/streams/series/${id}?s=${s}&e=${e}`
+        : `${SCRAPER_API_TMDB_EMBED}/api/streams/movie/${id}`;
+      tasks.push(fetchWithTimeout(tmdbEmbedUrl, 4000));
+    }
+
+    const results = await Promise.allSettled(tasks);
+    let combined: any[] = [];
+
+    // CinePro streams
+    if (results[0].status === 'fulfilled' && results[0].value) {
+      combined = combined.concat(normalizeStreams(results[0].value, 'CinePro'));
+      if (Array.isArray(results[0].value.subtitles)) {
+        subtitleCache.set(`${type}-${id}-${s}-${e}`, results[0].value.subtitles);
       }
-      if (results[1].status === 'fulfilled' && results[1].value) {
-        combined = combined.concat(normalizeStreams(results[1].value, 'CinePro'));
-        if (Array.isArray(results[1].value.subtitles)) {
-          subtitleCache.set(`${type}-${id}-${s}-${e}`, results[1].value.subtitles);
+    }
+
+    // TMDB Embed Scraper streams
+    if (results[1] && results[1].status === 'fulfilled' && results[1].value) {
+      combined = combined.concat(normalizeStreams(results[1].value, 'TMDB Embed'));
+      // Collect subtitles if provided by TMDB Embed
+      if (Array.isArray(results[1].value.streams)) {
+        for (const sItem of results[1].value.streams) {
+          if (Array.isArray(sItem.subtitles) && sItem.subtitles.length > 0) {
+            const existing = subtitleCache.get(`${type}-${id}-${s}-${e}`) || [];
+            subtitleCache.set(`${type}-${id}-${s}-${e}`, [...existing, ...sItem.subtitles]);
+            break;
+          }
         }
       }
     }
@@ -425,15 +493,20 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
     // Rank all candidate streams with English language prioritized first
     const sorted = rankStreams(combined, isTV);
 
-    res.setHeader('Cache-Control', 'public, max-age=600, s-maxage=1800, stale-while-revalidate=3600');
-    return res.json({
+    const responseData = {
       success: true,
       count: sorted.length,
       streams: sorted,
-    });
-  } catch (err: any) {
-    console.error('Streams fetch error:', err);
-    return res.status(500).json({ error: 'Failed to retrieve streams' });
+    };
+
+    if (sorted.length > 0) {
+      apiCache.set(cacheKey, { timestamp: Date.now(), data: responseData });
+    }
+
+    res.setHeader('Cache-Control', 'public, max-age=600, s-maxage=1800, stale-while-revalidate=3600');
+    return res.json(responseData);
+  } catch {
+    return res.json({ success: true, count: 0, streams: [] });
   }
 });
 
@@ -512,6 +585,168 @@ app.get('/api/subtitles/proxy', async (req: Request, res: Response) => {
     console.error('Subtitle proxy error:', err);
     return res.status(500).send('Error proxying subtitle');
   }
+});
+
+// Universal Video Stream Proxy with M3U8 rewrite and HTTP Range support
+app.get('/api/proxy/stream', async (req: Request, res: Response) => {
+  try {
+    const rawUrl = req.query.url as string;
+    if (!rawUrl) {
+      return res.status(400).send('Missing url parameter');
+    }
+
+    let customHeaders: Record<string, string> = {};
+    if (req.query.headers) {
+      try {
+        customHeaders = JSON.parse(req.query.headers as string);
+      } catch (e) {}
+    }
+
+    let targetUrl = decodeURIComponent(rawUrl);
+    if (targetUrl.startsWith('/v1/proxy')) {
+      const queryString = targetUrl.includes('?') ? targetUrl.slice(targetUrl.indexOf('?')) : '';
+      targetUrl = `${SCRAPER_API_CINEPRO}/v1/proxy${queryString}`;
+    } else if (targetUrl.startsWith('/')) {
+      targetUrl = `http://127.0.0.1:3000${targetUrl}`;
+    }
+
+    if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+      return res.status(400).send('Invalid target URL scheme');
+    }
+
+    const forwardHeaders: Record<string, string> = {
+      'User-Agent':
+        customHeaders['User-Agent'] ||
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+      Accept: '*/*',
+    };
+    if (customHeaders['Referer']) forwardHeaders['Referer'] = customHeaders['Referer'];
+    if (customHeaders['Origin']) forwardHeaders['Origin'] = customHeaders['Origin'];
+    if (req.headers.range) {
+      forwardHeaders['Range'] = req.headers.range as string;
+    }
+
+    const upstream = await fetch(targetUrl, {
+      headers: forwardHeaders,
+    });
+
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Headers', '*');
+    res.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+
+    const contentType = upstream.headers.get('content-type') || '';
+    if (contentType) res.set('Content-Type', contentType);
+    if (upstream.headers.get('content-range')) res.set('Content-Range', upstream.headers.get('content-range')!);
+    if (upstream.headers.get('accept-ranges')) res.set('Accept-Ranges', upstream.headers.get('accept-ranges')!);
+    if (upstream.headers.get('content-length')) res.set('Content-Length', upstream.headers.get('content-length')!);
+
+    res.status(upstream.status);
+
+    const isPlaylist =
+      targetUrl.includes('.m3u8') ||
+      contentType.includes('mpegurl') ||
+      contentType.includes('application/x-mpegURL');
+
+    if (isPlaylist && upstream.status === 200) {
+      const text = await upstream.text();
+      const baseUrl = new URL(targetUrl);
+      const lines = text.split('\n');
+      const rewritten = lines
+        .map((line) => {
+          const trimmed = line.trim();
+          if (!trimmed) return line;
+          if (trimmed.startsWith('#')) {
+            // Rewrite URI="..." inside tags like #EXT-X-KEY or #EXT-X-MEDIA
+            if (trimmed.includes('URI="')) {
+              return trimmed.replace(/URI="([^"]+)"/g, (match, uri) => {
+                const full = new URL(uri, baseUrl).toString();
+                return `URI="/api/proxy/stream?url=${encodeURIComponent(full)}&headers=${encodeURIComponent(
+                  JSON.stringify(customHeaders)
+                )}"`;
+              });
+            }
+            return line;
+          }
+          // Segment URL or child playlist URL
+          const full = new URL(trimmed, baseUrl).toString();
+          return `/api/proxy/stream?url=${encodeURIComponent(full)}&headers=${encodeURIComponent(
+            JSON.stringify(customHeaders)
+          )}`;
+        })
+        .join('\n');
+
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+      return res.send(rewritten);
+    }
+
+    // Binary video chunk or range stream
+    if (upstream.body) {
+      const { Readable } = await import('node:stream');
+      // @ts-ignore
+      Readable.fromWeb(upstream.body).pipe(res);
+    } else {
+      res.end();
+    }
+  } catch (err: any) {
+    console.error('Stream proxy error:', err);
+    if (!res.headersSent) {
+      res.status(502).send('Upstream stream proxy failed');
+    }
+  }
+});
+
+// CinePro Proxy Relay (Eliminates Mixed Content HTTP/HTTPS blocks & routes relative /v1/proxy segments)
+app.get('/v1/proxy', async (req: Request, res: Response) => {
+  try {
+    const queryString = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+    const targetUrl = `${SCRAPER_API_CINEPRO}/v1/proxy${queryString}`;
+
+    const forwardHeaders: Record<string, string> = {
+      'User-Agent':
+        (req.headers['user-agent'] as string) ||
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+      Accept: '*/*',
+    };
+    if (req.headers.range) {
+      forwardHeaders['Range'] = req.headers.range as string;
+    }
+
+    const upstream = await fetch(targetUrl, {
+      headers: forwardHeaders,
+    });
+
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Headers', '*');
+    res.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+
+    const contentType = upstream.headers.get('content-type') || '';
+    if (contentType) res.set('Content-Type', contentType);
+    if (upstream.headers.get('content-range')) res.set('Content-Range', upstream.headers.get('content-range')!);
+    if (upstream.headers.get('accept-ranges')) res.set('Accept-Ranges', upstream.headers.get('accept-ranges')!);
+    if (upstream.headers.get('content-length')) res.set('Content-Length', upstream.headers.get('content-length')!);
+
+    res.status(upstream.status);
+
+    if (upstream.body) {
+      const { Readable } = await import('node:stream');
+      // @ts-ignore
+      Readable.fromWeb(upstream.body).pipe(res);
+    } else {
+      res.end();
+    }
+  } catch (err: any) {
+    console.error('CinePro proxy relay error:', err);
+    if (!res.headersSent) {
+      res.status(502).send('CinePro proxy relay failed');
+    }
+  }
+});
+
+app.options('/v1/proxy', (req: Request, res: Response) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.sendStatus(204);
 });
 
 // ==========================================

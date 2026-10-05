@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import Hls from 'hls.js';
+import * as dashjs from 'dashjs';
 import {
   X,
   Play,
@@ -60,6 +61,7 @@ export const VideoPlayerModal: React.FC = () => {
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const dashRef = useRef<any>(null);
   const controlsTimeoutRef = useRef<number | null>(null);
   const progressBgRef = useRef<HTMLDivElement | null>(null);
 
@@ -104,6 +106,9 @@ export const VideoPlayerModal: React.FC = () => {
   const [resumePrompt, setResumePrompt] = useState<{ time: number } | null>(null);
   const hasResumedRef = useRef<boolean>(false);
   const lastSavedTimeRef = useRef<number>(0);
+  const attemptedIndicesRef = useRef<Set<number>>(new Set());
+  const autoSwitchTimeoutRef = useRef<number | null>(null);
+  const watchdogTimerRef = useRef<number | null>(null);
 
   // Gesture states (Swipe to adjust Brightness & Seek)
   const [brightness, setBrightness] = useState<number>(1.0);
@@ -216,6 +221,8 @@ export const VideoPlayerModal: React.FC = () => {
           return 0;
         });
 
+        attemptedIndicesRef.current.clear();
+        attemptedIndicesRef.current.add(0);
         setStreams(sortedStreams);
         setIsLoadingStreams(false);
       })
@@ -230,6 +237,48 @@ export const VideoPlayerModal: React.FC = () => {
     };
   }, [activeModalItem?.id, activeModalItem?.type, currentSeason, currentEpisode]);
 
+  // Auto-switch immediately between servers if a stream fails to load or encounters a fatal playback error
+  const handleStreamFailure = useCallback(
+    (failedIndex: number, failureReason?: string) => {
+      attemptedIndicesRef.current.add(failedIndex);
+
+      // If only 1 server available or all servers have been tried
+      if (streams.length <= 1) {
+        setIsLoadingStreams(false);
+        setStreamError(`Server ${failedIndex + 1} is currently unavailable.`);
+        return;
+      }
+
+      // Find next unattempted stream index in sequence
+      let nextIndex = -1;
+      for (let offset = 1; offset < streams.length; offset++) {
+        const candidate = (failedIndex + offset) % streams.length;
+        if (!attemptedIndicesRef.current.has(candidate)) {
+          nextIndex = candidate;
+          break;
+        }
+      }
+
+      if (nextIndex !== -1) {
+        console.log(`Auto-switching immediately from Server ${failedIndex + 1} to Server ${nextIndex + 1}... (${failureReason || 'Playback failed'})`);
+        showToast(`Server ${failedIndex + 1} unavailable. Switching to Server ${nextIndex + 1}...`, '🔄');
+
+        setIsLoadingStreams(true);
+        setStreamError(null);
+        // Switch immediately without lag!
+        setActiveStreamIndex(nextIndex);
+      } else {
+        console.warn('All available servers have been tried and failed.');
+        setIsLoadingStreams(false);
+        setStreamError('All available servers were unable to play this title. Please try another source or check back later.');
+      }
+    },
+    [streams, showToast]
+  );
+
+  const handleStreamFailureRef = useRef(handleStreamFailure);
+  handleStreamFailureRef.current = handleStreamFailure;
+
   // Load Subtitles
   useEffect(() => {
     if (!activeModalItem || !imdbId) return;
@@ -238,57 +287,9 @@ export const VideoPlayerModal: React.FC = () => {
     });
   }, [imdbId, activeModalItem?.id, activeModalItem?.type, currentSeason, currentEpisode]);
 
-  // Auto-switch states for short dummy/sample clips (e.g. Rickroll / teasers)
-  const isAutoSwitchingRef = useRef<boolean>(false);
-  const invalidServerIndicesRef = useRef<Set<number>>(new Set());
-  const [invalidServerIndices, setInvalidServerIndices] = useState<number[]>([]);
 
-  // Reset invalid servers on title, season, or episode change
-  useEffect(() => {
-    invalidServerIndicesRef.current.clear();
-    setInvalidServerIndices([]);
-    isAutoSwitchingRef.current = false;
-  }, [activeModalItem?.id, currentSeason, currentEpisode]);
 
-  const triggerAutoSwitch = useCallback((badIndex: number, _clipDuration?: number) => {
-    if (isAutoSwitchingRef.current) return;
-    isAutoSwitchingRef.current = true;
-
-    invalidServerIndicesRef.current.add(badIndex);
-    setInvalidServerIndices(Array.from(invalidServerIndicesRef.current));
-
-    // Find next untested server in the list
-    let nextIdx = -1;
-    for (let i = badIndex + 1; i < streams.length; i++) {
-      if (!invalidServerIndicesRef.current.has(i)) {
-        nextIdx = i;
-        break;
-      }
-    }
-    if (nextIdx === -1) {
-      for (let i = 0; i < streams.length; i++) {
-        if (!invalidServerIndicesRef.current.has(i)) {
-          nextIdx = i;
-          break;
-        }
-      }
-    }
-
-    if (nextIdx !== -1 && nextIdx !== badIndex) {
-      // Small clean notification of switching between servers
-      showToast(`Switching to Server ${nextIdx + 1}...`, '⚡');
-
-      // Immediately switch server and auto-play
-      setIsLoadingStreams(true);
-      setActiveStreamIndex(nextIdx);
-      isAutoSwitchingRef.current = false;
-    } else {
-      isAutoSwitchingRef.current = false;
-      setStreamError('All available servers returned short sample clips or errors. Try another title.');
-    }
-  }, [streams, showToast]);
-
-  // Attach Stream to Native Video or HLS.js
+  // Attach Stream to Native Video, HLS.js, DASH.js, or Direct format
   useEffect(() => {
     const video = videoRef.current;
     if (!video || streams.length === 0) return;
@@ -296,28 +297,144 @@ export const VideoPlayerModal: React.FC = () => {
     const stream = streams[activeStreamIndex];
     if (!stream) return;
 
+    // Clean up any active timers
+    if (watchdogTimerRef.current) {
+      window.clearTimeout(watchdogTimerRef.current);
+      watchdogTimerRef.current = null;
+    }
+    if (autoSwitchTimeoutRef.current) {
+      window.clearTimeout(autoSwitchTimeoutRef.current);
+      autoSwitchTimeoutRef.current = null;
+    }
+
+    const clearWatchdog = () => {
+      if (watchdogTimerRef.current) {
+        window.clearTimeout(watchdogTimerRef.current);
+        watchdogTimerRef.current = null;
+      }
+    };
+
+    // 4.5-second connection watchdog: if stream hangs without any data/manifest, auto-switch immediately!
+    watchdogTimerRef.current = window.setTimeout(() => {
+      if (video.readyState === 0) {
+        console.warn(`Server ${activeStreamIndex + 1} did not respond within 4.5s. Switching immediately.`);
+        handleStreamFailureRef.current(activeStreamIndex, 'Connection timed out');
+      }
+    }, 4500);
+
+    const onMediaActive = () => {
+      clearWatchdog();
+    };
+
+    video.addEventListener('loadedmetadata', onMediaActive);
+    video.addEventListener('loadeddata', onMediaActive);
+    video.addEventListener('canplay', onMediaActive);
+    video.addEventListener('playing', onMediaActive);
+    video.addEventListener('timeupdate', onMediaActive);
+
+    // Clean up any active HLS or DASH players
     if (hlsRef.current) {
       hlsRef.current.destroy();
       hlsRef.current = null;
     }
+    if (dashRef.current) {
+      try {
+        dashRef.current.reset();
+      } catch (e) {}
+      dashRef.current = null;
+    }
+
+    const rawUrl = stream.url || '';
+    const cleanUrl = rawUrl.split('?')[0].toLowerCase();
+
+    const isDASH =
+      Boolean(stream.isDASH) ||
+      cleanUrl.endsWith('.mpd') ||
+      rawUrl.toLowerCase().includes('.mpd');
 
     const isM3U8 =
-      stream.isM3U8 !== false &&
-      (stream.url.includes('.m3u8') || !stream.url.match(/\.(mp4|webm|mkv)/i));
+      !isDASH &&
+      (stream.isM3U8 === true ||
+        cleanUrl.endsWith('.m3u8') ||
+        rawUrl.toLowerCase().includes('.m3u8') ||
+        (!cleanUrl.match(/\.(mp4|webm|mkv|ogg|mov)$/i) && !rawUrl.toLowerCase().includes('.mpd')));
 
+    // 1. DASH (.mpd) FORMAT
+    if (isDASH) {
+      setIsLoadingStreams(true);
+      const dashPlayer = dashjs.MediaPlayer().create();
+      dashRef.current = dashPlayer;
+
+      const playbackUrl = stream.proxyUrl || stream.url;
+      dashPlayer.initialize(video, playbackUrl, true);
+
+      dashPlayer.on(dashjs.MediaPlayer.events.STREAM_INITIALIZED, () => {
+        clearWatchdog();
+        setIsLoadingStreams(false);
+        setStreamError(null);
+        resumeSavedPlayback();
+        video.play().then(() => setIsPlaying(true)).catch(() => {});
+      });
+
+      dashPlayer.on(dashjs.MediaPlayer.events.ERROR, (e: any) => {
+        clearWatchdog();
+        console.warn('DASH stream error, switching immediately:', e);
+        handleStreamFailureRef.current(activeStreamIndex, 'DASH error');
+      });
+
+      return () => {
+        clearWatchdog();
+        video.removeEventListener('loadedmetadata', onMediaActive);
+        video.removeEventListener('loadeddata', onMediaActive);
+        video.removeEventListener('canplay', onMediaActive);
+        video.removeEventListener('playing', onMediaActive);
+        video.removeEventListener('timeupdate', onMediaActive);
+        if (dashRef.current) {
+          try {
+            dashRef.current.reset();
+          } catch (e) {}
+          dashRef.current = null;
+        }
+      };
+    }
+
+    // 2. HLS (.m3u8) FORMAT
     if (isM3U8 && Hls.isSupported()) {
+      setIsLoadingStreams(true);
       const hls = new Hls({
         maxBufferLength: 30,
         maxMaxBufferLength: 600,
         enableWorker: true,
+        manifestLoadingTimeOut: 3500,
+        manifestLoadingMaxRetry: 0,
+        levelLoadingTimeOut: 4000,
+        levelLoadingMaxRetry: 1,
+        fragLoadingTimeOut: 4000,
+        fragLoadingMaxRetry: 1,
+        xhrSetup: (xhr) => {
+          if (stream.headers) {
+            for (const [key, val] of Object.entries(stream.headers)) {
+              try {
+                xhr.setRequestHeader(key, val as string);
+              } catch (e) {}
+            }
+          }
+        },
       });
       hlsRef.current = hls;
 
-      hls.loadSource(stream.url);
-      hls.attachMedia(video);
+      let hasRetriedProxy = false;
+      const initialUrl = stream.proxyUrl || stream.url;
+
+      const startHls = (sourceUrl: string) => {
+        hls.loadSource(sourceUrl);
+        hls.attachMedia(video);
+      };
+
+      startHls(initialUrl);
 
       hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
-        // Collect Quality levels
+        clearWatchdog();
         const levels = data.levels.map((lvl, idx) => ({
           id: idx,
           height: lvl.height,
@@ -327,19 +444,10 @@ export const VideoPlayerModal: React.FC = () => {
         setIsLoadingStreams(false);
         setStreamError(null);
 
-        // Resume saved playback timestamp
         resumeSavedPlayback();
         video.play().then(() => {
           setIsPlaying(true);
         }).catch(() => {});
-      });
-
-      hls.on(Hls.Events.LEVEL_LOADED, (event, data) => {
-        const totalDur = data.details?.totalduration;
-        const minAllowed = isTV ? 240 : 480;
-        if (totalDur && isFinite(totalDur) && totalDur > 0 && totalDur < minAllowed) {
-          triggerAutoSwitch(activeStreamIndex, totalDur);
-        }
       });
 
       hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (event, data) => {
@@ -349,7 +457,6 @@ export const VideoPlayerModal: React.FC = () => {
           lang: (t.lang || '').toLowerCase(),
         }));
 
-        // Sort so English audio tracks are prioritized first in the list
         tracks.sort((a, b) => {
           const aEng = a.lang.startsWith('en') || a.name.toLowerCase().includes('eng') || a.name.toLowerCase().includes('english') || a.name.toLowerCase().includes('original') ? -1 : 1;
           const bEng = b.lang.startsWith('en') || b.name.toLowerCase().includes('eng') || b.name.toLowerCase().includes('english') || b.name.toLowerCase().includes('original') ? -1 : 1;
@@ -357,7 +464,6 @@ export const VideoPlayerModal: React.FC = () => {
         });
         setAudioTracks(tracks);
 
-        // Auto-select English audio track if available
         const englishIndex = data.audioTracks.findIndex((t) => {
           const l = (t.lang || '').toLowerCase();
           const n = (t.name || '').toLowerCase();
@@ -372,28 +478,52 @@ export const VideoPlayerModal: React.FC = () => {
       });
 
       hls.on(Hls.Events.ERROR, (event, data) => {
-        if (data.fatal) {
-          console.warn('Fatal HLS stream error, failover to next server...', data);
-          triggerAutoSwitch(activeStreamIndex);
+        const isManifestError =
+          data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
+          data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT ||
+          data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR;
+
+        if (data.fatal || isManifestError) {
+          clearWatchdog();
+          // If direct CDN failed with CORS/network error, transparently retry via server stream proxy!
+          if (!hasRetriedProxy && stream.proxyUrl && initialUrl !== stream.proxyUrl) {
+            hasRetriedProxy = true;
+            console.log('Retrying HLS through backend proxy...', stream.proxyUrl);
+            startHls(stream.proxyUrl);
+            return;
+          }
+
+          console.warn('HLS stream fatal or manifest error, switching immediately:', data.details || data.type);
+          handleStreamFailureRef.current(activeStreamIndex, data.details || 'HLS playback error');
         }
       });
-    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      // Native Apple HLS (iOS Safari, Mobile Chrome on iOS, iPadOS)
-      video.src = stream.url;
+
+      return () => {
+        clearWatchdog();
+        video.removeEventListener('loadedmetadata', onMediaActive);
+        video.removeEventListener('loadeddata', onMediaActive);
+        video.removeEventListener('canplay', onMediaActive);
+        video.removeEventListener('playing', onMediaActive);
+        video.removeEventListener('timeupdate', onMediaActive);
+        if (hlsRef.current) {
+          hlsRef.current.destroy();
+          hlsRef.current = null;
+        }
+      };
+    }
+
+    // 3. NATIVE APPLE HLS (iOS Safari, Mobile Safari)
+    if (isM3U8 && video.canPlayType('application/vnd.apple.mpegurl')) {
+      setIsLoadingStreams(true);
+      const playbackUrl = stream.proxyUrl || stream.url;
+      video.src = playbackUrl;
+
       const onReady = () => {
+        clearWatchdog();
         setIsLoadingStreams(false);
         setStreamError(null);
         resumeSavedPlayback();
 
-        // Check for short sample video
-        const dur = video.duration;
-        const minAllowed = isTV ? 240 : 480;
-        if (dur && isFinite(dur) && dur > 0 && dur < minAllowed) {
-          triggerAutoSwitch(activeStreamIndex, dur);
-          return;
-        }
-
-        // Check native audio tracks and prioritize English
         const v = video as any;
         if (v.audioTracks && v.audioTracks.length > 0) {
           for (let i = 0; i < v.audioTracks.length; i++) {
@@ -408,51 +538,82 @@ export const VideoPlayerModal: React.FC = () => {
           }
         }
 
-        video.play().then(() => {
-          setIsPlaying(true);
-        }).catch(() => {
-          setIsPlaying(false);
-        });
+        video.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
       };
+
       video.addEventListener('loadedmetadata', onReady, { once: true });
       video.addEventListener('canplay', onReady, { once: true });
       video.onerror = () => {
-        triggerAutoSwitch(activeStreamIndex);
+        clearWatchdog();
+        handleStreamFailureRef.current(activeStreamIndex, 'Native HLS error');
       };
-    } else {
-      video.src = stream.url;
-      const onReady = () => {
-        setIsLoadingStreams(false);
-        setStreamError(null);
-        resumeSavedPlayback();
 
-        const dur = video.duration;
-        const minAllowed = isTV ? 240 : 480;
-        if (dur && isFinite(dur) && dur > 0 && dur < minAllowed) {
-          triggerAutoSwitch(activeStreamIndex);
-          return;
-        }
-
-        video.play().then(() => {
-          setIsPlaying(true);
-        }).catch(() => {
-          setIsPlaying(false);
-        });
-      };
-      video.addEventListener('loadeddata', onReady, { once: true });
-      video.addEventListener('canplay', onReady, { once: true });
-      video.onerror = () => {
-        triggerAutoSwitch(activeStreamIndex);
+      return () => {
+        clearWatchdog();
+        video.removeEventListener('loadedmetadata', onMediaActive);
+        video.removeEventListener('loadeddata', onMediaActive);
+        video.removeEventListener('canplay', onMediaActive);
+        video.removeEventListener('playing', onMediaActive);
+        video.removeEventListener('timeupdate', onMediaActive);
       };
     }
 
+    // 4. DIRECT VIDEO FORMATS (MP4, WebM, OGG, Direct TS)
+    setIsLoadingStreams(true);
+    let activeMediaUrl = stream.proxyUrl || stream.url;
+    let hasAttemptedFallback = false;
+    video.src = activeMediaUrl;
+
+    const onDirectReady = () => {
+      clearWatchdog();
+      setIsLoadingStreams(false);
+      setStreamError(null);
+      resumeSavedPlayback();
+
+      video.play().then(() => {
+        setIsPlaying(true);
+      }).catch(() => {
+        setIsPlaying(false);
+      });
+    };
+
+    video.addEventListener('loadeddata', onDirectReady, { once: true });
+    video.addEventListener('canplay', onDirectReady, { once: true });
+    video.onerror = () => {
+      // If direct MP4 failed (e.g. CORS block on CDN), transparently retry through backend stream proxy
+      if (!hasAttemptedFallback && stream.proxyUrl && activeMediaUrl !== stream.proxyUrl) {
+        hasAttemptedFallback = true;
+        activeMediaUrl = stream.proxyUrl;
+        video.src = activeMediaUrl;
+        return;
+      }
+      clearWatchdog();
+      handleStreamFailureRef.current(activeStreamIndex, 'Direct playback error');
+    };
+
     return () => {
+      clearWatchdog();
+      video.removeEventListener('loadedmetadata', onMediaActive);
+      video.removeEventListener('loadeddata', onMediaActive);
+      video.removeEventListener('canplay', onMediaActive);
+      video.removeEventListener('playing', onMediaActive);
+      video.removeEventListener('timeupdate', onMediaActive);
+      if (autoSwitchTimeoutRef.current) {
+        window.clearTimeout(autoSwitchTimeoutRef.current);
+        autoSwitchTimeoutRef.current = null;
+      }
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
+      if (dashRef.current) {
+        try {
+          dashRef.current.reset();
+        } catch (e) {}
+        dashRef.current = null;
+      }
     };
-  }, [streams, activeStreamIndex]);
+  }, [streams, activeStreamIndex, activeModalItem?.id, currentSeason, currentEpisode]);
 
   // Reset resumed status when changing title, season, or episode
   useEffect(() => {
@@ -617,10 +778,6 @@ export const VideoPlayerModal: React.FC = () => {
     const dur = video.duration;
     if (dur && isFinite(dur) && dur > 0) {
       setDuration(dur);
-      const minAllowed = isTV ? 240 : 480;
-      if (dur < minAllowed) {
-        triggerAutoSwitch(activeStreamIndex, dur);
-      }
     }
   };
 
@@ -632,15 +789,6 @@ export const VideoPlayerModal: React.FC = () => {
     const dur = video.duration || 0;
     setCurrentTime(ct);
     setDuration(dur);
-
-    // Auto-detect short video sample / dummy trailer and failover to next server
-    if (dur > 0 && isFinite(dur)) {
-      const minAllowed = isTV ? 240 : 480;
-      if (dur < minAllowed) {
-        triggerAutoSwitch(activeStreamIndex, dur);
-        return;
-      }
-    }
 
     // Skip intro detection
     const stream = streams[activeStreamIndex];
@@ -663,14 +811,6 @@ export const VideoPlayerModal: React.FC = () => {
   };
 
   const handleEnded = () => {
-    const video = videoRef.current;
-    const dur = video?.duration || duration || 0;
-    const minAllowed = isTV ? 240 : 480;
-    if (dur > 0 && isFinite(dur) && dur < minAllowed) {
-      triggerAutoSwitch(activeStreamIndex, dur);
-      return;
-    }
-
     if (isTV) {
       // Auto-advance episode
       const nextEp = currentEpisode + 1;
@@ -1326,6 +1466,7 @@ export const VideoPlayerModal: React.FC = () => {
   };
 
   const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const currentStream = streams[activeStreamIndex];
 
   if (!activeModalItem) return null;
 
@@ -1375,11 +1516,10 @@ export const VideoPlayerModal: React.FC = () => {
             style={{ backgroundImage: `url(${activeModalItem.backdrop || activeModalItem.poster})` }}
           />
 
-          {/* Native Video Stream Element with dynamic brightness filter */}
+          {/* Native HTML5 Video Stream Element */}
           <video
             ref={videoRef}
             playsInline
-            crossOrigin="anonymous"
             style={{ filter: `brightness(${brightness})` }}
             onPlay={() => setIsPlaying(true)}
             onPause={() => {
@@ -1473,7 +1613,9 @@ export const VideoPlayerModal: React.FC = () => {
             <div className="absolute inset-0 z-30 bg-black/75 backdrop-blur-sm flex flex-col items-center justify-center gap-3 text-white pointer-events-none p-4">
               <div className="w-10 h-10 rounded-full border-3 border-red-500 border-t-transparent animate-spin shadow-lg" />
               <div className="text-center">
-                <p className="text-sm font-semibold text-white tracking-wide">Loading stream sources...</p>
+                <p className="text-sm font-semibold text-white tracking-wide">
+                  {streams.length > 0 ? `Connecting to Server ${activeStreamIndex + 1}...` : 'Loading stream sources...'}
+                </p>
                 <p className="text-[11px] text-white/50 mt-0.5">Finding best playback quality</p>
               </div>
             </div>
@@ -1482,26 +1624,42 @@ export const VideoPlayerModal: React.FC = () => {
           {/* Stream Error Notice */}
           {streamError && !isLoadingStreams && (
             <div className="absolute inset-0 z-30 bg-black/85 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center text-white">
-              <p className="text-amber-400 font-bold text-sm max-w-md mb-3">{streamError}</p>
-              <button
-                onClick={() => {
-                  setIsLoadingStreams(true);
-                  setStreamError(null);
-                  setActiveStreamIndex(0);
-                  fetchStreams(activeModalItem.type, activeModalItem.id, currentSeason, currentEpisode)
-                    .then((sList) => {
-                      setStreams(sList);
-                      setIsLoadingStreams(false);
-                    })
-                    .catch(() => {
-                      setIsLoadingStreams(false);
-                      setStreamError('Failed to retrieve streaming sources.');
-                    });
-                }}
-                className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold uppercase tracking-wider px-5 py-2.5 rounded-full transition-all cursor-pointer"
-              >
-                Retry Stream Fetch
-              </button>
+              <p className="text-amber-400 font-bold text-sm max-w-md mb-4">{streamError}</p>
+              <div className="flex items-center gap-3">
+                {streams.length > 1 && (
+                  <button
+                    onClick={() => {
+                      attemptedIndicesRef.current.clear();
+                      const next = (activeStreamIndex + 1) % streams.length;
+                      setActiveStreamIndex(next);
+                      setStreamError(null);
+                    }}
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold uppercase tracking-wider px-5 py-2.5 rounded-full transition-all cursor-pointer shadow-lg shadow-emerald-900/30"
+                  >
+                    Try Next Server
+                  </button>
+                )}
+                <button
+                  onClick={() => {
+                    setIsLoadingStreams(true);
+                    setStreamError(null);
+                    attemptedIndicesRef.current.clear();
+                    setActiveStreamIndex(0);
+                    fetchStreams(activeModalItem.type, activeModalItem.id, currentSeason, currentEpisode)
+                      .then((sList) => {
+                        setStreams(sList);
+                        setIsLoadingStreams(false);
+                      })
+                      .catch(() => {
+                        setIsLoadingStreams(false);
+                        setStreamError('Failed to retrieve streaming sources.');
+                      });
+                  }}
+                  className="bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs font-bold uppercase tracking-wider px-5 py-2.5 rounded-full transition-all cursor-pointer"
+                >
+                  Retry All Servers
+                </button>
+              </div>
             </div>
           )}
 
@@ -2029,13 +2187,20 @@ export const VideoPlayerModal: React.FC = () => {
                   resolutionBadge = rawQuality;
                 }
 
-                const isBadServer = invalidServerIndices.includes(idx);
-
                 return (
                   <button
                     key={idx}
                     onClick={() => {
-                      isAutoSwitchingRef.current = false;
+                      if (watchdogTimerRef.current) {
+                        window.clearTimeout(watchdogTimerRef.current);
+                        watchdogTimerRef.current = null;
+                      }
+                      if (autoSwitchTimeoutRef.current) {
+                        window.clearTimeout(autoSwitchTimeoutRef.current);
+                        autoSwitchTimeoutRef.current = null;
+                      }
+                      attemptedIndicesRef.current.clear();
+                      attemptedIndicesRef.current.add(idx);
                       setActiveStreamIndex(idx);
                       setStreamError(null);
                       showToast(`Connected to Server ${serverNum} · ${resolutionBadge}`, '⚡');
@@ -2043,8 +2208,6 @@ export const VideoPlayerModal: React.FC = () => {
                     className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border shrink-0 transition-all text-xs font-semibold cursor-pointer ${
                       isActive
                         ? 'bg-blue-600 text-white border-blue-400 shadow-md shadow-blue-900/30'
-                        : isBadServer
-                        ? 'bg-rose-950/20 text-slate-400 border-rose-500/20 opacity-60 hover:opacity-85'
                         : 'bg-white/5 hover:bg-white/10 text-slate-300 border-white/10 hover:border-white/20'
                     }`}
                   >
@@ -2053,51 +2216,29 @@ export const VideoPlayerModal: React.FC = () => {
                       className={`w-2 h-2 rounded-full shrink-0 ${
                         isActive
                           ? 'bg-emerald-400 animate-pulse'
-                          : isBadServer
-                          ? 'bg-rose-500'
                           : 'bg-slate-500'
                       }`}
                     />
 
-                    {/* Server Label */}
-                    <span className={`font-semibold text-xs tracking-tight whitespace-nowrap ${isBadServer ? 'line-through text-slate-400' : ''}`}>
+                    {/* Server Label - HIDE ORIGINAL SERVER NAMES */}
+                    <span className="font-semibold text-xs tracking-tight whitespace-nowrap">
                       Server {serverNum}
                     </span>
 
-                    {/* Bad server indicator or Resolution & Language badges */}
-                    {isBadServer ? (
-                      <span className="text-[9px] font-bold px-1.5 py-0.2 rounded border uppercase tracking-tight bg-rose-500/15 text-rose-400 border-rose-500/30">
-                        Short Sample
-                      </span>
-                    ) : (
-                      <>
-                        <span
-                          className={`text-[9px] font-mono font-bold px-1.5 py-0.2 rounded border uppercase tracking-tight ${
-                            isActive
-                              ? 'bg-white/20 text-white border-white/30'
-                              : is4K
-                              ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                              : isFHD
-                              ? 'bg-blue-500/15 text-blue-300 border-blue-500/30'
-                              : 'bg-white/10 text-slate-400 border-white/10'
-                          }`}
-                        >
-                          {resolutionBadge}
-                        </span>
-
-                        <span
-                          className={`text-[9px] font-bold px-1.5 py-0.2 rounded border uppercase tracking-tight ${
-                            isActive
-                              ? 'bg-emerald-400/25 text-emerald-200 border-emerald-300/40'
-                              : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                          }`}
-                        >
-                          {st.language?.toUpperCase().includes('ENG') || st.language?.toLowerCase() === 'english'
-                            ? '🇬🇧 ENG'
-                            : st.language || 'ENG'}
-                        </span>
-                      </>
-                    )}
+                    {/* Resolution badge */}
+                    <span
+                      className={`text-[9px] font-mono font-bold px-1.5 py-0.2 rounded border uppercase tracking-tight ${
+                        isActive
+                          ? 'bg-white/20 text-white border-white/30'
+                          : is4K
+                          ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                          : isFHD
+                          ? 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+                          : 'bg-white/10 text-slate-400 border-white/10'
+                      }`}
+                    >
+                      {resolutionBadge}
+                    </span>
                   </button>
                 );
               })}
