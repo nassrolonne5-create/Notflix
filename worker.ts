@@ -265,13 +265,13 @@ export default {
           ? `${scraperCinepro}/v1/tv/${id}/seasons/${s}/episodes/${e}`
           : `${scraperCinepro}/v1/movies/${id}`;
 
-        const tasks: Promise<any>[] = [fetchWithTimeout(cineproUrl, 30000)];
+        const tasks: Promise<any>[] = [fetchWithTimeout(cineproUrl, 4000)];
 
         if (scraperTmdbEmbed && scraperTmdbEmbed !== scraperCinepro) {
           const tmdbEmbedUrl = isTV
             ? `${scraperTmdbEmbed}/api/streams/series/${id}?s=${s}&e=${e}`
             : `${scraperTmdbEmbed}/api/streams/movie/${id}`;
-          tasks.push(fetchWithTimeout(tmdbEmbedUrl, 30000));
+          tasks.push(fetchWithTimeout(tmdbEmbedUrl, 4000));
         }
 
         const results = await Promise.allSettled(tasks);
