@@ -261,7 +261,7 @@ export const VideoPlayerModal: React.FC = () => {
 
       if (nextIndex !== -1) {
         console.log(`Auto-switching immediately from Server ${failedIndex + 1} to Server ${nextIndex + 1}... (${failureReason || 'Playback failed'})`);
-        showToast(`Server ${failedIndex + 1} unavailable. Switching to Server ${nextIndex + 1}...`, '🔄');
+        showToast('Switching server...', '🔄');
 
         setIsLoadingStreams(true);
         setStreamError(null);
@@ -1508,30 +1508,33 @@ export const VideoPlayerModal: React.FC = () => {
           onMouseMove={showControlsTemporarily}
           onTouchStart={showControlsTemporarily}
           onClick={showControlsTemporarily}
-          className="relative w-full aspect-video bg-black overflow-hidden flex items-center justify-center shrink-0 group select-none"
+          className="relative w-full aspect-video bg-black flex items-center justify-center shrink-0 group select-none"
         >
-          {/* Backdrop Glow */}
-          <div
-            className="absolute inset-0 bg-cover bg-center opacity-30 filter blur-xl scale-110 pointer-events-none"
-            style={{ backgroundImage: `url(${activeModalItem.backdrop || activeModalItem.poster})` }}
-          />
+          {/* Inner Video Layer with overflow-hidden */}
+          <div className="absolute inset-0 overflow-hidden flex items-center justify-center">
+            {/* Backdrop Glow */}
+            <div
+              className="absolute inset-0 bg-cover bg-center opacity-30 filter blur-xl scale-110 pointer-events-none"
+              style={{ backgroundImage: `url(${activeModalItem.backdrop || activeModalItem.poster})` }}
+            />
 
-          {/* Native HTML5 Video Stream Element */}
-          <video
-            ref={videoRef}
-            playsInline
-            style={{ filter: `brightness(${brightness})` }}
-            onPlay={() => setIsPlaying(true)}
-            onPause={() => {
-              setIsPlaying(false);
-              saveCurrentPlaybackNow();
-            }}
-            onTimeUpdate={handleTimeUpdate}
-            onLoadedMetadata={handleLoadedMetadata}
-            onDurationChange={handleLoadedMetadata}
-            onEnded={handleEnded}
-            className="w-full h-full object-contain relative z-10 bg-black transition-[filter] duration-75"
-          />
+            {/* Native HTML5 Video Stream Element */}
+            <video
+              ref={videoRef}
+              playsInline
+              style={{ filter: `brightness(${brightness})` }}
+              onPlay={() => setIsPlaying(true)}
+              onPause={() => {
+                setIsPlaying(false);
+                saveCurrentPlaybackNow();
+              }}
+              onTimeUpdate={handleTimeUpdate}
+              onLoadedMetadata={handleLoadedMetadata}
+              onDurationChange={handleLoadedMetadata}
+              onEnded={handleEnded}
+              className="w-full h-full object-contain relative z-10 bg-black transition-[filter] duration-75"
+            />
+          </div>
 
           {/* Touch Gesture Layer: Swipe vertical for light, swipe horizontal for fast forward/back */}
           <div
@@ -1852,20 +1855,20 @@ export const VideoPlayerModal: React.FC = () => {
           </div>
 
           {/* =========================================
-              FLOATING ACTION PANELS
+              FLOATING ACTION PANELS (RESIZED & DOCKED DOWN)
              ========================================= */}
           {activePanel && (
             <div
               onClick={() => setActivePanel(null)}
-              className="absolute inset-0 z-40 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200"
+              className="absolute inset-0 z-40 bg-black/20 backdrop-blur-[1px] flex items-end justify-center pb-1.5 md:pb-3 p-3 animate-in fade-in duration-200"
             >
               <div
                 onClick={(e) => e.stopPropagation()}
-                className="w-full max-w-sm max-h-[80%] bg-[#131a2a]/95 border border-white/15 rounded-2xl p-4 shadow-2xl overflow-y-auto flex flex-col gap-3 animate-in fade-in zoom-in-95 duration-200"
+                className="w-full max-w-[320px] max-h-56 bg-[#131a2a]/95 border border-white/20 rounded-2xl p-3 shadow-2xl overflow-y-auto flex flex-col gap-2 translate-y-3 md:translate-y-5 animate-in fade-in slide-in-from-bottom-2 duration-200"
               >
                 {/* Panel Header */}
-                <div className="flex items-center justify-between pb-2 border-b border-white/10">
-                  <h3 className="font-bold text-sm text-white capitalize tracking-wide">
+                <div className="flex items-center justify-between pb-1.5 border-b border-white/10 shrink-0">
+                  <h3 className="font-bold text-xs md:text-sm text-white capitalize tracking-wide">
                     {activePanel === 'subtitles' && 'Subtitle Tracks & Sync'}
                     {activePanel === 'quality' && 'Video Resolution'}
                     {activePanel === 'audio' && 'Audio Track (English Prioritized)'}
@@ -1875,7 +1878,8 @@ export const VideoPlayerModal: React.FC = () => {
                   </h3>
                   <button
                     onClick={() => setActivePanel(null)}
-                    className="text-slate-400 hover:text-white p-1 rounded-full"
+                    aria-label="Close"
+                    className="w-6 h-6 rounded-full bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white flex items-center justify-center text-xs transition-colors cursor-pointer"
                   >
                     ✕
                   </button>
@@ -1886,72 +1890,75 @@ export const VideoPlayerModal: React.FC = () => {
                   <div className="flex flex-col gap-2">
                     {/* Subtitle Offset Tool */}
                     {activeSubLabel !== 'Off' && (
-                      <div className="bg-white/5 border border-white/10 rounded-xl p-3 flex items-center justify-between mb-2">
+                      <div className="bg-white/5 border border-white/10 rounded-xl px-2.5 py-1.5 flex items-center justify-between">
                         <div>
-                          <div className="text-xs font-bold text-blue-400 uppercase">Subtitle Sync</div>
-                          <div className="text-[11px] text-slate-400">Shift audio delay</div>
+                          <div className="text-[10px] font-bold text-blue-400 uppercase">Subtitle Sync</div>
+                          <div className="text-[10px] text-slate-400">Shift audio delay</div>
                         </div>
-                        <div className="flex items-center gap-1.5 bg-black/40 px-2 py-1 rounded-lg border border-white/10">
+                        <div className="flex items-center gap-1.5 bg-black/40 px-2 py-0.5 rounded-lg border border-white/10">
                           <button
                             onClick={() => adjustSubOffset(-0.5)}
-                            className="w-6 h-6 rounded bg-white/10 hover:bg-white/20 text-white font-bold text-xs"
+                            className="w-5 h-5 rounded bg-white/10 hover:bg-white/20 text-white font-bold text-xs flex items-center justify-center cursor-pointer"
                           >
-                            <Minus className="w-3 h-3 mx-auto" />
+                            <Minus className="w-3 h-3" />
                           </button>
                           <span className="text-xs font-mono font-bold w-12 text-center text-white">
                             {subOffset > 0 ? `+${subOffset.toFixed(1)}s` : `${subOffset.toFixed(1)}s`}
                           </span>
                           <button
                             onClick={() => adjustSubOffset(0.5)}
-                            className="w-6 h-6 rounded bg-white/10 hover:bg-white/20 text-white font-bold text-xs"
+                            className="w-5 h-5 rounded bg-white/10 hover:bg-white/20 text-white font-bold text-xs flex items-center justify-center cursor-pointer"
                           >
-                            <Plus className="w-3 h-3 mx-auto" />
+                            <Plus className="w-3 h-3" />
                           </button>
                         </div>
                       </div>
                     )}
 
-                    {/* Off Option */}
-                    <button
-                      onClick={() => handleSelectSubtitle('Off')}
-                      className={`flex items-center justify-between p-3 rounded-xl border text-xs font-semibold cursor-pointer transition-all ${
-                        activeSubLabel === 'Off'
-                          ? 'bg-blue-600/20 border-blue-500 text-white'
-                          : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
-                      }`}
-                    >
-                      <span>Off (Disabled)</span>
-                      {activeSubLabel === 'Off' && <span className="text-blue-400 font-bold">✓</span>}
-                    </button>
-
-                    {/* Subtitle Language List */}
-                    {Object.keys(subtitleGroups).map((lang) => (
+                    {/* Subtitle Language List - Compact scrollable */}
+                    <div className="flex flex-col gap-1.5 max-h-36 overflow-y-auto pr-1">
+                      {/* Off Option */}
                       <button
-                        key={lang}
-                        onClick={() => handleSelectSubtitle(lang)}
-                        className={`flex items-center justify-between p-3 rounded-xl border text-xs font-semibold cursor-pointer transition-all ${
-                          activeSubLabel === lang
+                        onClick={() => handleSelectSubtitle('Off')}
+                        className={`flex items-center justify-between px-3 py-1.5 rounded-lg border text-xs font-semibold cursor-pointer transition-all ${
+                          activeSubLabel === 'Off'
                             ? 'bg-blue-600/20 border-blue-500 text-white'
                             : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
                         }`}
                       >
-                        <span className="capitalize">{lang}</span>
-                        {activeSubLabel === lang && <span className="text-blue-400 font-bold">✓</span>}
+                        <span>Off (Disabled)</span>
+                        {activeSubLabel === 'Off' && <span className="text-blue-400 font-bold">✓</span>}
                       </button>
-                    ))}
 
-                    {Object.keys(subtitleGroups).length === 0 && (
-                      <p className="text-xs text-slate-400 text-center py-4">No subtitles found for this title.</p>
-                    )}
+                      {/* Subtitle Language List */}
+                      {Object.keys(subtitleGroups).map((lang) => (
+                        <button
+                          key={lang}
+                          onClick={() => handleSelectSubtitle(lang)}
+                          className={`flex items-center justify-between px-3 py-1.5 rounded-lg border text-xs font-semibold cursor-pointer transition-all ${
+                            activeSubLabel === lang
+                              ? 'bg-blue-600/20 border-blue-500 text-white'
+                              : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
+                          }`}
+                        >
+                          <span className="capitalize">{lang}</span>
+                          {activeSubLabel === lang && <span className="text-blue-400 font-bold">✓</span>}
+                        </button>
+                      ))}
+
+                      {Object.keys(subtitleGroups).length === 0 && (
+                        <p className="text-xs text-slate-400 text-center py-2">No subtitles found for this title.</p>
+                      )}
+                    </div>
                   </div>
                 )}
 
                 {/* Quality Panel Content */}
                 {activePanel === 'quality' && (
-                  <div className="flex flex-col gap-2">
+                  <div className="flex flex-col gap-1.5 max-h-36 overflow-y-auto pr-1">
                     <button
                       onClick={() => handleSelectQuality(-1)}
-                      className={`flex items-center justify-between p-3 rounded-xl border text-xs font-semibold cursor-pointer ${
+                      className={`flex items-center justify-between px-3 py-1.5 rounded-lg border text-xs font-semibold cursor-pointer ${
                         activeQualityId === -1
                           ? 'bg-blue-600/20 border-blue-500 text-white'
                           : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
@@ -1965,7 +1972,7 @@ export const VideoPlayerModal: React.FC = () => {
                       <button
                         key={lvl.id}
                         onClick={() => handleSelectQuality(lvl.id)}
-                        className={`flex items-center justify-between p-3 rounded-xl border text-xs font-semibold cursor-pointer ${
+                        className={`flex items-center justify-between px-3 py-1.5 rounded-lg border text-xs font-semibold cursor-pointer ${
                           activeQualityId === lvl.id
                             ? 'bg-blue-600/20 border-blue-500 text-white'
                             : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
@@ -1980,12 +1987,12 @@ export const VideoPlayerModal: React.FC = () => {
 
                 {/* Playback Speed Content */}
                 {activePanel === 'speed' && (
-                  <div className="flex flex-col gap-2">
+                  <div className="grid grid-cols-3 gap-1.5">
                     {[0.5, 0.75, 1, 1.25, 1.5, 2].map((spd) => (
                       <button
                         key={spd}
                         onClick={() => handleSelectSpeed(spd)}
-                        className={`flex items-center justify-between p-3 rounded-xl border text-xs font-semibold cursor-pointer ${
+                        className={`flex items-center justify-center py-2 px-2 rounded-xl border text-xs font-semibold cursor-pointer ${
                           playbackRate === spd
                             ? 'bg-blue-600/20 border-blue-500 text-white'
                             : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
@@ -2002,7 +2009,7 @@ export const VideoPlayerModal: React.FC = () => {
 
                 {/* Audio Tracks Panel Content (English Prioritized) */}
                 {activePanel === 'audio' && (
-                  <div className="flex flex-col gap-2">
+                  <div className="flex flex-col gap-1.5 max-h-36 overflow-y-auto pr-1">
                     {audioTracks.map((trk) => {
                       const isEng =
                         trk.lang.startsWith('en') ||
@@ -2014,7 +2021,7 @@ export const VideoPlayerModal: React.FC = () => {
                         <button
                           key={trk.id}
                           onClick={() => handleSelectAudio(trk.id)}
-                          className={`flex items-center justify-between p-3 rounded-xl border text-xs font-semibold cursor-pointer ${
+                          className={`flex items-center justify-between px-3 py-1.5 rounded-lg border text-xs font-semibold cursor-pointer ${
                             activeAudioTrackId === trk.id
                               ? 'bg-blue-600/20 border-blue-500 text-white'
                               : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
@@ -2034,7 +2041,7 @@ export const VideoPlayerModal: React.FC = () => {
                     })}
 
                     {audioTracks.length === 0 && (
-                      <p className="text-xs text-slate-400 text-center py-4">
+                      <p className="text-xs text-slate-400 text-center py-2">
                         Default English audio track active.
                       </p>
                     )}
@@ -2043,13 +2050,13 @@ export const VideoPlayerModal: React.FC = () => {
 
                 {/* TV Episodes Panel */}
                 {activePanel === 'episodes' && (
-                  <div className="flex flex-col gap-3">
+                  <div className="flex flex-col gap-2">
                     {/* Season Selector */}
                     <div className="relative">
                       <select
                         value={currentSeason}
                         onChange={(e) => setCurrentSeason(parseInt(e.target.value, 10))}
-                        className="w-full bg-white/10 border border-white/15 text-white text-xs font-bold rounded-xl p-3 outline-none cursor-pointer"
+                        className="w-full bg-white/10 border border-white/15 text-white text-xs font-bold rounded-lg px-3 py-1.5 outline-none cursor-pointer"
                       >
                         {seasons.length > 0 ? (
                           seasons.map((s) => (
@@ -2065,8 +2072,8 @@ export const VideoPlayerModal: React.FC = () => {
                       </select>
                     </div>
 
-                    {/* Episodes List */}
-                    <div className="flex flex-col gap-2 max-h-72 overflow-y-auto pr-1">
+                    {/* Episodes List - Compact scrollable */}
+                    <div className="flex flex-col gap-1 max-h-36 overflow-y-auto pr-1">
                       {episodes.length > 0 ? (
                         episodes.map((ep) => {
                           const isCurrent = ep.episode_number === currentEpisode;
@@ -2078,13 +2085,13 @@ export const VideoPlayerModal: React.FC = () => {
                                 setCurrentEpisode(ep.episode_number);
                                 setActivePanel(null);
                               }}
-                              className={`flex items-center gap-3 p-3 rounded-xl border text-left cursor-pointer transition-all ${
+                              className={`flex items-center gap-2.5 px-3 py-1.5 rounded-lg border text-left cursor-pointer transition-all ${
                                 isCurrent
                                   ? 'bg-blue-600/20 border-blue-500 text-white'
                                   : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
                               }`}
                             >
-                              <span className="font-bold text-sm text-slate-400 w-6 shrink-0">
+                              <span className="font-bold text-xs text-slate-400 w-5 shrink-0">
                                 {ep.episode_number}
                               </span>
                               <div className="flex-1 truncate">
@@ -2093,7 +2100,7 @@ export const VideoPlayerModal: React.FC = () => {
                                 </div>
                               </div>
                               {isCurrent && (
-                                <span className="text-[10px] uppercase font-bold text-blue-400 bg-blue-500/20 px-2 py-0.5 rounded">
+                                <span className="text-[9px] uppercase font-bold text-blue-400 bg-blue-500/20 px-2 py-0.5 rounded">
                                   Playing
                                 </span>
                               )}
@@ -2101,7 +2108,7 @@ export const VideoPlayerModal: React.FC = () => {
                           );
                         })
                       ) : (
-                        <div className="text-xs text-slate-400 text-center py-6">
+                        <div className="text-xs text-slate-400 text-center py-3">
                           Loading episodes...
                         </div>
                       )}
@@ -2111,7 +2118,7 @@ export const VideoPlayerModal: React.FC = () => {
 
                 {/* Keyboard Shortcuts Content */}
                 {activePanel === 'shortcuts' && (
-                  <div className="flex flex-col gap-2 py-1">
+                  <div className="flex flex-col gap-1.5 max-h-36 overflow-y-auto pr-1">
                     {[
                       { key: 'Space / K', desc: 'Play / Pause Video' },
                       { key: 'M', desc: 'Mute / Unmute Audio' },
@@ -2125,10 +2132,10 @@ export const VideoPlayerModal: React.FC = () => {
                     ].map((item) => (
                       <div
                         key={item.key}
-                        className="flex items-center justify-between p-2.5 rounded-xl bg-white/5 border border-white/5 text-xs"
+                        className="flex items-center justify-between p-2 rounded-xl bg-white/5 border border-white/5 text-xs"
                       >
                         <span className="text-slate-300 font-medium">{item.desc}</span>
-                        <kbd className="px-2 py-1 rounded bg-black/60 border border-white/20 font-mono font-bold text-amber-300 text-[11px] shadow-sm">
+                        <kbd className="px-1.5 py-0.5 rounded bg-black/60 border border-white/20 font-mono font-bold text-amber-300 text-[10px] shadow-sm">
                           {item.key}
                         </kbd>
                       </div>

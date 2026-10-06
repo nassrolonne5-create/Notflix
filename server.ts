@@ -7,6 +7,14 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+// Prevent container crashes from unhandled network exceptions or socket resets
+process.on('uncaughtException', (err) => {
+  console.error('🛡️ Handled uncaughtException:', err?.message || err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('🛡️ Handled unhandledRejection:', reason);
+});
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
