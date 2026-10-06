@@ -1864,22 +1864,38 @@ export const VideoPlayerModal: React.FC = () => {
             >
               <div
                 onClick={(e) => e.stopPropagation()}
-                className="w-full max-w-[320px] max-h-56 bg-[#131a2a]/95 border border-white/20 rounded-2xl p-3 shadow-2xl overflow-y-auto flex flex-col gap-2 translate-y-3 md:translate-y-5 animate-in fade-in slide-in-from-bottom-2 duration-200"
+                className={`w-full ${
+                  activePanel === 'subtitles'
+                    ? 'max-w-[240px] max-h-44'
+                    : activePanel === 'episodes'
+                    ? 'max-w-[340px] max-h-60'
+                    : 'max-w-[300px] max-h-56'
+                } bg-[#131a2a]/95 border border-white/20 rounded-xl p-2.5 shadow-2xl overflow-y-auto flex flex-col gap-1.5 translate-y-3 md:translate-y-4 animate-in fade-in slide-in-from-bottom-2 duration-200`}
               >
                 {/* Panel Header */}
-                <div className="flex items-center justify-between pb-1.5 border-b border-white/10 shrink-0">
-                  <h3 className="font-bold text-xs md:text-sm text-white capitalize tracking-wide">
-                    {activePanel === 'subtitles' && 'Subtitle Tracks & Sync'}
+                <div className="flex items-center justify-between pb-1 border-b border-white/10 shrink-0">
+                  <h3 className="font-bold text-[11px] md:text-xs text-white capitalize tracking-wide flex items-center gap-1.5">
+                    {activePanel === 'subtitles' && (
+                      <>
+                        <Subtitles className="w-3 h-3 text-blue-400" />
+                        <span>Subtitles</span>
+                      </>
+                    )}
                     {activePanel === 'quality' && 'Video Resolution'}
                     {activePanel === 'audio' && 'Audio Track (English Prioritized)'}
                     {activePanel === 'speed' && 'Playback Speed'}
-                    {activePanel === 'episodes' && `Select Episode (Season ${currentSeason})`}
+                    {activePanel === 'episodes' && (
+                      <>
+                        <Layers className="w-3 h-3 text-blue-400" />
+                        <span>Episodes (Season {currentSeason})</span>
+                      </>
+                    )}
                     {activePanel === 'shortcuts' && 'Keyboard Shortcuts'}
                   </h3>
                   <button
                     onClick={() => setActivePanel(null)}
                     aria-label="Close"
-                    className="w-6 h-6 rounded-full bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white flex items-center justify-center text-xs transition-colors cursor-pointer"
+                    className="w-5 h-5 rounded-full bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white flex items-center justify-center text-[11px] transition-colors cursor-pointer"
                   >
                     ✕
                   </button>
@@ -1887,47 +1903,47 @@ export const VideoPlayerModal: React.FC = () => {
 
                 {/* Subtitles Panel Content */}
                 {activePanel === 'subtitles' && (
-                  <div className="flex flex-col gap-2">
+                  <div className="flex flex-col gap-1.5">
                     {/* Subtitle Offset Tool */}
                     {activeSubLabel !== 'Off' && (
-                      <div className="bg-white/5 border border-white/10 rounded-xl px-2.5 py-1.5 flex items-center justify-between">
+                      <div className="bg-white/5 border border-white/10 rounded-lg px-2 py-1 flex items-center justify-between">
                         <div>
-                          <div className="text-[10px] font-bold text-blue-400 uppercase">Subtitle Sync</div>
-                          <div className="text-[10px] text-slate-400">Shift audio delay</div>
+                          <div className="text-[9px] font-bold text-blue-400 uppercase leading-none">Sync Delay</div>
+                          <div className="text-[8px] text-slate-400 leading-none mt-0.5">Offset audio</div>
                         </div>
-                        <div className="flex items-center gap-1.5 bg-black/40 px-2 py-0.5 rounded-lg border border-white/10">
+                        <div className="flex items-center gap-1 bg-black/40 px-1.5 py-0.5 rounded border border-white/10">
                           <button
                             onClick={() => adjustSubOffset(-0.5)}
-                            className="w-5 h-5 rounded bg-white/10 hover:bg-white/20 text-white font-bold text-xs flex items-center justify-center cursor-pointer"
+                            className="w-4 h-4 rounded bg-white/10 hover:bg-white/20 text-white font-bold text-[10px] flex items-center justify-center cursor-pointer"
                           >
-                            <Minus className="w-3 h-3" />
+                            <Minus className="w-2.5 h-2.5" />
                           </button>
-                          <span className="text-xs font-mono font-bold w-12 text-center text-white">
+                          <span className="text-[10px] font-mono font-bold w-9 text-center text-white">
                             {subOffset > 0 ? `+${subOffset.toFixed(1)}s` : `${subOffset.toFixed(1)}s`}
                           </span>
                           <button
                             onClick={() => adjustSubOffset(0.5)}
-                            className="w-5 h-5 rounded bg-white/10 hover:bg-white/20 text-white font-bold text-xs flex items-center justify-center cursor-pointer"
+                            className="w-4 h-4 rounded bg-white/10 hover:bg-white/20 text-white font-bold text-[10px] flex items-center justify-center cursor-pointer"
                           >
-                            <Plus className="w-3 h-3" />
+                            <Plus className="w-2.5 h-2.5" />
                           </button>
                         </div>
                       </div>
                     )}
 
-                    {/* Subtitle Language List - Compact scrollable */}
-                    <div className="flex flex-col gap-1.5 max-h-36 overflow-y-auto pr-1">
+                    {/* Subtitle Language List - Ultra-compact scrollable */}
+                    <div className="flex flex-col gap-1 max-h-28 overflow-y-auto pr-0.5">
                       {/* Off Option */}
                       <button
                         onClick={() => handleSelectSubtitle('Off')}
-                        className={`flex items-center justify-between px-3 py-1.5 rounded-lg border text-xs font-semibold cursor-pointer transition-all ${
+                        className={`flex items-center justify-between px-2.5 py-1 rounded-md border text-[11px] font-medium cursor-pointer transition-all ${
                           activeSubLabel === 'Off'
-                            ? 'bg-blue-600/20 border-blue-500 text-white'
+                            ? 'bg-blue-600/25 border-blue-500 text-white font-semibold'
                             : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
                         }`}
                       >
                         <span>Off (Disabled)</span>
-                        {activeSubLabel === 'Off' && <span className="text-blue-400 font-bold">✓</span>}
+                        {activeSubLabel === 'Off' && <span className="text-blue-400 font-bold text-[10px]">✓</span>}
                       </button>
 
                       {/* Subtitle Language List */}
@@ -1935,19 +1951,19 @@ export const VideoPlayerModal: React.FC = () => {
                         <button
                           key={lang}
                           onClick={() => handleSelectSubtitle(lang)}
-                          className={`flex items-center justify-between px-3 py-1.5 rounded-lg border text-xs font-semibold cursor-pointer transition-all ${
+                          className={`flex items-center justify-between px-2.5 py-1 rounded-md border text-[11px] font-medium cursor-pointer transition-all ${
                             activeSubLabel === lang
-                              ? 'bg-blue-600/20 border-blue-500 text-white'
+                              ? 'bg-blue-600/25 border-blue-500 text-white font-semibold'
                               : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
                           }`}
                         >
-                          <span className="capitalize">{lang}</span>
-                          {activeSubLabel === lang && <span className="text-blue-400 font-bold">✓</span>}
+                          <span className="capitalize truncate max-w-[170px]">{lang}</span>
+                          {activeSubLabel === lang && <span className="text-blue-400 font-bold text-[10px]">✓</span>}
                         </button>
                       ))}
 
                       {Object.keys(subtitleGroups).length === 0 && (
-                        <p className="text-xs text-slate-400 text-center py-2">No subtitles found for this title.</p>
+                        <p className="text-[11px] text-slate-400 text-center py-1.5">No subtitles found.</p>
                       )}
                     </div>
                   </div>
@@ -2051,25 +2067,31 @@ export const VideoPlayerModal: React.FC = () => {
                 {/* TV Episodes Panel */}
                 {activePanel === 'episodes' && (
                   <div className="flex flex-col gap-2">
-                    {/* Season Selector */}
-                    <div className="relative">
-                      <select
-                        value={currentSeason}
-                        onChange={(e) => setCurrentSeason(parseInt(e.target.value, 10))}
-                        className="w-full bg-white/10 border border-white/15 text-white text-xs font-bold rounded-lg px-3 py-1.5 outline-none cursor-pointer"
-                      >
-                        {seasons.length > 0 ? (
-                          seasons.map((s) => (
-                            <option key={s.season_number} value={s.season_number} className="bg-[#131a2a] text-white">
+                    {/* Season Switcher Pills Bar Inside S.E Window */}
+                    <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin shrink-0">
+                      {seasons.length > 0 ? (
+                        seasons.map((s) => {
+                          const isSelected = s.season_number === currentSeason;
+                          return (
+                            <button
+                              key={s.season_number}
+                              type="button"
+                              onClick={() => setCurrentSeason(s.season_number)}
+                              className={`px-3 py-1 rounded-lg text-xs font-bold whitespace-nowrap transition-all cursor-pointer ${
+                                isSelected
+                                  ? 'bg-blue-600 text-white border border-blue-400 shadow-sm shadow-blue-900/40'
+                                  : 'bg-white/10 hover:bg-white/20 text-slate-300 border border-white/10'
+                              }`}
+                            >
                               Season {s.season_number}
-                            </option>
-                          ))
-                        ) : (
-                          <option value={currentSeason} className="bg-[#131a2a] text-white">
-                            Season {currentSeason}
-                          </option>
-                        )}
-                      </select>
+                            </button>
+                          );
+                        })
+                      ) : (
+                        <div className="px-3 py-1 rounded-lg text-xs font-bold bg-blue-600 text-white">
+                          Season {currentSeason}
+                        </div>
+                      )}
                     </div>
 
                     {/* Episodes List - Compact scrollable */}
