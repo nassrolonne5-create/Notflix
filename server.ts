@@ -243,6 +243,27 @@ async function fetchWithTimeout(url: string, ms = 25000): Promise<any> {
   }
 }
 
+async function fetchWithRetry(url: string, ms = 25000, maxRetries = 1): Promise<any> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const data = await fetchWithTimeout(url, ms);
+    if (data) {
+      const hasStreams =
+        (Array.isArray(data.streams) && data.streams.length > 0) ||
+        (Array.isArray(data.sources) && data.sources.length > 0) ||
+        (Array.isArray(data.results) && data.results.length > 0) ||
+        (Array.isArray(data.data) && data.data.length > 0);
+      if (hasStreams) return data;
+      // If data is returned but streams list is empty, keep if last attempt
+      if (attempt === maxRetries) return data;
+    }
+    if (attempt < maxRetries) {
+      console.log(`[Scraper Retry] API timeout or empty response from ${url.slice(0, 60)}... Auto-retrying (Attempt ${attempt + 2}/${maxRetries + 1})...`);
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
+  }
+  return null;
+}
+
 // In-memory cache for cinepro subtitles
 const subtitleCache = new Map<string, any[]>();
 
@@ -463,15 +484,15 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
       ? `${SCRAPER_API_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}`
       : `${SCRAPER_API_CINEPRO}/v1/movies/${id}`;
 
-    // 10-second timeout allows scrapers on cold/uncached titles enough time to finish all 19 providers
-    const tasks: Promise<any>[] = [fetchWithTimeout(cineproUrl, 10000)];
+    // 25-second timeout gives multi-provider scrapers sufficient time to resolve with auto-retry
+    const tasks: Promise<any>[] = [fetchWithRetry(cineproUrl, 25000, 1)];
 
     let tmdbEmbedUrl = '';
     if (SCRAPER_API_TMDB_EMBED && SCRAPER_API_TMDB_EMBED !== SCRAPER_API_CINEPRO) {
       tmdbEmbedUrl = isTV
         ? `${SCRAPER_API_TMDB_EMBED}/api/streams/series/${id}?s=${s}&e=${e}`
         : `${SCRAPER_API_TMDB_EMBED}/api/streams/movie/${id}`;
-      tasks.push(fetchWithTimeout(tmdbEmbedUrl, 10000));
+      tasks.push(fetchWithRetry(tmdbEmbedUrl, 25000, 1));
     }
 
     const results = await Promise.allSettled(tasks);
@@ -499,12 +520,13 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
       }
     }
 
-    // If scrapers returned 0 streams, check Coolify gateway mirror
+    // If scrapers returned 0 streams, check Coolify gateway mirror with retry
     if (combined.length === 0) {
       const query = isTV ? `?s=${s}&e=${e}` : '';
-      const gatewayData = await fetchWithTimeout(
+      const gatewayData = await fetchWithRetry(
         `http://kufenvi0cy9unwwgipjiluoh.62.171.179.144.sslip.io/api/streams/${type}/${id}${query}`,
-        8000
+        15000,
+        1
       );
       if (gatewayData && Array.isArray(gatewayData.streams) && gatewayData.streams.length > 0) {
         combined = gatewayData.streams;

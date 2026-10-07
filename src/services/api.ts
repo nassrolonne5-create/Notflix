@@ -526,80 +526,103 @@ export async function fetchStreams(
   }
   const queryString = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
 
-  // 1. Try Backend Server Proxy first
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 14000);
-    const res = await fetch(`/api/streams/${type}/${id}${queryString}`, {
-      signal: controller.signal,
-      cache: forceRefresh ? 'no-cache' : 'default',
-    });
-    clearTimeout(timer);
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data.streams) && data.streams.length > 0) {
-        streamClientCache.set(cacheKey, { streams: data.streams, timestamp: Date.now() });
-        return data.streams;
+  // 1. Try Backend Server Proxy first with increased timeout (28s) and automatic retry
+  for (let backendAttempt = 1; backendAttempt <= 2; backendAttempt++) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 28000);
+      const res = await fetch(`/api/streams/${type}/${id}${queryString}`, {
+        signal: controller.signal,
+        cache: forceRefresh || backendAttempt > 1 ? 'no-cache' : 'default',
+      });
+      clearTimeout(timer);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.streams) && data.streams.length > 0) {
+          streamClientCache.set(cacheKey, { streams: data.streams, timestamp: Date.now() });
+          return data.streams;
+        }
+      }
+    } catch {
+      // If attempt 1 timed out or failed, brief backoff then retry backend before falling back to direct scrapers
+      if (backendAttempt < 2) {
+        await new Promise((r) => setTimeout(r, 600));
       }
     }
-  } catch {
-    // Backend unavailable or slow, immediately fallback to direct scrapers
   }
 
-  // 2. Direct Scraper Fallback (Ensures 100% reliability on any host: Cloudflare Pages, Netlify, Preview, Mobile)
-  try {
-    const isTV = type === 'tv';
-    const cineproUrl = isTV
-      ? `${SCRAPER_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}`
-      : `${SCRAPER_CINEPRO}/v1/movies/${id}`;
+  // 2. Direct Scraper Fallback with 25s timeout and auto-retry
+  for (let directAttempt = 1; directAttempt <= 2; directAttempt++) {
+    try {
+      const isTV = type === 'tv';
+      const cineproUrl = isTV
+        ? `${SCRAPER_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}`
+        : `${SCRAPER_CINEPRO}/v1/movies/${id}`;
 
-    const tasks: Promise<any>[] = [
-      fetch(cineproUrl, { headers: { Accept: 'application/json' } }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
-    ];
+      const fetchDirect = (url: string) => {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 25000);
+        return fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } })
+          .then((r) => {
+            clearTimeout(t);
+            return r.ok ? r.json() : null;
+          })
+          .catch(() => {
+            clearTimeout(t);
+            return null;
+          });
+      };
 
-    if (SCRAPER_TMDB_EMBED && SCRAPER_TMDB_EMBED !== SCRAPER_CINEPRO) {
-      const tmdbEmbedUrl = isTV
-        ? `${SCRAPER_TMDB_EMBED}/api/streams/series/${id}?s=${s}&e=${e}`
-        : `${SCRAPER_TMDB_EMBED}/api/streams/movie/${id}`;
-      tasks.push(
-        fetch(tmdbEmbedUrl, { headers: { Accept: 'application/json' } }).then((r) => (r.ok ? r.json() : null)).catch(() => null)
-      );
+      const tasks: Promise<any>[] = [fetchDirect(cineproUrl)];
+
+      if (SCRAPER_TMDB_EMBED && SCRAPER_TMDB_EMBED !== SCRAPER_CINEPRO) {
+        const tmdbEmbedUrl = isTV
+          ? `${SCRAPER_TMDB_EMBED}/api/streams/series/${id}?s=${s}&e=${e}`
+          : `${SCRAPER_TMDB_EMBED}/api/streams/movie/${id}`;
+        tasks.push(fetchDirect(tmdbEmbedUrl));
+      }
+
+      const results = await Promise.allSettled(tasks);
+      let combined: StreamSource[] = [];
+
+      // CinePro streams
+      if (results[0].status === 'fulfilled' && results[0].value) {
+        combined = combined.concat(normalizeClientStreams(results[0].value, 'CinePro'));
+      }
+
+      // TMDB Embed Scraper streams
+      if (results[1] && results[1].status === 'fulfilled' && results[1].value) {
+        combined = combined.concat(normalizeClientStreams(results[1].value, 'TMDB Embed'));
+      }
+
+      if (combined.length > 0) {
+        const sorted = [...combined].sort((a, b) => {
+          const strA = `${a.provider || ''} ${a.quality || ''} ${a.rawTitle || ''}`.toUpperCase();
+          const strB = `${b.provider || ''} ${b.quality || ''} ${b.rawTitle || ''}`.toUpperCase();
+          const aMulti = strA.includes('MULTI') || strA.includes('DUAL') ? 1 : 0;
+          const bMulti = strB.includes('MULTI') || strB.includes('DUAL') ? 1 : 0;
+          if (aMulti !== bMulti) return bMulti - aMulti;
+
+          const a4K = strA.includes('4K') || strA.includes('2160') ? 1 : 0;
+          const b4K = strB.includes('4K') || strB.includes('2160') ? 1 : 0;
+          if (a4K !== b4K) return b4K - a4K;
+
+          const a1080 = strA.includes('1080') ? 1 : 0;
+          const b1080 = strB.includes('1080') ? 1 : 0;
+          return b1080 - a1080;
+        });
+        streamClientCache.set(cacheKey, { streams: sorted, timestamp: Date.now() });
+        return sorted;
+      }
+
+      if (directAttempt < 2) {
+        await new Promise((r) => setTimeout(r, 600));
+      }
+    } catch {
+      if (directAttempt < 2) {
+        await new Promise((r) => setTimeout(r, 600));
+      }
     }
-
-    const results = await Promise.allSettled(tasks);
-    let combined: StreamSource[] = [];
-
-    // CinePro streams
-    if (results[0].status === 'fulfilled' && results[0].value) {
-      combined = combined.concat(normalizeClientStreams(results[0].value, 'CinePro'));
-    }
-
-    // TMDB Embed Scraper streams
-    if (results[1] && results[1].status === 'fulfilled' && results[1].value) {
-      combined = combined.concat(normalizeClientStreams(results[1].value, 'TMDB Embed'));
-    }
-
-    if (combined.length > 0) {
-      const sorted = [...combined].sort((a, b) => {
-        const strA = `${a.provider || ''} ${a.quality || ''} ${a.rawTitle || ''}`.toUpperCase();
-        const strB = `${b.provider || ''} ${b.quality || ''} ${b.rawTitle || ''}`.toUpperCase();
-        const aMulti = strA.includes('MULTI') || strA.includes('DUAL') ? 1 : 0;
-        const bMulti = strB.includes('MULTI') || strB.includes('DUAL') ? 1 : 0;
-        if (aMulti !== bMulti) return bMulti - aMulti;
-
-        const a4K = strA.includes('4K') || strA.includes('2160') ? 1 : 0;
-        const b4K = strB.includes('4K') || strB.includes('2160') ? 1 : 0;
-        if (a4K !== b4K) return b4K - a4K;
-
-        const a1080 = strA.includes('1080') ? 1 : 0;
-        const b1080 = strB.includes('1080') ? 1 : 0;
-        return b1080 - a1080;
-      });
-      streamClientCache.set(cacheKey, { streams: sorted, timestamp: Date.now() });
-      return sorted;
-    }
-  } catch {
-    // Direct scraper quiet catch
   }
 
   // Return empty list if no valid media streams found (iframe fallbacks completely removed)

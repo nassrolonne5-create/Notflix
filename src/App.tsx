@@ -10,7 +10,6 @@ import { LibraryPage } from './pages/LibraryPage';
 import { SearchPage } from './pages/SearchPage';
 import { AdminPage } from './pages/AdminPage';
 import { VideoPlayerModal } from './components/VideoPlayerModal';
-import { QuickViewModal } from './components/QuickViewModal';
 import { SettingsModal } from './components/SettingsModal';
 import { Toast } from './components/Toast';
 import { ResumeBanner } from './components/ResumeBanner';
@@ -94,9 +93,6 @@ const AppContent: React.FC = () => {
 
       {/* Video Player Modal */}
       {activeModalItem && <VideoPlayerModal />}
-
-      {/* Quick View Modal */}
-      {quickViewItem && <QuickViewModal />}
 
       {/* Settings Modal */}
       <SettingsModal />

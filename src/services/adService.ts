@@ -101,14 +101,32 @@ export function triggerAd(type: AdTriggerType, videoElement?: HTMLVideoElement |
     }
 
     // Open external page without replacing movie page
-    if ((window as any).AndroidInterface?.openExternal) {
+    const openAdTab = () => {
       try {
-        (window as any).AndroidInterface.openExternal(SMART_LINK_URL);
+        if ((window as any).AndroidInterface?.openExternal) {
+          (window as any).AndroidInterface.openExternal(SMART_LINK_URL);
+          return;
+        }
+      } catch {}
+
+      try {
+        const link = document.createElement('a');
+        link.href = SMART_LINK_URL;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
       } catch {
         window.open(SMART_LINK_URL, '_blank', 'noopener,noreferrer');
       }
+    };
+
+    if (type === 'fullscreen') {
+      // In fullscreen, dispatch via microtask/short tick so native requestFullscreen & orientation lock claim priority
+      setTimeout(openAdTab, 60);
     } else {
-      window.open(SMART_LINK_URL, '_blank', 'noopener,noreferrer');
+      openAdTab();
     }
 
     return true;

@@ -112,8 +112,13 @@ export const VideoPlayerModal: React.FC = () => {
   const autoSwitchTimeoutRef = useRef<number | null>(null);
   const watchdogTimerRef = useRef<number | null>(null);
 
-  // Aspect Ratio & Edge-to-Edge state ('cover' = Edge-to-Edge Fill, 'contain' = Original Fit)
-  const [videoFit, setVideoFit] = useState<'cover' | 'contain'>('cover');
+  // Scraper Timeout & Auto-Retry state
+  const [streamLoadAttempt, setStreamLoadAttempt] = useState<number>(1);
+  const [retryCountdown, setRetryCountdown] = useState<number | null>(null);
+  const retryCountdownTimerRef = useRef<number | null>(null);
+
+  // Aspect Ratio & Edge-to-Edge state ('cover' = Edge-to-Edge Fill, 'fill' = Stretch Full Screen, 'contain' = Original Fit)
+  const [videoFit, setVideoFit] = useState<'cover' | 'fill' | 'contain'>('cover');
 
   // Gesture states (Swipe to adjust Brightness & Seek)
   const [brightness, setBrightness] = useState<number>(1.0);
@@ -189,58 +194,116 @@ export const VideoPlayerModal: React.FC = () => {
     });
   }, [activeModalItem?.id, activeModalItem?.type]);
 
-  // Load Streams from backend
-  useEffect(() => {
-    if (!activeModalItem) return;
+  // Auto-retry countdown helper
+  const startAutoRetryCountdown = useCallback(() => {
+    if (retryCountdownTimerRef.current) {
+      window.clearInterval(retryCountdownTimerRef.current);
+    }
+    let count = 5;
+    setRetryCountdown(count);
+    retryCountdownTimerRef.current = window.setInterval(() => {
+      count--;
+      if (count <= 0) {
+        if (retryCountdownTimerRef.current) {
+          window.clearInterval(retryCountdownTimerRef.current);
+          retryCountdownTimerRef.current = null;
+        }
+        setRetryCountdown(null);
+        loadStreamsWithRetry(true);
+      } else {
+        setRetryCountdown(count);
+      }
+    }, 1000);
+  }, []);
 
-    let isMounted = true;
-    setIsLoadingStreams(true);
-    setStreamError(null);
-    setStreams([]);
-    setActiveStreamIndex(0);
+  // Load Streams with increased timeout & automatic multi-attempt retry
+  const loadStreamsWithRetry = useCallback(
+    async (force = false) => {
+      if (!activeModalItem) return;
+      if (retryCountdownTimerRef.current) {
+        window.clearInterval(retryCountdownTimerRef.current);
+        retryCountdownTimerRef.current = null;
+      }
+      setRetryCountdown(null);
+      setIsLoadingStreams(true);
+      setStreamError(null);
+      setStreams([]);
+      setActiveStreamIndex(0);
 
-    fetchStreams(activeModalItem.type, activeModalItem.id, currentSeason, currentEpisode)
-      .then((fetchedStreams) => {
-        if (!isMounted) return;
-        if (!fetchedStreams || fetchedStreams.length === 0) {
-          setStreamError('No playable streams responded. Try checking other servers or titles.');
-          setIsLoadingStreams(false);
-          return;
+      const maxAttempts = 3;
+      let loaded: StreamSource[] = [];
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        setStreamLoadAttempt(attempt);
+
+        try {
+          const fetchedStreams = await fetchStreams(
+            activeModalItem.type,
+            activeModalItem.id,
+            currentSeason,
+            currentEpisode,
+            force || attempt > 1
+          );
+
+          if (fetchedStreams && fetchedStreams.length > 0) {
+            loaded = fetchedStreams;
+            break;
+          }
+        } catch (err) {
+          console.warn(`Stream scraper attempt ${attempt} failed:`, err);
         }
 
-        // Prioritize English language audio servers to show first
-        const sortedStreams = [...fetchedStreams].sort((a, b) => {
-          const aText = `${a.provider || ''} ${a.quality || ''} ${a.rawTitle || ''} ${a.language || ''}`.toUpperCase();
-          const bText = `${b.provider || ''} ${b.quality || ''} ${b.rawTitle || ''} ${b.language || ''}`.toUpperCase();
+        // Brief delay between attempts to allow backend and scrapers to complete
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 1200));
+        }
+      }
 
-          const aIsEng = aText.includes('ENG') || aText.includes('ENGLISH') || aText.includes('ORIGINAL') || a.language?.toLowerCase() === 'english';
-          const bIsEng = bText.includes('ENG') || bText.includes('ENGLISH') || bText.includes('ORIGINAL') || b.language?.toLowerCase() === 'english';
-
-          const aForeign = (aText.includes('HINDI') || aText.includes('LATINO') || aText.includes('ESPANOL') || aText.includes('FRENCH') || aText.includes('GERMAN') || aText.includes('RUSSIAN')) && !aIsEng;
-          const bForeign = (bText.includes('HINDI') || bText.includes('LATINO') || bText.includes('ESPANOL') || bText.includes('FRENCH') || bText.includes('GERMAN') || bText.includes('RUSSIAN')) && !bIsEng;
-
-          if (aIsEng && !bIsEng) return -1;
-          if (!aIsEng && bIsEng) return 1;
-          if (aForeign && !bForeign) return 1;
-          if (!aForeign && bForeign) return -1;
-          return 0;
-        });
-
-        attemptedIndicesRef.current.clear();
-        attemptedIndicesRef.current.add(0);
-        setStreams(sortedStreams);
+      if (!loaded || loaded.length === 0) {
+        setStreamError('Streaming APIs took longer than expected to respond. Auto-retrying shortly...');
         setIsLoadingStreams(false);
-      })
-      .catch(() => {
-        if (!isMounted) return;
-        setStreamError('Failed to retrieve streaming sources from backend.');
-        setIsLoadingStreams(false);
+        setStreamLoadAttempt(1);
+        startAutoRetryCountdown();
+        return;
+      }
+
+      // Prioritize English language audio servers to show first
+      const sortedStreams = [...loaded].sort((a, b) => {
+        const aText = `${a.provider || ''} ${a.quality || ''} ${a.rawTitle || ''} ${a.language || ''}`.toUpperCase();
+        const bText = `${b.provider || ''} ${b.quality || ''} ${b.rawTitle || ''} ${b.language || ''}`.toUpperCase();
+
+        const aIsEng = aText.includes('ENG') || aText.includes('ENGLISH') || aText.includes('ORIGINAL') || a.language?.toLowerCase() === 'english';
+        const bIsEng = bText.includes('ENG') || bText.includes('ENGLISH') || bText.includes('ORIGINAL') || b.language?.toLowerCase() === 'english';
+
+        const aForeign = (aText.includes('HINDI') || aText.includes('LATINO') || aText.includes('ESPANOL') || aText.includes('FRENCH') || aText.includes('GERMAN') || aText.includes('RUSSIAN')) && !aIsEng;
+        const bForeign = (bText.includes('HINDI') || bText.includes('LATINO') || bText.includes('ESPANOL') || bText.includes('FRENCH') || bText.includes('GERMAN') || bText.includes('RUSSIAN')) && !bIsEng;
+
+        if (aIsEng && !bIsEng) return -1;
+        if (!aIsEng && bIsEng) return 1;
+        if (aForeign && !bForeign) return 1;
+        if (!aForeign && bForeign) return -1;
+        return 0;
       });
 
+      attemptedIndicesRef.current.clear();
+      attemptedIndicesRef.current.add(0);
+      setStreams(sortedStreams);
+      setIsLoadingStreams(false);
+      setStreamLoadAttempt(1);
+    },
+    [activeModalItem, currentSeason, currentEpisode, startAutoRetryCountdown]
+  );
+
+  // Load Streams trigger
+  useEffect(() => {
+    loadStreamsWithRetry(false);
     return () => {
-      isMounted = false;
+      if (retryCountdownTimerRef.current) {
+        window.clearInterval(retryCountdownTimerRef.current);
+        retryCountdownTimerRef.current = null;
+      }
     };
-  }, [activeModalItem?.id, activeModalItem?.type, currentSeason, currentEpisode]);
+  }, [loadStreamsWithRetry]);
 
   // Auto-switch immediately between servers if a stream fails to load or encounters a fatal playback error
   const handleStreamFailure = useCallback(
@@ -275,10 +338,11 @@ export const VideoPlayerModal: React.FC = () => {
       } else {
         console.warn('All available servers have been tried and failed.');
         setIsLoadingStreams(false);
-        setStreamError('All available servers were unable to play this title. Please try another source or check back later.');
+        setStreamError('All available servers timed out or were unable to play this title. Auto-retrying shortly...');
+        startAutoRetryCountdown();
       }
     },
-    [streams, showToast]
+    [streams, showToast, startAutoRetryCountdown]
   );
 
   const handleStreamFailureRef = useRef(handleStreamFailure);
@@ -319,13 +383,13 @@ export const VideoPlayerModal: React.FC = () => {
       }
     };
 
-    // 4.5-second connection watchdog: if stream hangs without any data/manifest, auto-switch immediately!
+    // 12-second connection watchdog: gives streaming CDNs ample time to initiate handshake and buffer
     watchdogTimerRef.current = window.setTimeout(() => {
       if (video.readyState === 0) {
-        console.warn(`Server ${activeStreamIndex + 1} did not respond within 4.5s. Switching immediately.`);
-        handleStreamFailureRef.current(activeStreamIndex, 'Connection timed out');
+        console.warn(`Server ${activeStreamIndex + 1} did not respond within 12s. Auto-switching to next server.`);
+        handleStreamFailureRef.current(activeStreamIndex, 'Connection timed out after 12s');
       }
-    }, 4500);
+    }, 12000);
 
     const onMediaActive = () => {
       clearWatchdog();
@@ -953,11 +1017,13 @@ export const VideoPlayerModal: React.FC = () => {
       }
 
       setIsFullscreen(true);
+      setVideoFit('cover');
 
       // 2. Auto force orientation to landscape immediately from the first click
       forceLandscapeOrientation();
       setTimeout(forceLandscapeOrientation, 150);
       setTimeout(forceLandscapeOrientation, 350);
+      setTimeout(forceLandscapeOrientation, 600);
 
       // 3. Trigger the fullscreen ad in external page without breaking fullscreen or pausing video
       try {
@@ -1590,48 +1656,67 @@ export const VideoPlayerModal: React.FC = () => {
   return (
     <div
       id="modalOverlay"
-      className="video-modal-overlay fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-start justify-center p-2 sm:p-4 md:p-6 pt-10 sm:pt-12 md:pt-16 pb-12 overflow-y-auto"
+      className="video-modal-overlay fixed inset-0 z-50 overflow-y-auto bg-black"
     >
-      <div className="w-full max-w-6xl h-auto min-h-0 md:max-h-[92vh] my-auto md:my-0 bg-[#0c101c]/95 border border-white/10 rounded-2xl md:rounded-3xl shadow-2xl flex flex-col overflow-hidden relative">
-        {/* Modal Top Header */}
-        <div className="flex items-center justify-between p-4 md:px-6 md:py-4 border-b border-white/5 shrink-0 z-20">
+      {/* Cinematic Ambient Atmosphere Glow - Degraded Multi-Stop Vignette */}
+      <div
+        className="fixed inset-0 pointer-events-none opacity-20 filter blur-3xl scale-110 z-0 transition-opacity duration-1000"
+        style={{
+          backgroundImage: `radial-gradient(ellipse 85% 65% at 50% 15%, rgba(30, 58, 138, 0.4), rgba(0, 0, 0, 0.98) 75%), url(${
+            activeModalItem.backdrop || activeModalItem.poster
+          })`,
+          backgroundSize: 'cover',
+          backgroundPosition: 'center',
+        }}
+      />
+
+      {/* Main Theater Stage - Fluid, degraded black presentation with zero awkward container borders */}
+      <div className="w-full max-w-6xl mx-auto min-h-screen md:min-h-0 flex flex-col relative z-10 px-0 sm:px-2 md:px-6 py-0 md:py-3">
+        {/* Modal Top Header - Sleek Minimalist Cinema HUD */}
+        <div className="flex items-center justify-between px-4 py-3 md:px-2 md:py-3 shrink-0 z-20">
           <div>
-            <h2 className="font-display text-2xl md:text-3xl text-white uppercase tracking-wider line-clamp-1">
+            <h2 className="font-display text-xl sm:text-2xl md:text-3xl text-white font-extrabold uppercase tracking-wider line-clamp-1 drop-shadow-md">
               {activeModalItem.title || activeModalItem.name}
             </h2>
-            <div className="flex items-center gap-2 text-xs font-semibold text-slate-400 mt-0.5">
-              <span className="text-amber-400 font-bold">★ {activeModalItem.rating || '8.5'}</span>
-              <span>·</span>
-              <span>{activeModalItem.year}</span>
-              <span>·</span>
-              <span>{isTV ? `Season ${currentSeason} · Episode ${currentEpisode}` : 'Feature Film'}</span>
-              <span>·</span>
-              <span className="text-emerald-400 uppercase tracking-widest text-[10px]">1080p/4K</span>
+            <div className="flex items-center flex-wrap gap-2 text-xs font-semibold text-slate-400 mt-0.5">
+              <span className="text-amber-400 font-bold flex items-center gap-1">★ {activeModalItem.rating || '8.5'}</span>
+              <span className="text-slate-600">·</span>
+              <span className="text-slate-300">{activeModalItem.year}</span>
+              <span className="text-slate-600">·</span>
+              <span className="text-slate-300">{isTV ? `Season ${currentSeason} · Episode ${currentEpisode}` : 'Feature Film'}</span>
+              <span className="text-slate-600">·</span>
+              <span className="text-emerald-400 uppercase tracking-widest text-[10px] font-mono bg-emerald-500/10 border border-emerald-500/25 px-2 py-0.5 rounded-full">
+                4K UHD · HDR
+              </span>
             </div>
           </div>
 
           <button
             onClick={closePlayer}
             aria-label="Close Player"
-            className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 active:scale-95 text-white flex items-center justify-center transition-all cursor-pointer border border-white/10"
+            className="w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 active:scale-90 text-white flex items-center justify-center transition-all cursor-pointer border border-white/15 backdrop-blur-md shadow-lg"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Video Player Container */}
+        {/* Video Player Container - Flush Cinematic Screen */}
         <div
           id="playerContainer"
           onMouseMove={showControlsTemporarily}
           onTouchStart={showControlsTemporarily}
           onClick={showControlsTemporarily}
-          className="video-player-container-down relative w-full aspect-video bg-black flex items-center justify-center shrink-0 group select-none mt-1.5 md:mt-2.5"
+          className={`relative w-full ${
+            isFullscreen
+              ? 'h-full aspect-auto flex-1'
+              : 'aspect-video rounded-none md:rounded-2xl shadow-[0_20px_90px_rgba(0,0,0,0.98)]'
+          } bg-black flex items-center justify-center shrink-0 group select-none overflow-hidden`}
         >
           {/* Inner Video Layer with overflow-hidden */}
           <div className="absolute inset-0 overflow-hidden flex items-center justify-center">
             {/* Backdrop Glow */}
             <div
-              className="absolute inset-0 bg-cover bg-center opacity-30 filter blur-xl scale-110 pointer-events-none"
+              className="absolute inset-0 bg-cover bg-center opacity-25 filter blur-xl scale-110 pointer-events-none"
               style={{ backgroundImage: `url(${activeModalItem.backdrop || activeModalItem.poster})` }}
             />
 
@@ -1660,8 +1745,12 @@ export const VideoPlayerModal: React.FC = () => {
               className={`w-full h-full relative z-10 bg-black transition-[filter] duration-75 ${
                 isFullscreen
                   ? videoFit === 'cover'
-                    ? 'object-cover'
-                    : 'object-contain'
+                    ? 'video-fit-cover object-cover'
+                    : videoFit === 'fill'
+                    ? 'video-fit-fill object-fill'
+                    : 'video-fit-contain object-contain'
+                  : videoFit === 'cover'
+                  ? 'object-cover'
                   : 'object-contain'
               }`}
             />
@@ -1751,21 +1840,34 @@ export const VideoPlayerModal: React.FC = () => {
 
           {/* Stream Loader Overlay (while loading) */}
           {isLoadingStreams && (
-            <div className="absolute inset-0 z-30 bg-black/75 backdrop-blur-sm flex flex-col items-center justify-center gap-3 text-white pointer-events-none p-4">
-              <div className="w-10 h-10 rounded-full border-3 border-red-500 border-t-transparent animate-spin shadow-lg" />
-              <div className="text-center">
+            <div className="absolute inset-0 z-30 bg-black/80 backdrop-blur-md flex flex-col items-center justify-center gap-3 text-white pointer-events-none p-4">
+              <div className="w-11 h-11 rounded-full border-3 border-blue-500 border-t-transparent animate-spin shadow-lg" />
+              <div className="text-center max-w-sm">
                 <p className="text-sm font-semibold text-white tracking-wide">
-                  {streams.length > 0 ? `Connecting to Server ${activeStreamIndex + 1}...` : 'Loading stream sources...'}
+                  {streams.length > 0
+                    ? `Connecting to Server ${activeStreamIndex + 1}...`
+                    : streamLoadAttempt > 1
+                    ? `Scraping Servers (Attempt ${streamLoadAttempt} of 3)...`
+                    : 'Loading streaming servers...'}
                 </p>
-                <p className="text-[11px] text-white/50 mt-0.5">Finding best playback quality</p>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  {streamLoadAttempt > 1
+                    ? 'Allowing extra time for multi-source APIs to respond'
+                    : 'Connecting to multi-provider scraper network'}
+                </p>
               </div>
             </div>
           )}
 
-          {/* Stream Error Notice */}
+          {/* Stream Error Notice with Auto-Retry */}
           {streamError && !isLoadingStreams && (
-            <div className="absolute inset-0 z-30 bg-black/85 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center text-white">
-              <p className="text-amber-400 font-bold text-sm max-w-md mb-4">{streamError}</p>
+            <div className="absolute inset-0 z-30 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center text-white">
+              <p className="text-amber-400 font-bold text-sm max-w-md mb-2">{streamError}</p>
+              {retryCountdown !== null && (
+                <p className="text-xs text-blue-400 font-mono mb-4 animate-pulse">
+                  Auto-retrying in {retryCountdown}s...
+                </p>
+              )}
               <div className="flex items-center gap-3">
                 {streams.length > 1 && (
                   <button
@@ -1781,24 +1883,11 @@ export const VideoPlayerModal: React.FC = () => {
                   </button>
                 )}
                 <button
-                  onClick={() => {
-                    setIsLoadingStreams(true);
-                    setStreamError(null);
-                    attemptedIndicesRef.current.clear();
-                    setActiveStreamIndex(0);
-                    fetchStreams(activeModalItem.type, activeModalItem.id, currentSeason, currentEpisode, true)
-                      .then((sList) => {
-                        setStreams(sList);
-                        setIsLoadingStreams(false);
-                      })
-                      .catch(() => {
-                        setIsLoadingStreams(false);
-                        setStreamError('Failed to retrieve streaming sources.');
-                      });
-                  }}
-                  className="bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs font-bold uppercase tracking-wider px-5 py-2.5 rounded-full transition-all cursor-pointer"
+                  onClick={() => loadStreamsWithRetry(true)}
+                  className="bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs font-bold uppercase tracking-wider px-5 py-2.5 rounded-full transition-all cursor-pointer flex items-center gap-1.5"
                 >
-                  Retry All Servers
+                  <RotateCcw className="w-3.5 h-3.5 text-blue-400" />
+                  <span>Retry All Servers Now</span>
                 </button>
               </div>
             </div>
@@ -1979,41 +2068,43 @@ export const VideoPlayerModal: React.FC = () => {
                   <PictureInPicture className="w-3.5 h-3.5 md:w-4 md:h-4" />
                 </button>
 
-                {/* Aspect Ratio / Edge-to-Edge Toggle */}
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    const nextFit = videoFit === 'cover' ? 'contain' : 'cover';
-                    setVideoFit(nextFit);
-                    setGestureIndicator({
-                      type: 'fit',
-                      value: nextFit === 'cover' ? 'Edge-to-Edge (Fill)' : 'Original (Fit)',
-                      percent: nextFit === 'cover' ? 100 : 50,
-                    });
-                    if (gestureIndicatorTimerRef.current) window.clearTimeout(gestureIndicatorTimerRef.current);
-                    gestureIndicatorTimerRef.current = window.setTimeout(() => setGestureIndicator(null), 1200);
-                  }}
-                  title={
-                    videoFit === 'cover'
-                      ? 'Screen: Edge-to-Edge (Click for Original Fit)'
-                      : 'Screen: Original Fit (Click for Edge-to-Edge Fill)'
-                  }
-                  aria-label="Aspect Ratio Toggle"
-                  className={`w-8 h-8 md:w-9 md:h-9 rounded-lg md:rounded-xl flex items-center justify-center transition-all cursor-pointer ${
-                    videoFit === 'cover' && isFullscreen
-                      ? 'bg-blue-600 text-white shadow-sm'
-                      : 'bg-white/10 hover:bg-white/20 text-white'
-                  }`}
-                >
-                  <Scan className="w-3.5 h-3.5 md:w-4 md:h-4" />
-                </button>
+                {/* Aspect Ratio / Edge-to-Edge Toggle (Only shown in Fullscreen as a distinct text pill so it never looks like a duplicate icon) */}
+                {isFullscreen && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const nextFit: 'cover' | 'fill' | 'contain' =
+                        videoFit === 'cover' ? 'fill' : videoFit === 'fill' ? 'contain' : 'cover';
+                      setVideoFit(nextFit);
+                      const fitLabel =
+                        nextFit === 'cover'
+                          ? 'Edge-to-Edge Fill'
+                          : nextFit === 'fill'
+                          ? 'Stretch Full Screen'
+                          : 'Original Cinema Ratio';
+                      setGestureIndicator({
+                        type: 'fit',
+                        value: fitLabel,
+                        percent: nextFit === 'cover' ? 100 : nextFit === 'fill' ? 80 : 50,
+                      });
+                      if (gestureIndicatorTimerRef.current) window.clearTimeout(gestureIndicatorTimerRef.current);
+                      gestureIndicatorTimerRef.current = window.setTimeout(() => setGestureIndicator(null), 1200);
+                    }}
+                    title="Aspect Ratio (Fill Screen vs Cinema Fit)"
+                    aria-label="Aspect Ratio Mode"
+                    className="h-8 md:h-9 px-2 rounded-lg md:rounded-xl bg-white/10 hover:bg-white/20 active:scale-95 text-white flex items-center gap-1 transition-all cursor-pointer text-[10px] font-bold font-mono tracking-wider border border-white/15"
+                  >
+                    <span className="text-blue-400">●</span>
+                    <span>{videoFit === 'cover' ? 'FILL' : videoFit === 'fill' ? 'STRETCH' : 'FIT'}</span>
+                  </button>
+                )}
 
-                {/* Fullscreen */}
+                {/* Fullscreen (Single unambiguous icon) */}
                 <button
                   onClick={toggleFullscreen}
                   title={isFullscreen ? 'Exit Fullscreen (F / Esc)' : 'Fullscreen (F)'}
                   aria-label={isFullscreen ? 'Exit Fullscreen (F / Esc)' : 'Fullscreen (F)'}
-                  className="w-8 h-8 md:w-9 md:h-9 rounded-lg md:rounded-xl bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-all cursor-pointer"
+                  className="w-8 h-8 md:w-9 md:h-9 rounded-lg md:rounded-xl bg-white/10 hover:bg-white/20 active:scale-95 text-white flex items-center justify-center transition-all cursor-pointer"
                 >
                   {isFullscreen ? <Minimize className="w-3.5 h-3.5 md:w-4 md:h-4" /> : <Maximize className="w-3.5 h-3.5 md:w-4 md:h-4" />}
                 </button>
@@ -2342,8 +2433,8 @@ export const VideoPlayerModal: React.FC = () => {
           )}
         </div>
 
-        {/* Modal Body & Server Switcher */}
-        <div className="p-4 md:p-6 overflow-y-auto flex-1 flex flex-col gap-6">
+        {/* Modal Body & Degraded Black Cinema Lounge */}
+        <div className="py-6 px-4 md:px-2 flex-1 flex flex-col gap-6 bg-gradient-to-b from-black via-[#04060b] to-black rounded-b-2xl">
           {/* Server Streams Row */}
           <div>
             <div className="flex items-center justify-between mb-2">

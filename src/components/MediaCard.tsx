@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React from 'react';
 import { Play, Heart } from 'lucide-react';
 import { MediaItem } from '../types';
 import { useApp } from '../context/AppContext';
@@ -12,9 +12,7 @@ interface MediaCardProps {
 export const MediaCard: React.FC<MediaCardProps> = ({ item }) => {
   if (!isSafe(item)) return null;
 
-  const { openPlayer, openQuickView, toggleFavorite, userData } = useApp();
-  const timerRef = useRef<number | null>(null);
-  const isLongPressed = useRef<boolean>(false);
+  const { openPlayer, toggleFavorite, userData } = useApp();
 
   const isFav = userData.favorites.some((x) => x.id === item.id);
   const vote = item.vote_average || 0;
@@ -64,39 +62,13 @@ export const MediaCard: React.FC<MediaCardProps> = ({ item }) => {
     }
   }
 
-  // Long-press handling for QuickView
-  const handleTouchStart = () => {
-    isLongPressed.current = false;
-    timerRef.current = window.setTimeout(() => {
-      isLongPressed.current = true;
-      openQuickView(item);
-    }, 550);
-  };
-
-  const handleTouchEnd = () => {
-    if (timerRef.current) window.clearTimeout(timerRef.current);
-  };
-
-  const handleClick = (e: React.MouseEvent) => {
-    if (isLongPressed.current) {
-      isLongPressed.current = false;
-      return;
-    }
+  const handleClick = () => {
     openPlayer(item);
-  };
-
-  const handleContextMenu = (e: React.MouseEvent) => {
-    e.preventDefault();
-    openQuickView(item);
   };
 
   return (
     <div
       onClick={handleClick}
-      onContextMenu={handleContextMenu}
-      onTouchStart={handleTouchStart}
-      onTouchEnd={handleTouchEnd}
-      onTouchCancel={handleTouchEnd}
       className="group flex flex-col w-full cursor-pointer select-none"
     >
       {/* Poster Image Container */}

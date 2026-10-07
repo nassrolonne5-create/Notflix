@@ -70,37 +70,42 @@ video::cue {
 
 /* ==========================================================================
    VideoPlayerModal Custom Layout & Positioning
-   Pushes the player container down to prevent viewport clipping
-   and positions the Season/Episode window lower to clear playback essentials.
+   Seamless cinematic theater presentation with degraded blacks & ambient aura.
    ========================================================================== */
 
 .video-modal-overlay {
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding-top: max(env(safe-area-inset-top, 0px) + 2rem, 3.25rem);
-  padding-bottom: max(env(safe-area-inset-bottom, 0px) + 2rem, 3rem);
+  padding: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  background: radial-gradient(130% 90% at 50% -5%, rgba(16, 24, 44, 0.85) 0%, rgba(4, 6, 12, 0.98) 45%, #000000 100%);
+  backdrop-filter: blur(28px);
+  -webkit-backdrop-filter: blur(28px);
 }
 
 @media (min-width: 768px) {
   .video-modal-overlay {
-    padding-top: max(env(safe-area-inset-top, 0px) + 3rem, 4.25rem);
-    padding-bottom: max(env(safe-area-inset-bottom, 0px) + 3rem, 4rem);
+    padding: max(env(safe-area-inset-top, 0px) + 1rem, 1.75rem) 1.5rem 3rem 1.5rem;
   }
 }
 
-/* Video Player container pushed lower with safe clearance */
+/* Seamless video player container with zero awkward margins or boxy seams */
 .video-player-container-down {
-  margin-top: 0.5rem;
-  box-shadow: 0 20px 45px -15px rgba(0, 0, 0, 0.75);
+  margin: 0;
+  border: none;
+  box-shadow: none;
 }
 
-@media (min-width: 768px) {
-  .video-player-container-down {
-    margin-top: 0.75rem;
-  }
+/* Cinematic Degraded Black Aura for Theater Presentation */
+.cinematic-glow-layer {
+  position: absolute;
+  inset: -20px;
+  background: radial-gradient(ellipse at center, rgba(30, 58, 138, 0.22) 0%, rgba(3, 7, 18, 0.6) 50%, transparent 80%);
+  filter: blur(40px);
+  pointer-events: none;
+  z-index: 0;
 }
 
 /* Season & Episode selection window offset - lowered to avoid overlapping video & info */
@@ -140,16 +145,44 @@ video::cue {
   box-shadow: none !important;
   background-color: #000000 !important;
   aspect-ratio: auto !important;
+  overflow: hidden !important;
 }
 
 #playerContainer:fullscreen video,
 #playerContainer:-webkit-full-screen video,
 #playerContainer:-moz-full-screen video,
 #playerContainer:-ms-fullscreen video {
-  width: 100% !important;
-  height: 100% !important;
+  width: 100vw !important;
+  height: 100vh !important;
   max-width: none !important;
   max-height: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+/* Edge to edge cover mode eliminating all left/right banners */
+#playerContainer:fullscreen video.video-fit-cover,
+#playerContainer:-webkit-full-screen video.video-fit-cover,
+#playerContainer:-moz-full-screen video.video-fit-cover,
+#playerContainer:-ms-fullscreen video.video-fit-cover {
+  object-fit: cover !important;
+  object-position: center !important;
+}
+
+/* Full stretch mode */
+#playerContainer:fullscreen video.video-fit-fill,
+#playerContainer:-webkit-full-screen video.video-fit-fill,
+#playerContainer:-moz-full-screen video.video-fit-fill,
+#playerContainer:-ms-fullscreen video.video-fit-fill {
+  object-fit: fill !important;
+}
+
+/* Original ratio */
+#playerContainer:fullscreen video.video-fit-contain,
+#playerContainer:-webkit-full-screen video.video-fit-contain,
+#playerContainer:-moz-full-screen video.video-fit-contain,
+#playerContainer:-ms-fullscreen video.video-fit-contain {
+  object-fit: contain !important;
 }
 
 
