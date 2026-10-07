@@ -24,6 +24,7 @@ import {
   Minus,
   ExternalLink,
   Languages,
+  Scan,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import {
@@ -111,10 +112,13 @@ export const VideoPlayerModal: React.FC = () => {
   const autoSwitchTimeoutRef = useRef<number | null>(null);
   const watchdogTimerRef = useRef<number | null>(null);
 
+  // Aspect Ratio & Edge-to-Edge state ('cover' = Edge-to-Edge Fill, 'contain' = Original Fit)
+  const [videoFit, setVideoFit] = useState<'cover' | 'contain'>('cover');
+
   // Gesture states (Swipe to adjust Brightness & Seek)
   const [brightness, setBrightness] = useState<number>(1.0);
   const [gestureIndicator, setGestureIndicator] = useState<{
-    type: 'brightness' | 'seek' | 'volume' | 'mute';
+    type: 'brightness' | 'seek' | 'volume' | 'mute' | 'fit';
     value: string;
     subValue?: string;
     percent?: number;
@@ -1653,7 +1657,13 @@ export const VideoPlayerModal: React.FC = () => {
               onLoadedMetadata={handleLoadedMetadata}
               onDurationChange={handleLoadedMetadata}
               onEnded={handleEnded}
-              className="w-full h-full object-contain relative z-10 bg-black transition-[filter] duration-75"
+              className={`w-full h-full relative z-10 bg-black transition-[filter] duration-75 ${
+                isFullscreen
+                  ? videoFit === 'cover'
+                    ? 'object-cover'
+                    : 'object-contain'
+                  : 'object-contain'
+              }`}
             />
           </div>
 
@@ -1691,6 +1701,13 @@ export const VideoPlayerModal: React.FC = () => {
                     <Volume2 className="w-12 h-12 text-emerald-400 stroke-[2.2]" />
                   )}
                   <span className="text-2xl font-black text-white font-mono tracking-wider drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]">
+                    {gestureIndicator.value}
+                  </span>
+                </div>
+              ) : gestureIndicator.type === 'fit' ? (
+                <div className="flex flex-col items-center gap-1.5 transition-all animate-in fade-in zoom-in-95 duration-100 drop-shadow-[0_2px_10px_rgba(0,0,0,0.9)]">
+                  <Scan className="w-12 h-12 text-blue-400 stroke-[2.2]" />
+                  <span className="text-xl md:text-2xl font-black text-white font-mono tracking-wider drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]">
                     {gestureIndicator.value}
                   </span>
                 </div>
@@ -1952,7 +1969,7 @@ export const VideoPlayerModal: React.FC = () => {
                   {playbackRate}x
                 </button>
 
-                {/* PiP */}
+                {/* Picture in Picture */}
                 <button
                   onClick={togglePip}
                   title="Picture in Picture (P)"
@@ -1960,6 +1977,35 @@ export const VideoPlayerModal: React.FC = () => {
                   className="w-8 h-8 md:w-9 md:h-9 rounded-lg md:rounded-xl bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-all cursor-pointer hidden sm:flex"
                 >
                   <PictureInPicture className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                </button>
+
+                {/* Aspect Ratio / Edge-to-Edge Toggle */}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const nextFit = videoFit === 'cover' ? 'contain' : 'cover';
+                    setVideoFit(nextFit);
+                    setGestureIndicator({
+                      type: 'fit',
+                      value: nextFit === 'cover' ? 'Edge-to-Edge (Fill)' : 'Original (Fit)',
+                      percent: nextFit === 'cover' ? 100 : 50,
+                    });
+                    if (gestureIndicatorTimerRef.current) window.clearTimeout(gestureIndicatorTimerRef.current);
+                    gestureIndicatorTimerRef.current = window.setTimeout(() => setGestureIndicator(null), 1200);
+                  }}
+                  title={
+                    videoFit === 'cover'
+                      ? 'Screen: Edge-to-Edge (Click for Original Fit)'
+                      : 'Screen: Original Fit (Click for Edge-to-Edge Fill)'
+                  }
+                  aria-label="Aspect Ratio Toggle"
+                  className={`w-8 h-8 md:w-9 md:h-9 rounded-lg md:rounded-xl flex items-center justify-center transition-all cursor-pointer ${
+                    videoFit === 'cover' && isFullscreen
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'bg-white/10 hover:bg-white/20 text-white'
+                  }`}
+                >
+                  <Scan className="w-3.5 h-3.5 md:w-4 md:h-4" />
                 </button>
 
                 {/* Fullscreen */}
