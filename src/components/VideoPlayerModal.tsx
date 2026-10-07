@@ -886,9 +886,6 @@ export const VideoPlayerModal: React.FC = () => {
   };
 
   const toggleFullscreen = async () => {
-    // 1. Trigger the fullscreen ad in external page
-    triggerAd('fullscreen', videoRef.current);
-
     const container = document.getElementById('playerContainer');
     const video = videoRef.current;
     if (!container) return;
@@ -902,6 +899,7 @@ export const VideoPlayerModal: React.FC = () => {
     );
 
     if (!isCurrentlyFs) {
+      // 1. Request Fullscreen synchronously using the direct user gesture first
       let entered = false;
 
       // Special check for iOS Safari on iPhone
@@ -922,16 +920,16 @@ export const VideoPlayerModal: React.FC = () => {
       if (!entered) {
         try {
           if (container.requestFullscreen) {
-            await container.requestFullscreen();
+            container.requestFullscreen().catch(() => {});
             entered = true;
           } else if ((container as any).webkitRequestFullscreen) {
-            await (container as any).webkitRequestFullscreen();
+            (container as any).webkitRequestFullscreen();
             entered = true;
           } else if ((container as any).mozRequestFullScreen) {
-            await (container as any).mozRequestFullScreen();
+            (container as any).mozRequestFullScreen();
             entered = true;
           } else if ((container as any).msRequestFullscreen) {
-            await (container as any).msRequestFullscreen();
+            (container as any).msRequestFullscreen();
             entered = true;
           } else if ((video as any)?.webkitEnterFullscreen) {
             (video as any).webkitEnterFullscreen();
@@ -952,10 +950,17 @@ export const VideoPlayerModal: React.FC = () => {
 
       setIsFullscreen(true);
 
-      // Auto force orientation to landscape when clicking fullscreen icon
-      await forceLandscapeOrientation();
+      // 2. Auto force orientation to landscape immediately from the first click
+      forceLandscapeOrientation();
       setTimeout(forceLandscapeOrientation, 150);
       setTimeout(forceLandscapeOrientation, 350);
+
+      // 3. Trigger the fullscreen ad in external page without breaking fullscreen or pausing video
+      try {
+        triggerAd('fullscreen', null);
+      } catch (e) {
+        console.warn('Fullscreen ad trigger error:', e);
+      }
     } else {
       try {
         if (document.exitFullscreen) {

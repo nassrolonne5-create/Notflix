@@ -120,9 +120,9 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [isVerifying, setIsVerifying] = useState<boolean>(true);
 
-  // Login Form State
-  const [usernameInput, setUsernameInput] = useState<string>('Linotte17');
-  const [passwordInput, setPasswordInput] = useState<string>('LinotteM1704&@');
+  // Login Form State (Always clean and empty - never prefilled or exposed)
+  const [usernameInput, setUsernameInput] = useState<string>('');
+  const [passwordInput, setPasswordInput] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [loginLoading, setLoginLoading] = useState<boolean>(false);
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -326,6 +326,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                 <input
                   type="text"
                   required
+                  autoComplete="username"
                   value={usernameInput}
                   onChange={(e) => setUsernameInput(e.target.value)}
                   placeholder="Enter admin username"
@@ -345,6 +346,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                 <input
                   type={showPassword ? 'text' : 'password'}
                   required
+                  autoComplete="current-password"
                   value={passwordInput}
                   onChange={(e) => setPasswordInput(e.target.value)}
                   placeholder="Enter admin password"

@@ -87,14 +87,17 @@ export function triggerAd(type: AdTriggerType, videoElement?: HTMLVideoElement |
   (window as any).adState = state;
 
   if (shouldTrigger) {
-    const video = videoElement || document.querySelector('video');
-    if (video && !video.paused) {
-      try {
-        video.pause();
-      } catch {}
-      pausedForAd = true;
-    } else {
-      pausedForAd = true;
+    // Only pause video for non-fullscreen ads; keep video playing smoothly during fullscreen transition
+    if (type !== 'fullscreen') {
+      const video = videoElement || document.querySelector('video');
+      if (video && !video.paused) {
+        try {
+          video.pause();
+        } catch {}
+        pausedForAd = true;
+      } else {
+        pausedForAd = true;
+      }
     }
 
     // Open external page without replacing movie page
