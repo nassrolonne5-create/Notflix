@@ -71,6 +71,7 @@ export const VideoPlayerModal: React.FC = () => {
   const [streams, setStreams] = useState<StreamSource[]>([]);
   const [activeStreamIndex, setActiveStreamIndex] = useState<number>(0);
   const [isLoadingStreams, setIsLoadingStreams] = useState<boolean>(true);
+  const [isBuffering, setIsBuffering] = useState<boolean>(false);
   const [streamError, setStreamError] = useState<string | null>(null);
 
   // TV Seasons & Episodes
@@ -146,6 +147,21 @@ export const VideoPlayerModal: React.FC = () => {
     activeModalItem?.type === 'tv' ||
     activeModalItem?.media_type === 'tv' ||
     Boolean(!activeModalItem?.title && activeModalItem?.name);
+
+  // Poster & Backdrop image for blurred theater background
+  const posterUrl =
+    activeModalItem?.poster ||
+    (activeModalItem?.poster_path
+      ? `https://image.tmdb.org/t/p/w780${activeModalItem.poster_path}`
+      : '') ||
+    activeModalItem?.backdrop ||
+    (activeModalItem?.backdrop_path
+      ? `https://image.tmdb.org/t/p/w1280${activeModalItem.backdrop_path}`
+      : '') ||
+    '';
+
+  const isBufferingOrReconnecting =
+    isLoadingStreams || isBuffering || Boolean(streamError);
 
   // Load TV Seasons & Credits
   useEffect(() => {
@@ -851,6 +867,7 @@ export const VideoPlayerModal: React.FC = () => {
   };
 
   const handleTimeUpdate = () => {
+    if (isBuffering) setIsBuffering(false);
     const video = videoRef.current;
     if (!video || !activeModalItem) return;
 
@@ -1653,12 +1670,6 @@ export const VideoPlayerModal: React.FC = () => {
 
   if (!activeModalItem) return null;
 
-  const posterFallback = activeModalItem.poster || (activeModalItem.poster_path ? `${TMDB_IMG}w780${activeModalItem.poster_path}` : '');
-  const previewImage =
-    (activeModalItem.backdrop && activeModalItem.backdrop.trim() !== '')
-      ? activeModalItem.backdrop
-      : (activeModalItem.backdrop_path ? `${TMDB_IMG}w1280${activeModalItem.backdrop_path}` : '') || posterFallback;
-
   return (
     <div
       id="modalOverlay"
@@ -1720,11 +1731,23 @@ export const VideoPlayerModal: React.FC = () => {
         >
           {/* Inner Video Layer with overflow-hidden */}
           <div className="absolute inset-0 overflow-hidden flex items-center justify-center">
-            {/* Backdrop Glow */}
-            <div
-              className="absolute inset-0 bg-cover bg-center opacity-25 filter blur-xl scale-110 pointer-events-none"
-              style={{ backgroundImage: `url(${previewImage || activeModalItem.backdrop || activeModalItem.poster})` }}
-            />
+            {/* Blurred Movie / Series Poster Background during Buffering, Loading, or Reconnecting */}
+            {posterUrl && (
+              <div
+                className={`absolute inset-0 pointer-events-none transition-all duration-700 ease-in-out z-15 ${
+                  isBufferingOrReconnecting
+                    ? 'opacity-100 scale-100'
+                    : 'opacity-0 scale-105 pointer-events-none'
+                }`}
+              >
+                <div
+                  className="absolute inset-0 bg-cover bg-center filter blur-2xl md:blur-3xl scale-110 transform-gpu"
+                  style={{ backgroundImage: `url(${posterUrl})` }}
+                />
+                {/* Cinematic degraded dark vignette overlay so text & spinners stay sharp */}
+                <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/60 to-black/85 backdrop-blur-sm" />
+              </div>
+            )}
 
             {/* Native HTML5 Video Stream Element */}
             <video
@@ -1732,6 +1755,7 @@ export const VideoPlayerModal: React.FC = () => {
               playsInline
               style={{ filter: `brightness(${brightness})` }}
               onPlay={() => {
+                setIsBuffering(false);
                 setIsPlaying(true);
                 telemetry.trackPlay(
                   activeModalItem,
@@ -1739,6 +1763,22 @@ export const VideoPlayerModal: React.FC = () => {
                   currentEpisode,
                   currentStream?.provider || `Server ${activeStreamIndex + 1}`
                 );
+              }}
+              onPlaying={() => {
+                setIsBuffering(false);
+                setIsPlaying(true);
+              }}
+              onWaiting={() => {
+                setIsBuffering(true);
+              }}
+              onCanPlay={() => {
+                setIsBuffering(false);
+              }}
+              onSeeking={() => {
+                setIsBuffering(true);
+              }}
+              onSeeked={() => {
+                setIsBuffering(false);
               }}
               onPause={() => {
                 setIsPlaying(false);
@@ -1844,44 +1884,38 @@ export const VideoPlayerModal: React.FC = () => {
             </button>
           )}
 
-          {/* Stream Loader Overlay (while loading) */}
-          {isLoadingStreams && (
-            <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3.5 text-white pointer-events-none p-4 overflow-hidden">
-              {/* Blurred Image from the chosen movie or serie */}
-              {(previewImage || posterFallback) && (
-                <div className="absolute inset-0 -z-10 overflow-hidden pointer-events-none select-none">
-                  <img
-                    src={previewImage || posterFallback}
-                    alt={activeModalItem.title || activeModalItem.name || 'Poster'}
-                    className="w-full h-full object-cover filter blur-2xl scale-115 opacity-70 transition-opacity duration-500"
-                    onError={(e) => {
-                      if (posterFallback && (e.target as HTMLImageElement).src !== posterFallback) {
-                        (e.target as HTMLImageElement).src = posterFallback;
-                      }
-                    }}
-                  />
-                  {/* Subtle dark tint and vignette for optimal spinner and text readability */}
-                  <div className="absolute inset-0 bg-black/45 backdrop-blur-[2px]" />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/35 to-black/60" />
-                </div>
-              )}
-              {!previewImage && !posterFallback && (
-                <div className="absolute inset-0 -z-10 bg-black/85 backdrop-blur-md" />
-              )}
-
-              {/* Glowing High-Performance Spinner */}
+          {/* Stream Buffering HUD (when playback is stalled) */}
+          {isBuffering && !isLoadingStreams && !streamError && (
+            <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 text-white pointer-events-none p-4 animate-in fade-in duration-200">
               <div className="relative">
-                <div className="w-12 h-12 rounded-full border-3 border-blue-500/30 border-t-blue-500 animate-spin shadow-[0_0_24px_rgba(59,130,246,0.6)]" />
+                <div className="w-12 h-12 rounded-full border-3 border-blue-500/30 border-t-blue-400 animate-spin shadow-2xl" />
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="w-2.5 h-2.5 rounded-full bg-blue-400 animate-ping" />
+                </div>
               </div>
+              <div className="px-3.5 py-1.5 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-xs font-semibold text-slate-200 shadow-xl flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                <span>Buffering stream...</span>
+              </div>
+            </div>
+          )}
 
-              {/* Clean Status Text (No scraper network subtitle) */}
-              <div className="text-center max-w-sm px-4 py-2 rounded-xl bg-black/50 backdrop-blur-md border border-white/10 shadow-2xl">
-                <p className="text-sm font-semibold text-white tracking-wide drop-shadow-md">
+          {/* Stream Loader Overlay (while loading / reconnecting) */}
+          {isLoadingStreams && (
+            <div className="absolute inset-0 z-30 bg-black/40 backdrop-blur-sm flex flex-col items-center justify-center gap-3 text-white pointer-events-none p-4">
+              <div className="w-11 h-11 rounded-full border-3 border-blue-500 border-t-transparent animate-spin shadow-lg" />
+              <div className="text-center max-w-sm">
+                <p className="text-sm font-semibold text-white tracking-wide">
                   {streams.length > 0
                     ? `Connecting to Server ${activeStreamIndex + 1}...`
                     : streamLoadAttempt > 1
-                    ? `Loading streaming servers (Attempt ${streamLoadAttempt} of 3)...`
+                    ? `Scraping Servers (Attempt ${streamLoadAttempt} of 3)...`
                     : 'Loading streaming servers...'}
+                </p>
+                <p className="text-[11px] text-slate-300 mt-1">
+                  {streamLoadAttempt > 1
+                    ? 'Allowing extra time for multi-source APIs to respond'
+                    : 'Connecting to multi-provider scraper network'}
                 </p>
               </div>
             </div>
@@ -1889,21 +1923,8 @@ export const VideoPlayerModal: React.FC = () => {
 
           {/* Stream Error Notice with Auto-Retry */}
           {streamError && !isLoadingStreams && (
-            <div className="absolute inset-0 z-30 flex flex-col items-center justify-center p-6 text-center text-white overflow-hidden">
-              {(previewImage || posterFallback) && (
-                <div className="absolute inset-0 -z-10 overflow-hidden pointer-events-none select-none">
-                  <img
-                    src={previewImage || posterFallback}
-                    alt={activeModalItem.title || activeModalItem.name || 'Poster'}
-                    className="w-full h-full object-cover filter blur-2xl scale-115 opacity-35"
-                  />
-                  <div className="absolute inset-0 bg-black/85 backdrop-blur-md" />
-                </div>
-              )}
-              {!previewImage && !posterFallback && (
-                <div className="absolute inset-0 -z-10 bg-black/90 backdrop-blur-md" />
-              )}
-              <p className="text-amber-400 font-bold text-sm max-w-md mb-2 drop-shadow-md">{streamError}</p>
+            <div className="absolute inset-0 z-30 bg-black/50 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center text-white">
+              <p className="text-amber-400 font-bold text-sm max-w-md mb-2">{streamError}</p>
               {retryCountdown !== null && (
                 <p className="text-xs text-blue-400 font-mono mb-4 animate-pulse">
                   Auto-retrying in {retryCountdown}s...
