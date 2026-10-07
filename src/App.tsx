@@ -50,6 +50,56 @@ const AppContent: React.FC = () => {
     };
   }, []);
 
+  // Dynamic SEO Title & Meta Description update per view / movie
+  useEffect(() => {
+    let title = 'Notflix — Movies & TV Shows';
+    let desc =
+      'Discover and stream trending movies, popular TV shows, and anime in HD on Notflix. Enjoy high-speed playback, multi-language subtitles, and personalized recommendations.';
+
+    if (activeModalItem) {
+      const name = activeModalItem.title || activeModalItem.name || 'Movie';
+      const year = activeModalItem.year ? ` (${activeModalItem.year})` : '';
+      title = `Watch ${name}${year} in HD — Notflix`;
+      if (activeModalItem.overview) {
+        desc = activeModalItem.overview.slice(0, 155);
+      }
+    } else {
+      switch (activeTab) {
+        case 'movies':
+          title = 'Movies — Stream Blockbusters & Trending Films | Notflix';
+          desc =
+            'Browse popular, top-rated, and newly released movies in 1080p and 4K on Notflix with multi-language audio and subtitles.';
+          break;
+        case 'tv':
+          title = 'TV Series — Binge Popular Shows & Episodes | Notflix';
+          desc =
+            'Stream full seasons and latest episodes of trending TV series on Notflix. Seamless episode switching and playback tracking.';
+          break;
+        case 'anime':
+          title = 'Anime — Top Japanese Animation & Series | Notflix';
+          desc = 'Explore top-rated and trending anime series with Japanese and English audio on Notflix.';
+          break;
+        case 'search':
+          title = 'Search Movies & TV Shows | Notflix';
+          desc = 'Find any movie, series, or actor across our extensive streaming catalog on Notflix.';
+          break;
+        case 'library':
+          title = 'My Library & Watchlist | Notflix';
+          desc = 'Manage your personal watchlist, favorites, and continue watching history on Notflix.';
+          break;
+        default:
+          title = 'Notflix — Movies & TV Shows';
+          desc =
+            'Discover and stream trending movies, popular TV shows, and anime in HD on Notflix.';
+          break;
+      }
+    }
+
+    document.title = title;
+    const metaDesc = document.querySelector('meta[name="description"]');
+    if (metaDesc) metaDesc.setAttribute('content', desc);
+  }, [activeTab, activeModalItem]);
+
   // Dedicated Admin Analytics Command Center
   if (isAdmin) {
     return (

@@ -1317,6 +1317,97 @@ async function startServer() {
   const hasDist = fs.existsSync(path.join(distPath, 'index.html'));
   const isProd = process.env.NODE_ENV === 'production' || (hasDist && process.env.NODE_ENV !== 'development');
 
+  // Persistent downloads folder (mount target for Coolify persistent storage)
+  const downloadsPath = path.join(__dirname, 'downloads');
+  if (!fs.existsSync(downloadsPath)) {
+    try {
+      fs.mkdirSync(downloadsPath, { recursive: true });
+    } catch {}
+  }
+  app.use('/downloads', express.static(downloadsPath));
+
+  // Android APK direct download endpoint with mobile-friendly headers
+  app.get(['/download/app', '/download/apk', '/notflix.apk', '/app.apk'], (req: Request, res: Response) => {
+    const candidates = [
+      path.join(downloadsPath, 'notflix.apk'),
+      path.join(downloadsPath, 'app.apk'),
+      path.join(__dirname, 'public', 'notflix.apk'),
+      path.join(distPath, 'notflix.apk'),
+    ];
+
+    let foundFile = candidates.find((p) => fs.existsSync(p));
+    if (!foundFile && fs.existsSync(downloadsPath)) {
+      try {
+        const allFiles = fs.readdirSync(downloadsPath);
+        const apk = allFiles.find((f) => f.toLowerCase().endsWith('.apk'));
+        if (apk) foundFile = path.join(downloadsPath, apk);
+      } catch {}
+    }
+
+    if (foundFile) {
+      res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+      res.setHeader('Content-Disposition', 'attachment; filename="Notflix.apk"');
+      return res.sendFile(foundFile);
+    }
+
+    res.status(404).send('APK file not uploaded yet. Place your .apk file in the /app/downloads persistent storage folder.');
+  });
+
+  // Search Engine Optimization (SEO) Endpoints for Googlebot & Crawlers
+  const SITEMAP_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://notflixtv.com/</loc>
+    <lastmod>${new Date().toISOString().split('T')[0]}</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>https://notflixtv.com/movies</loc>
+    <lastmod>${new Date().toISOString().split('T')[0]}</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>0.9</priority>
+  </url>
+  <url>
+    <loc>https://notflixtv.com/series</loc>
+    <lastmod>${new Date().toISOString().split('T')[0]}</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>0.9</priority>
+  </url>
+  <url>
+    <loc>https://notflixtv.com/anime</loc>
+    <lastmod>${new Date().toISOString().split('T')[0]}</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://notflixtv.com/search</loc>
+    <lastmod>${new Date().toISOString().split('T')[0]}</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.7</priority>
+  </url>
+</urlset>`;
+
+  const ROBOTS_TXT = `User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /api/admin/
+
+Sitemap: https://notflixtv.com/sitemap.xml
+`;
+
+  app.get('/robots.txt', (req: Request, res: Response) => {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
+    return res.status(200).send(ROBOTS_TXT);
+  });
+
+  app.get('/sitemap.xml', (req: Request, res: Response) => {
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
+    return res.status(200).send(SITEMAP_XML);
+  });
+
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
