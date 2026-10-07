@@ -2,6 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
@@ -808,6 +809,481 @@ app.post('/api/user/sync', (req: Request, res: Response) => {
   } catch (err) {
     console.error('Error syncing user data:', err);
     return res.status(500).json({ error: 'Failed to sync user data' });
+  }
+});
+
+// ==========================================
+// 5.5 ADMIN & REAL ANALYTICS API (YOUTUBE STUDIO ENGINE)
+// ==========================================
+
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'Linotte17';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'LinotteM1704&@';
+
+// Admin active sessions: token -> { createdAt, expiresAt, username }
+const activeAdminTokens = new Map<string, { createdAt: number; expiresAt: number; username: string }>();
+
+function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
+  }
+  const token = authHeader.slice(7).trim();
+  const session = activeAdminTokens.get(token);
+  if (!session || Date.now() > session.expiresAt) {
+    if (session) activeAdminTokens.delete(token);
+    return res.status(401).json({ error: 'Unauthorized: Session expired or invalid' });
+  }
+  next();
+}
+
+// Persistent Analytics storage
+const ANALYTICS_DATA_FILE = path.join(DATA_DIR, 'analytics.json');
+
+interface AnalyticsEvent {
+  id: string;
+  ts: number;
+  type: 'pageview' | 'play' | 'heartbeat' | 'search' | 'server_status';
+  sessionId: string;
+  title?: string;
+  mediaType?: 'movie' | 'tv';
+  season?: number;
+  episode?: number;
+  poster?: string;
+  watchSeconds?: number;
+  device?: string;
+  browser?: string;
+  os?: string;
+  serverIndex?: number;
+  serverName?: string;
+  searchQuery?: string;
+}
+
+interface AnalyticsData {
+  events: AnalyticsEvent[];
+  lastUpdated: number;
+}
+
+let analyticsStore: AnalyticsData = {
+  events: [],
+  lastUpdated: Date.now(),
+};
+
+function readAnalyticsData(): AnalyticsData {
+  try {
+    if (fs.existsSync(ANALYTICS_DATA_FILE)) {
+      const content = fs.readFileSync(ANALYTICS_DATA_FILE, 'utf-8');
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed.events)) {
+        return parsed;
+      }
+    }
+  } catch (e) {
+    console.error('Error reading analytics data:', e);
+  }
+  return { events: [], lastUpdated: Date.now() };
+}
+
+analyticsStore = readAnalyticsData();
+
+let saveAnalyticsTimeout: NodeJS.Timeout | null = null;
+function scheduleSaveAnalytics() {
+  if (saveAnalyticsTimeout) return;
+  saveAnalyticsTimeout = setTimeout(() => {
+    saveAnalyticsTimeout = null;
+    try {
+      analyticsStore.lastUpdated = Date.now();
+      // Cap at 20,000 events to prevent disk bloating while preserving rich real history
+      if (analyticsStore.events.length > 20000) {
+        analyticsStore.events = analyticsStore.events.slice(-20000);
+      }
+      fs.writeFileSync(ANALYTICS_DATA_FILE, JSON.stringify(analyticsStore), 'utf-8');
+    } catch (err) {
+      console.error('Error saving analytics data:', err);
+    }
+  }, 2000);
+}
+
+// In-memory active live viewers tracker: sessionId -> { lastPing, title, device, mediaType, season, episode, poster }
+const activeLiveViewers = new Map<
+  string,
+  {
+    lastPing: number;
+    title: string;
+    device: string;
+    mediaType?: string;
+    season?: number;
+    episode?: number;
+    poster?: string;
+  }
+>();
+
+// POST /api/admin/login
+app.post('/api/admin/login', (req: Request, res: Response) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Username and password required' });
+  }
+
+  if (username !== ADMIN_USERNAME || password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: 'Invalid username or password' });
+  }
+
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days session
+  activeAdminTokens.set(token, { createdAt: Date.now(), expiresAt, username: ADMIN_USERNAME });
+
+  return res.json({
+    success: true,
+    token,
+    expiresAt,
+    username: ADMIN_USERNAME,
+  });
+});
+
+// GET /api/admin/verify
+app.get('/api/admin/verify', (req: Request, res: Response) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    return res.status(401).json({ valid: false });
+  }
+  const token = authHeader.slice(7).trim();
+  const session = activeAdminTokens.get(token);
+  if (!session || Date.now() > session.expiresAt) {
+    if (session) activeAdminTokens.delete(token);
+    return res.status(401).json({ valid: false });
+  }
+  return res.json({ valid: true, username: session.username });
+});
+
+// POST /api/admin/logout
+app.post('/api/admin/logout', (req: Request, res: Response) => {
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith('Bearer ')) {
+    const token = authHeader.slice(7).trim();
+    activeAdminTokens.delete(token);
+  }
+  return res.json({ success: true });
+});
+
+// POST /api/analytics/ping (Ingests real anonymous telemetry)
+app.post('/api/analytics/ping', (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    const {
+      sessionId,
+      eventType,
+      title,
+      mediaType,
+      season,
+      episode,
+      poster,
+      watchSeconds,
+      device,
+      browser,
+      os,
+      serverIndex,
+      serverName,
+      searchQuery,
+    } = body;
+
+    if (!sessionId || !eventType) {
+      return res.status(400).json({ error: 'Missing sessionId or eventType' });
+    }
+
+    const now = Date.now();
+
+    // Track active live stream state (viewer currently playing)
+    if (eventType === 'heartbeat' || eventType === 'play') {
+      activeLiveViewers.set(sessionId, {
+        lastPing: now,
+        title: title || 'Unknown Title',
+        device: device || 'desktop',
+        mediaType,
+        season,
+        episode,
+        poster,
+      });
+    }
+
+    // Save event
+    const event: AnalyticsEvent = {
+      id: crypto.randomUUID ? crypto.randomUUID() : `${now}-${Math.random().toString(36).slice(2, 9)}`,
+      ts: now,
+      type: eventType,
+      sessionId,
+      title,
+      mediaType,
+      season,
+      episode,
+      poster,
+      watchSeconds: Number(watchSeconds) || 0,
+      device: device || 'desktop',
+      browser: browser || 'Unknown',
+      os: os || 'Unknown',
+      serverIndex,
+      serverName,
+      searchQuery,
+    };
+
+    analyticsStore.events.push(event);
+    scheduleSaveAnalytics();
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('Error logging analytics event:', err);
+    return res.status(500).json({ error: 'Failed to record event' });
+  }
+});
+
+// GET /api/admin/analytics (Computes real YouTube Studio analytics)
+app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) => {
+  try {
+    const range = (req.query.range as string) || '7d';
+    const now = Date.now();
+
+    // 1. Calculate live viewers (active in last 75 seconds)
+    const liveTimeout = 75 * 1000;
+    const currentLiveList: Array<{
+      sessionId: string;
+      title: string;
+      device: string;
+      mediaType?: string;
+      season?: number;
+      episode?: number;
+      poster?: string;
+      secondsAgo: number;
+    }> = [];
+
+    activeLiveViewers.forEach((data, sessId) => {
+      const diff = now - data.lastPing;
+      if (diff <= liveTimeout) {
+        currentLiveList.push({
+          sessionId: sessId,
+          title: data.title,
+          device: data.device,
+          mediaType: data.mediaType,
+          season: data.season,
+          episode: data.episode,
+          poster: data.poster,
+          secondsAgo: Math.round(diff / 1000),
+        });
+      } else {
+        // Clean up stale sessions
+        activeLiveViewers.delete(sessId);
+      }
+    });
+
+    const liveViewersCount = currentLiveList.length;
+
+    // 2. Filter events by selected date range
+    let cutoffTs = 0;
+    if (range === 'today') {
+      const startOfToday = new Date();
+      startOfToday.setHours(0, 0, 0, 0);
+      cutoffTs = startOfToday.getTime();
+    } else if (range === '7d') {
+      cutoffTs = now - 7 * 24 * 60 * 60 * 1000;
+    } else if (range === '30d') {
+      cutoffTs = now - 30 * 24 * 60 * 60 * 1000;
+    } else {
+      cutoffTs = 0; // All time
+    }
+
+    const filteredEvents = analyticsStore.events.filter((e) => e.ts >= cutoffTs);
+
+    // 3. Aggregate totals
+    const uniqueSessions = new Set<string>();
+    let totalViews = 0;
+    let totalWatchSeconds = 0;
+    let totalSearches = 0;
+
+    const titlesMap = new Map<
+      string,
+      {
+        title: string;
+        mediaType?: string;
+        poster?: string;
+        views: number;
+        watchSeconds: number;
+      }
+    >();
+
+    const searchQueriesMap = new Map<string, { count: number; lastSearched: number }>();
+    const devicesMap: Record<string, number> = { mobile: 0, desktop: 0, tablet: 0, tv: 0 };
+    const browsersMap: Record<string, number> = {};
+    const osMap: Record<string, number> = {};
+    const serverHealthMap: Record<string, { success: number; error: number }> = {};
+    const hourlyDistribution = new Array(24).fill(0);
+
+    // Timeline buckets: date string (YYYY-MM-DD) -> { views, watchSeconds }
+    const timelineMap = new Map<string, { date: string; label: string; views: number; watchHours: number }>();
+
+    filteredEvents.forEach((e) => {
+      uniqueSessions.add(e.sessionId);
+
+      // Devices, browsers, OS
+      if (e.device) {
+        const d = e.device.toLowerCase();
+        if (devicesMap[d] !== undefined) devicesMap[d]++;
+        else devicesMap.desktop++;
+      }
+      if (e.browser) {
+        browsersMap[e.browser] = (browsersMap[e.browser] || 0) + 1;
+      }
+      if (e.os) {
+        osMap[e.os] = (osMap[e.os] || 0) + 1;
+      }
+
+      // Hour of day (0-23)
+      const evDate = new Date(e.ts);
+      const hour = evDate.getHours();
+      hourlyDistribution[hour]++;
+
+      // Date key for timeline
+      const dateKey = evDate.toISOString().slice(0, 10);
+      const dateLabel = evDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      if (!timelineMap.has(dateKey)) {
+        timelineMap.set(dateKey, { date: dateKey, label: dateLabel, views: 0, watchHours: 0 });
+      }
+      const dayData = timelineMap.get(dateKey)!;
+
+      // Event types
+      if (e.type === 'play') {
+        totalViews++;
+        dayData.views++;
+
+        if (e.title) {
+          const tKey = `${e.title}_${e.mediaType || 'movie'}`;
+          if (!titlesMap.has(tKey)) {
+            titlesMap.set(tKey, {
+              title: e.title,
+              mediaType: e.mediaType,
+              poster: e.poster,
+              views: 0,
+              watchSeconds: 0,
+            });
+          }
+          titlesMap.get(tKey)!.views++;
+        }
+      } else if (e.type === 'heartbeat') {
+        const secs = e.watchSeconds || 0;
+        totalWatchSeconds += secs;
+        dayData.watchHours = Number((dayData.watchHours + secs / 3600).toFixed(2));
+
+        if (e.title) {
+          const tKey = `${e.title}_${e.mediaType || 'movie'}`;
+          if (!titlesMap.has(tKey)) {
+            titlesMap.set(tKey, {
+              title: e.title,
+              mediaType: e.mediaType,
+              poster: e.poster,
+              views: 0,
+              watchSeconds: 0,
+            });
+          }
+          titlesMap.get(tKey)!.watchSeconds += secs;
+        }
+      } else if (e.type === 'search') {
+        totalSearches++;
+        if (e.searchQuery) {
+          const q = e.searchQuery.trim().toLowerCase();
+          if (q) {
+            const current = searchQueriesMap.get(q) || { count: 0, lastSearched: e.ts };
+            searchQueriesMap.set(q, {
+              count: current.count + 1,
+              lastSearched: Math.max(current.lastSearched, e.ts),
+            });
+          }
+        }
+      } else if (e.type === 'server_status') {
+        const sName = e.serverName || `Server ${(e.serverIndex || 0) + 1}`;
+        if (!serverHealthMap[sName]) {
+          serverHealthMap[sName] = { success: 0, error: 0 };
+        }
+        if (e.title === 'success') {
+          serverHealthMap[sName].success++;
+        } else {
+          serverHealthMap[sName].error++;
+        }
+      }
+    });
+
+    // Sort Top Titles (by views, then watch seconds)
+    const topTitles = Array.from(titlesMap.values())
+      .sort((a, b) => b.views - a.views || b.watchSeconds - a.watchSeconds)
+      .slice(0, 15)
+      .map((item) => ({
+        ...item,
+        watchMinutes: Math.round(item.watchSeconds / 60),
+        avgMinutes: item.views > 0 ? Math.round(item.watchSeconds / item.views / 60) : 0,
+      }));
+
+    // Sort Top Searches
+    const topSearches = Array.from(searchQueriesMap.entries())
+      .map(([query, data]) => ({ query, count: data.count, lastSearched: data.lastSearched }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 15);
+
+    // Timeline array sorted by date
+    const timeline = Array.from(timelineMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+
+    // Recent activity feed (latest 30 events)
+    const recentEvents = [...filteredEvents]
+      .reverse()
+      .slice(0, 30)
+      .map((ev) => ({
+        id: ev.id,
+        ts: ev.ts,
+        type: ev.type,
+        title: ev.title,
+        mediaType: ev.mediaType,
+        season: ev.season,
+        episode: ev.episode,
+        poster: ev.poster,
+        device: ev.device,
+        browser: ev.browser,
+        watchMinutes: ev.watchSeconds ? Math.round(ev.watchSeconds / 60) : 0,
+        searchQuery: ev.searchQuery,
+      }));
+
+    // Server health summary
+    const serverHealth = Object.entries(serverHealthMap).map(([server, stats]) => {
+      const total = stats.success + stats.error;
+      const rate = total > 0 ? Math.round((stats.success / total) * 100) : 100;
+      return {
+        server,
+        success: stats.success,
+        error: stats.error,
+        total,
+        rate,
+      };
+    });
+
+    return res.json({
+      success: true,
+      range,
+      kpis: {
+        liveViewers: liveViewersCount,
+        totalViews,
+        totalWatchHours: Number((totalWatchSeconds / 3600).toFixed(1)),
+        totalWatchMinutes: Math.round(totalWatchSeconds / 60),
+        totalSearches,
+        uniqueVisitors: uniqueSessions.size,
+      },
+      liveStreams: currentLiveList,
+      timeline,
+      hourlyDistribution,
+      topTitles,
+      topSearches,
+      recentEvents,
+      devices: devicesMap,
+      browsers: browsersMap,
+      operatingSystems: osMap,
+      serverHealth,
+    });
+  } catch (err) {
+    console.error('Error generating analytics:', err);
+    return res.status(500).json({ error: 'Failed to compute analytics' });
   }
 });
 

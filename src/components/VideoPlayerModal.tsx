@@ -39,6 +39,7 @@ import {
 import { StreamSource, SubtitleTrack, Season, Episode, CastMember, MediaItem } from '../types';
 import { MediaCard } from './MediaCard';
 import { triggerAd, initAdResumeListeners } from '../services/adService';
+import { telemetry } from '../services/telemetry';
 
 const formatTime = (seconds: number) => {
   if (!isFinite(seconds) || seconds < 0) return '0:00';
@@ -850,6 +851,40 @@ export const VideoPlayerModal: React.FC = () => {
     showControlsTemporarily();
   };
 
+  const forceLandscapeOrientation = async () => {
+    try {
+      if (screen.orientation && typeof (screen.orientation as any).lock === 'function') {
+        await (screen.orientation as any).lock('landscape').catch(async () => {
+          await (screen.orientation as any).lock('landscape-primary').catch(() => {});
+        });
+      } else if ((screen as any).lockOrientation) {
+        (screen as any).lockOrientation('landscape');
+      } else if ((screen as any).mozLockOrientation) {
+        (screen as any).mozLockOrientation('landscape');
+      } else if ((screen as any).msLockOrientation) {
+        (screen as any).msLockOrientation('landscape');
+      }
+    } catch {
+      // Screen orientation lock not supported or blocked by permissions
+    }
+  };
+
+  const unlockScreenOrientation = () => {
+    try {
+      if (screen.orientation && typeof screen.orientation.unlock === 'function') {
+        screen.orientation.unlock();
+      } else if ((screen as any).unlockOrientation) {
+        (screen as any).unlockOrientation();
+      } else if ((screen as any).mozUnlockOrientation) {
+        (screen as any).mozUnlockOrientation();
+      } else if ((screen as any).msUnlockOrientation) {
+        (screen as any).msUnlockOrientation();
+      }
+    } catch {
+      // Ignored
+    }
+  };
+
   const toggleFullscreen = async () => {
     // 1. Trigger the fullscreen ad in external page
     triggerAd('fullscreen', videoRef.current);
@@ -858,42 +893,79 @@ export const VideoPlayerModal: React.FC = () => {
     const video = videoRef.current;
     if (!container) return;
 
-    const isCurrentlyFs = Boolean(document.fullscreenElement || (document as any).webkitFullscreenElement);
+    const isCurrentlyFs = Boolean(
+      document.fullscreenElement ||
+      (document as any).webkitFullscreenElement ||
+      (document as any).mozFullScreenElement ||
+      (document as any).msFullscreenElement ||
+      (video as any)?.webkitDisplayingFullscreen
+    );
 
     if (!isCurrentlyFs) {
-      try {
-        if (container.requestFullscreen) {
-          await container.requestFullscreen();
-        } else if ((container as any).webkitRequestFullscreen) {
-          await (container as any).webkitRequestFullscreen();
-        } else if ((video as any)?.webkitEnterFullscreen) {
+      let entered = false;
+
+      // Special check for iOS Safari on iPhone
+      const isIOS =
+        /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+        (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+      if (isIOS && (video as any)?.webkitEnterFullscreen) {
+        try {
           (video as any).webkitEnterFullscreen();
+          entered = true;
+          setIsFullscreen(true);
+        } catch (e) {
+          console.warn('iOS webkitEnterFullscreen fallback to container:', e);
         }
-      } catch (err) {
-        console.warn('Fullscreen request failed:', err);
       }
+
+      if (!entered) {
+        try {
+          if (container.requestFullscreen) {
+            await container.requestFullscreen();
+            entered = true;
+          } else if ((container as any).webkitRequestFullscreen) {
+            await (container as any).webkitRequestFullscreen();
+            entered = true;
+          } else if ((container as any).mozRequestFullScreen) {
+            await (container as any).mozRequestFullScreen();
+            entered = true;
+          } else if ((container as any).msRequestFullscreen) {
+            await (container as any).msRequestFullscreen();
+            entered = true;
+          } else if ((video as any)?.webkitEnterFullscreen) {
+            (video as any).webkitEnterFullscreen();
+            entered = true;
+          }
+        } catch (err) {
+          console.warn('Fullscreen request failed on container:', err);
+          if ((video as any)?.webkitEnterFullscreen) {
+            try {
+              (video as any).webkitEnterFullscreen();
+              entered = true;
+            } catch (vErr) {
+              console.warn('Video fullscreen fallback failed:', vErr);
+            }
+          }
+        }
+      }
+
       setIsFullscreen(true);
 
-      // Force rotate screen to landscape on supported devices
-      try {
-        if (screen.orientation && typeof (screen.orientation as any).lock === 'function') {
-          await (screen.orientation as any).lock('landscape').catch(() => {});
-        } else if ((screen as any).lockOrientation) {
-          (screen as any).lockOrientation('landscape');
-        } else if ((screen as any).mozLockOrientation) {
-          (screen as any).mozLockOrientation('landscape');
-        } else if ((screen as any).msLockOrientation) {
-          (screen as any).msLockOrientation('landscape');
-        }
-      } catch (err) {
-        console.warn('Screen orientation lock failed:', err);
-      }
+      // Auto force orientation to landscape when clicking fullscreen icon
+      await forceLandscapeOrientation();
+      setTimeout(forceLandscapeOrientation, 150);
+      setTimeout(forceLandscapeOrientation, 350);
     } else {
       try {
         if (document.exitFullscreen) {
           await document.exitFullscreen();
         } else if ((document as any).webkitExitFullscreen) {
           await (document as any).webkitExitFullscreen();
+        } else if ((document as any).mozCancelFullScreen) {
+          await (document as any).mozCancelFullScreen();
+        } else if ((document as any).msExitFullscreen) {
+          await (document as any).msExitFullscreen();
         }
       } catch (err) {
         console.warn('Exit fullscreen failed:', err);
@@ -901,13 +973,7 @@ export const VideoPlayerModal: React.FC = () => {
       setIsFullscreen(false);
 
       // Unlock orientation
-      try {
-        if (screen.orientation && typeof screen.orientation.unlock === 'function') {
-          screen.orientation.unlock();
-        } else if ((screen as any).unlockOrientation) {
-          (screen as any).unlockOrientation();
-        }
-      } catch {}
+      unlockScreenOrientation();
     }
   };
 
@@ -986,27 +1052,49 @@ export const VideoPlayerModal: React.FC = () => {
   // Keep isFullscreen in sync with native browser fullscreen state & orientation
   useEffect(() => {
     const handleFullscreenChange = () => {
-      const isFs = Boolean(document.fullscreenElement || (document as any).webkitFullscreenElement);
+      const isFs = Boolean(
+        document.fullscreenElement ||
+        (document as any).webkitFullscreenElement ||
+        (document as any).mozFullScreenElement ||
+        (document as any).msFullscreenElement
+      );
       setIsFullscreen(isFs);
-      if (!isFs) {
-        try {
-          if (screen.orientation && typeof screen.orientation.unlock === 'function') {
-            screen.orientation.unlock();
-          } else if ((screen as any).unlockOrientation) {
-            (screen as any).unlockOrientation();
-          }
-        } catch {}
+      if (isFs) {
+        forceLandscapeOrientation();
+        setTimeout(forceLandscapeOrientation, 200);
+      } else {
+        unlockScreenOrientation();
       }
     };
 
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
 
+    const video = videoRef.current;
+    const handleWebkitBegin = () => {
+      setIsFullscreen(true);
+      forceLandscapeOrientation();
+    };
+    const handleWebkitEnd = () => {
+      setIsFullscreen(false);
+      unlockScreenOrientation();
+    };
+
+    if (video) {
+      video.addEventListener('webkitbeginfullscreen', handleWebkitBegin);
+      video.addEventListener('webkitendfullscreen', handleWebkitEnd);
+    }
+
     // Auto-fullscreen when device is physically turned sideways to landscape
     const mql = window.matchMedia('(orientation: landscape)');
     const handleOrientationChange = (e: MediaQueryListEvent | MediaQueryList) => {
       const container = document.getElementById('playerContainer');
-      const isFs = Boolean(document.fullscreenElement || (document as any).webkitFullscreenElement);
+      const isFs = Boolean(
+        document.fullscreenElement ||
+        (document as any).webkitFullscreenElement ||
+        (document as any).mozFullScreenElement ||
+        (document as any).msFullscreenElement
+      );
       if (e.matches && !isFs && container) {
         if (container.requestFullscreen) {
           container.requestFullscreen().catch(() => {});
@@ -1029,8 +1117,13 @@ export const VideoPlayerModal: React.FC = () => {
     }
 
     return () => {
+      unlockScreenOrientation();
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
       document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+      if (video) {
+        video.removeEventListener('webkitbeginfullscreen', handleWebkitBegin);
+        video.removeEventListener('webkitendfullscreen', handleWebkitEnd);
+      }
       if (mql.removeEventListener) {
         mql.removeEventListener('change', handleOrientationChange);
       } else if ((mql as any).removeListener) {
@@ -1468,14 +1561,29 @@ export const VideoPlayerModal: React.FC = () => {
   const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
   const currentStream = streams[activeStreamIndex];
 
+  // Real Analytics Heartbeat (transmits anonymous watch seconds every 25s while playing)
+  useEffect(() => {
+    if (!isPlaying || !activeModalItem) return;
+    const interval = setInterval(() => {
+      telemetry.trackHeartbeat(
+        activeModalItem,
+        currentSeason,
+        currentEpisode,
+        25,
+        currentStream?.provider || `Server ${activeStreamIndex + 1}`
+      );
+    }, 25000);
+    return () => clearInterval(interval);
+  }, [isPlaying, activeModalItem, currentSeason, currentEpisode, currentStream, activeStreamIndex]);
+
   if (!activeModalItem) return null;
 
   return (
     <div
       id="modalOverlay"
-      className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-0 md:p-6 overflow-y-auto"
+      className="video-modal-overlay fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-start justify-center p-2 sm:p-4 md:p-6 pt-10 sm:pt-12 md:pt-16 pb-12 overflow-y-auto"
     >
-      <div className="w-full max-w-6xl h-full md:h-auto min-h-screen md:min-h-0 md:max-h-[92vh] bg-[#0c101c]/95 border border-white/10 md:rounded-3xl shadow-2xl flex flex-col overflow-hidden relative">
+      <div className="w-full max-w-6xl h-auto min-h-0 md:max-h-[92vh] my-auto md:my-0 bg-[#0c101c]/95 border border-white/10 rounded-2xl md:rounded-3xl shadow-2xl flex flex-col overflow-hidden relative">
         {/* Modal Top Header */}
         <div className="flex items-center justify-between p-4 md:px-6 md:py-4 border-b border-white/5 shrink-0 z-20">
           <div>
@@ -1508,7 +1616,7 @@ export const VideoPlayerModal: React.FC = () => {
           onMouseMove={showControlsTemporarily}
           onTouchStart={showControlsTemporarily}
           onClick={showControlsTemporarily}
-          className="relative w-full aspect-video bg-black flex items-center justify-center shrink-0 group select-none"
+          className="video-player-container-down relative w-full aspect-video bg-black flex items-center justify-center shrink-0 group select-none mt-1.5 md:mt-2.5"
         >
           {/* Inner Video Layer with overflow-hidden */}
           <div className="absolute inset-0 overflow-hidden flex items-center justify-center">
@@ -1523,7 +1631,15 @@ export const VideoPlayerModal: React.FC = () => {
               ref={videoRef}
               playsInline
               style={{ filter: `brightness(${brightness})` }}
-              onPlay={() => setIsPlaying(true)}
+              onPlay={() => {
+                setIsPlaying(true);
+                telemetry.trackPlay(
+                  activeModalItem,
+                  currentSeason,
+                  currentEpisode,
+                  currentStream?.provider || `Server ${activeStreamIndex + 1}`
+                );
+              }}
               onPause={() => {
                 setIsPlaying(false);
                 saveCurrentPlaybackNow();
@@ -1860,17 +1976,23 @@ export const VideoPlayerModal: React.FC = () => {
           {activePanel && (
             <div
               onClick={() => setActivePanel(null)}
-              className="absolute inset-0 z-40 bg-black/20 backdrop-blur-[1px] flex items-end justify-center pb-1.5 md:pb-3 p-3 animate-in fade-in duration-200"
+              className={`absolute inset-0 z-40 bg-black/20 backdrop-blur-[1px] flex items-end justify-center p-3 animate-in fade-in duration-200 ${
+                activePanel === 'episodes' && !isFullscreen
+                  ? 'pb-0 md:pb-1 pointer-events-auto'
+                  : 'pb-1.5 md:pb-3 pointer-events-auto'
+              }`}
             >
               <div
                 onClick={(e) => e.stopPropagation()}
                 className={`w-full ${
                   activePanel === 'subtitles'
-                    ? 'max-w-[240px] max-h-44'
+                    ? 'max-w-[240px] max-h-44 translate-y-3 md:translate-y-4'
                     : activePanel === 'episodes'
-                    ? 'max-w-[340px] max-h-60'
-                    : 'max-w-[300px] max-h-56'
-                } bg-[#131a2a]/95 border border-white/20 rounded-xl p-2.5 shadow-2xl overflow-y-auto flex flex-col gap-1.5 translate-y-3 md:translate-y-4 animate-in fade-in slide-in-from-bottom-2 duration-200`}
+                    ? isFullscreen
+                      ? 'video-se-panel-fullscreen max-w-[340px] max-h-56'
+                      : 'video-se-panel-lowered max-w-[340px] max-h-56 shadow-[0_16px_40px_rgba(0,0,0,0.85)]'
+                    : 'max-w-[300px] max-h-56 translate-y-3 md:translate-y-4'
+                } bg-[#131a2a]/95 border border-white/20 rounded-xl p-2.5 shadow-2xl overflow-y-auto flex flex-col gap-1.5 animate-in fade-in slide-in-from-bottom-2 duration-200`}
               >
                 {/* Panel Header */}
                 <div className="flex items-center justify-between pb-1 border-b border-white/10 shrink-0">

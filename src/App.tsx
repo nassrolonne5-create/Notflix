@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
 import { Header } from './components/Header';
 import { Dock } from './components/Dock';
@@ -8,14 +8,61 @@ import { SeriesPage } from './pages/SeriesPage';
 import { AnimePage } from './pages/AnimePage';
 import { LibraryPage } from './pages/LibraryPage';
 import { SearchPage } from './pages/SearchPage';
+import { AdminPage } from './pages/AdminPage';
 import { VideoPlayerModal } from './components/VideoPlayerModal';
 import { QuickViewModal } from './components/QuickViewModal';
 import { SettingsModal } from './components/SettingsModal';
 import { Toast } from './components/Toast';
 import { ResumeBanner } from './components/ResumeBanner';
+import { telemetry } from './services/telemetry';
+
+const checkIsAdmin = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  const path = window.location.pathname.toLowerCase();
+  const hash = window.location.hash.toLowerCase();
+  return (
+    path === '/admin' ||
+    path.startsWith('/admin') ||
+    hash === '#admin' ||
+    hash.startsWith('#admin') ||
+    hash === '#/admin' ||
+    hash.startsWith('#/admin')
+  );
+};
 
 const AppContent: React.FC = () => {
   const { activeTab, activeModalItem, quickViewItem } = useApp();
+  const [isAdmin, setIsAdmin] = useState<boolean>(checkIsAdmin);
+
+  // Sync routing on popstate and hashchange
+  useEffect(() => {
+    const handleNavigation = () => {
+      setIsAdmin(checkIsAdmin());
+    };
+    window.addEventListener('popstate', handleNavigation);
+    window.addEventListener('hashchange', handleNavigation);
+
+    // Track initial page view for analytics
+    telemetry.trackPageView(window.location.pathname);
+
+    return () => {
+      window.removeEventListener('popstate', handleNavigation);
+      window.removeEventListener('hashchange', handleNavigation);
+    };
+  }, []);
+
+  // Dedicated Admin Analytics Command Center
+  if (isAdmin) {
+    return (
+      <AdminPage
+        onExit={() => {
+          window.history.pushState({}, '', '/');
+          window.location.hash = '';
+          setIsAdmin(false);
+        }}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#0b0f19] text-[#f8fafc] flex flex-col selection:bg-rose-600 selection:text-white relative">

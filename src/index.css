@@ -67,3 +67,56 @@ video::cue {
   background-size: 200% 100%;
   animation: shimmer 1.6s infinite ease-in-out;
 }
+
+/* ==========================================================================
+   VideoPlayerModal Custom Layout & Positioning
+   Pushes the player container down to prevent viewport clipping
+   and positions the Season/Episode window lower to clear playback essentials.
+   ========================================================================== */
+
+.video-modal-overlay {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: max(env(safe-area-inset-top, 0px) + 2rem, 3.25rem);
+  padding-bottom: max(env(safe-area-inset-bottom, 0px) + 2rem, 3rem);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (min-width: 768px) {
+  .video-modal-overlay {
+    padding-top: max(env(safe-area-inset-top, 0px) + 3rem, 4.25rem);
+    padding-bottom: max(env(safe-area-inset-bottom, 0px) + 3rem, 4rem);
+  }
+}
+
+/* Video Player container pushed lower with safe clearance */
+.video-player-container-down {
+  margin-top: 0.5rem;
+  box-shadow: 0 20px 45px -15px rgba(0, 0, 0, 0.75);
+}
+
+@media (min-width: 768px) {
+  .video-player-container-down {
+    margin-top: 0.75rem;
+  }
+}
+
+/* Season & Episode selection window offset - lowered to avoid overlapping video & info */
+.video-se-panel-lowered {
+  transform: translateY(2rem); /* 32px lower on mobile */
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (min-width: 768px) {
+  .video-se-panel-lowered {
+    transform: translateY(2.75rem); /* 44px lower on desktop */
+  }
+}
+
+/* Fullscreen docked state */
+.video-se-panel-fullscreen {
+  transform: translateY(0);
+}
+

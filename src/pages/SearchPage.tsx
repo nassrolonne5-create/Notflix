@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Search, X, Sparkles, Film, Tv, LayoutGrid, Calendar, ShieldCheck } from 'lucide-react';
 import { searchMedia, tmdbFetch, formatMediaItem, isSafe } from '../services/api';
 import { triggerAd } from '../services/adService';
+import { telemetry } from '../services/telemetry';
 import { MediaItem } from '../types';
 import { MediaCard } from '../components/MediaCard';
 import { useApp } from '../context/AppContext';
@@ -50,6 +51,7 @@ export const SearchPage: React.FC = () => {
 
     setLoading(true);
     triggerAd('search');
+    telemetry.trackSearch(searchQuery);
     const timer = setTimeout(() => {
       searchMedia(searchQuery, typeFilter, decadeFilter)
         .then((items) => {
