@@ -13,4 +13,4 @@ NODE_OPTIONS = "--import tsx"
 PORT = "3000"
 
 [start]
-cmd = "npm start"
+cmd = "NODE_OPTIONS='--import tsx' node server.ts"

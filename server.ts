@@ -1440,50 +1440,14 @@ Sitemap: https://notflixtv.com/sitemap.xml
     app.use(vite.middlewares);
     console.log('⚡ Vite dev middleware attached in development mode');
   } else {
-    // Handler for serving index.html with strict anti-cache headers so updates take effect immediately
-    const serveFreshIndexHtml = (_req: Request, res: Response) => {
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0, post-check=0, pre-check=0');
-      res.setHeader('Pragma', 'no-cache');
-      res.setHeader('Expires', '0');
-      res.setHeader('Surrogate-Control', 'no-store');
-      res.setHeader('CDN-Cache-Control', 'no-store');
-      res.setHeader('Cloudflare-CDN-Cache-Control', 'no-store');
-      res.sendFile(path.join(distPath, 'index.html'), {
-        etag: false,
-        lastModified: false,
-        cacheControl: false,
-      });
-    };
-
-    // Explicitly handle root / and /index.html before express.static to prevent 304 ETag caching
-    app.get(['/', '/index.html'], serveFreshIndexHtml);
-
-    app.use(
-      express.static(distPath, {
-        etag: false,
-        lastModified: false,
-        index: false, // Prevents express.static from serving index.html on root with stale 304
-        setHeaders: (res, filePath) => {
-          if (filePath.includes('/assets/')) {
-            // Hashed Vite assets (chunk.js, chunk.css) have immutable hashes and are safely cached
-            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-          } else {
-            // All non-hashed static files must strictly revalidate
-            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
-            res.setHeader('Pragma', 'no-cache');
-            res.setHeader('Expires', '0');
-            res.setHeader('Surrogate-Control', 'no-store');
-            res.setHeader('CDN-Cache-Control', 'no-store');
-            res.setHeader('Cloudflare-CDN-Cache-Control', 'no-store');
-          }
-        },
-      })
-    );
+    app.use(express.static(distPath));
 
     // Single-Page Application (SPA) catch-all route
-    app.get('*', serveFreshIndexHtml);
+    app.get('*', (_req: Request, res: Response) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
 
-    console.log(`📦 Serving production build from ${distPath} with instant-update cache policies`);
+    console.log(`📦 Serving production build from ${distPath}`);
   }
 
   const server = app.listen(PORT, '0.0.0.0', () => {

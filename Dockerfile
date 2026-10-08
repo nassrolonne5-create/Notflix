@@ -39,4 +39,4 @@ USER notflix
 
 EXPOSE 3000
 
-CMD ["npm", "start"]
+CMD ["node", "--import", "tsx", "server.ts"]
