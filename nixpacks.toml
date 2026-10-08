@@ -9,8 +9,7 @@ cmds = ["npm run build"]
 
 [variables]
 NODE_ENV = "production"
-NODE_OPTIONS = "--import tsx"
 PORT = "3000"
 
 [start]
-cmd = "NODE_OPTIONS='--import tsx' node server.ts"
+cmd = "node server.js"
