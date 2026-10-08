@@ -79,10 +79,19 @@ video::cue {
   justify-content: center;
   padding: 0;
   overflow-y: auto;
+  overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
   background: radial-gradient(130% 90% at 50% -5%, rgba(16, 24, 44, 0.85) 0%, rgba(4, 6, 12, 0.98) 45%, #000000 100%);
   backdrop-filter: blur(28px);
   -webkit-backdrop-filter: blur(28px);
+}
+
+.video-modal-overlay.modal-scroll-locked {
+  overflow: hidden !important;
+  overscroll-behavior: none !important;
+  touch-action: none !important;
+  height: 100vh !important;
+  max-height: 100vh !important;
 }
 
 @media (min-width: 768px) {

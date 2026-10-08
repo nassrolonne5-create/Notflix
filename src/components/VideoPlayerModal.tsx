@@ -170,6 +170,12 @@ export const VideoPlayerModal: React.FC = () => {
     activeModalItem?.media_type === 'tv' ||
     Boolean(!activeModalItem?.title && activeModalItem?.name);
 
+  const posterImage =
+    activeModalItem?.poster ||
+    activeModalItem?.backdrop ||
+    (activeModalItem?.poster_path ? `${TMDB_IMG}w780${activeModalItem.poster_path}` : '') ||
+    (activeModalItem?.backdrop_path ? `${TMDB_IMG}w1280${activeModalItem.backdrop_path}` : '');
+
   // Load TV Seasons & Credits
   useEffect(() => {
     if (!activeModalItem) return;
@@ -1740,12 +1746,54 @@ export const VideoPlayerModal: React.FC = () => {
     return () => clearInterval(interval);
   }, [isPlaying, activeModalItem, currentSeason, currentEpisode, currentStream, activeStreamIndex]);
 
+  // Lock document.body scrolling while VideoPlayerModal is mounted
+  useEffect(() => {
+    const originalOverflow = document.body.style.overflow;
+    const originalTouchAction = document.body.style.touchAction;
+    document.body.style.overflow = 'hidden';
+    document.body.style.touchAction = 'none';
+    return () => {
+      document.body.style.overflow = originalOverflow;
+      document.body.style.touchAction = originalTouchAction;
+    };
+  }, []);
+
+  // Lock player page scrolling when any Player feature panel is open (Subtitles, Quality, Audio, Episodes, Speed)
+  useEffect(() => {
+    const overlay = document.getElementById('modalOverlay');
+    if (!overlay) return;
+
+    if (activePanel) {
+      const savedScrollTop = overlay.scrollTop;
+      overlay.style.overflow = 'hidden';
+      overlay.style.overscrollBehavior = 'none';
+
+      const enforceScrollLock = () => {
+        if (overlay.scrollTop !== savedScrollTop) {
+          overlay.scrollTop = savedScrollTop;
+        }
+      };
+
+      overlay.addEventListener('scroll', enforceScrollLock, { passive: true });
+
+      return () => {
+        overlay.style.overflow = '';
+        overlay.style.overscrollBehavior = '';
+        overlay.removeEventListener('scroll', enforceScrollLock);
+      };
+    }
+  }, [activePanel]);
+
   if (!activeModalItem) return null;
 
   return (
     <div
       id="modalOverlay"
-      className="video-modal-overlay fixed inset-0 z-50 overflow-y-auto bg-black"
+      className={`video-modal-overlay fixed inset-0 z-50 bg-black ${
+        activePanel
+          ? 'modal-scroll-locked overflow-hidden overscroll-none'
+          : 'overflow-y-auto overscroll-contain'
+      }`}
     >
       {/* Cinematic Ambient Atmosphere Glow - Degraded Multi-Stop Vignette */}
       <div
@@ -1921,9 +1969,20 @@ export const VideoPlayerModal: React.FC = () => {
             </button>
           )}
 
+          {/* Transparent Poster in Player Background during Loading (Minimal Blur / Maximum Clarity) */}
+          {isLoadingStreams && posterImage && (
+            <div className="absolute inset-0 z-25 pointer-events-none select-none overflow-hidden">
+              <div
+                className="w-full h-full bg-cover bg-center filter blur-[1.5px] scale-102 opacity-70 transition-opacity duration-700"
+                style={{ backgroundImage: `url(${posterImage})` }}
+              />
+              <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/25 to-black/50" />
+            </div>
+          )}
+
           {/* Stream Loader Overlay (while loading) */}
           {isLoadingStreams && (
-            <div className="absolute inset-0 z-30 bg-black/80 backdrop-blur-md flex flex-col items-center justify-center gap-3 text-white pointer-events-none p-4">
+            <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 text-white pointer-events-none p-4">
               <div className="w-11 h-11 rounded-full border-3 border-blue-500 border-t-transparent animate-spin shadow-lg" />
             </div>
           )}
@@ -2187,7 +2246,14 @@ export const VideoPlayerModal: React.FC = () => {
           {activePanel && (
             <div
               onClick={() => setActivePanel(null)}
-              className={`absolute inset-0 z-40 bg-black/20 backdrop-blur-[1px] flex items-end justify-center p-3 animate-in fade-in duration-200 ${
+              onTouchMove={(e) => {
+                if (e.target === e.currentTarget) {
+                  e.preventDefault();
+                }
+                e.stopPropagation();
+              }}
+              onWheel={(e) => e.stopPropagation()}
+              className={`absolute inset-0 z-40 bg-black/25 backdrop-blur-[1px] flex items-end justify-center p-3 animate-in fade-in duration-200 touch-none overscroll-none ${
                 activePanel === 'episodes' && !isFullscreen
                   ? 'pb-0 md:pb-1 pointer-events-auto'
                   : 'pb-1.5 md:pb-3 pointer-events-auto'
@@ -2195,15 +2261,17 @@ export const VideoPlayerModal: React.FC = () => {
             >
               <div
                 onClick={(e) => e.stopPropagation()}
+                onTouchMove={(e) => e.stopPropagation()}
+                onWheel={(e) => e.stopPropagation()}
                 className={`w-full ${
                   activePanel === 'subtitles'
-                    ? 'max-w-[240px] max-h-44 translate-y-3 md:translate-y-4'
+                    ? 'max-w-[260px] max-h-52 translate-y-3 md:translate-y-4'
                     : activePanel === 'episodes'
                     ? isFullscreen
                       ? 'video-se-panel-fullscreen max-w-[340px] max-h-56'
                       : 'video-se-panel-lowered max-w-[340px] max-h-56 shadow-[0_16px_40px_rgba(0,0,0,0.85)]'
                     : 'max-w-[300px] max-h-56 translate-y-3 md:translate-y-4'
-                } bg-[#131a2a]/95 border border-white/20 rounded-xl p-2.5 shadow-2xl overflow-y-auto flex flex-col gap-1.5 animate-in fade-in slide-in-from-bottom-2 duration-200`}
+                } bg-[#131a2a]/95 border border-white/20 rounded-xl p-2.5 shadow-2xl overflow-y-auto overscroll-contain touch-pan-y flex flex-col gap-1.5 animate-in fade-in slide-in-from-bottom-2 duration-200`}
               >
                 {/* Panel Header */}
                 <div className="flex items-center justify-between pb-1 border-b border-white/10 shrink-0">
@@ -2264,8 +2332,12 @@ export const VideoPlayerModal: React.FC = () => {
                       </div>
                     )}
 
-                    {/* Subtitle Language List - Ultra-compact scrollable */}
-                    <div className="flex flex-col gap-1 max-h-28 overflow-y-auto pr-0.5">
+                    {/* Subtitle Language List - Contained Smooth Scrolling */}
+                    <div
+                      onTouchMove={(e) => e.stopPropagation()}
+                      onWheel={(e) => e.stopPropagation()}
+                      className="flex flex-col gap-1 max-h-36 sm:max-h-40 overflow-y-auto overscroll-contain touch-pan-y pr-0.5"
+                    >
                       {/* Off Option */}
                       <button
                         onClick={() => handleSelectSubtitle('Off')}
@@ -2304,7 +2376,11 @@ export const VideoPlayerModal: React.FC = () => {
 
                 {/* Quality Panel Content */}
                 {activePanel === 'quality' && (
-                  <div className="flex flex-col gap-1.5 max-h-36 overflow-y-auto pr-1">
+                  <div
+                    onTouchMove={(e) => e.stopPropagation()}
+                    onWheel={(e) => e.stopPropagation()}
+                    className="flex flex-col gap-1.5 max-h-36 overflow-y-auto overscroll-contain touch-pan-y pr-1"
+                  >
                     <button
                       onClick={() => handleSelectQuality(-1)}
                       className={`flex items-center justify-between px-3 py-1.5 rounded-lg border text-xs font-semibold cursor-pointer ${
@@ -2336,7 +2412,11 @@ export const VideoPlayerModal: React.FC = () => {
 
                 {/* Playback Speed Content */}
                 {activePanel === 'speed' && (
-                  <div className="grid grid-cols-3 gap-1.5">
+                  <div
+                    onTouchMove={(e) => e.stopPropagation()}
+                    onWheel={(e) => e.stopPropagation()}
+                    className="grid grid-cols-3 gap-1.5"
+                  >
                     {[0.5, 0.75, 1, 1.25, 1.5, 2].map((spd) => (
                       <button
                         key={spd}
@@ -2358,7 +2438,11 @@ export const VideoPlayerModal: React.FC = () => {
 
                 {/* Audio Tracks Panel Content (English Prioritized) */}
                 {activePanel === 'audio' && (
-                  <div className="flex flex-col gap-1.5 max-h-36 overflow-y-auto pr-1">
+                  <div
+                    onTouchMove={(e) => e.stopPropagation()}
+                    onWheel={(e) => e.stopPropagation()}
+                    className="flex flex-col gap-1.5 max-h-36 overflow-y-auto overscroll-contain touch-pan-y pr-1"
+                  >
                     {audioTracks.map((trk) => {
                       const isEng =
                         trk.lang.startsWith('en') ||
@@ -2401,7 +2485,10 @@ export const VideoPlayerModal: React.FC = () => {
                 {activePanel === 'episodes' && (
                   <div className="flex flex-col gap-2">
                     {/* Season Switcher Pills Bar Inside S.E Window */}
-                    <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin shrink-0">
+                    <div
+                      onTouchMove={(e) => e.stopPropagation()}
+                      className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin shrink-0 overscroll-contain touch-pan-x"
+                    >
                       {seasons.length > 0 ? (
                         seasons.map((s) => {
                           const isSelected = s.season_number === currentSeason;
@@ -2428,7 +2515,11 @@ export const VideoPlayerModal: React.FC = () => {
                     </div>
 
                     {/* Episodes List - Compact scrollable */}
-                    <div className="flex flex-col gap-1 max-h-36 overflow-y-auto pr-1">
+                    <div
+                      onTouchMove={(e) => e.stopPropagation()}
+                      onWheel={(e) => e.stopPropagation()}
+                      className="flex flex-col gap-1 max-h-36 overflow-y-auto overscroll-contain touch-pan-y pr-1"
+                    >
                       {episodes.length > 0 ? (
                         episodes.map((ep) => {
                           const isCurrent = ep.episode_number === currentEpisode;
@@ -2473,7 +2564,11 @@ export const VideoPlayerModal: React.FC = () => {
 
                 {/* Keyboard Shortcuts Content */}
                 {activePanel === 'shortcuts' && (
-                  <div className="flex flex-col gap-1.5 max-h-36 overflow-y-auto pr-1">
+                  <div
+                    onTouchMove={(e) => e.stopPropagation()}
+                    onWheel={(e) => e.stopPropagation()}
+                    className="flex flex-col gap-1.5 max-h-36 overflow-y-auto overscroll-contain touch-pan-y pr-1"
+                  >
                     {[
                       { key: 'Space / K', desc: 'Play / Pause Video' },
                       { key: 'M', desc: 'Mute / Unmute Audio' },
@@ -2521,7 +2616,7 @@ export const VideoPlayerModal: React.FC = () => {
               </span>
             </div>
 
-            <div className="flex items-center gap-2 overflow-x-auto pb-1.5 scrollbar-thin">
+            <div className="flex items-center gap-2 overflow-x-auto pb-1.5 scrollbar-thin overscroll-contain touch-pan-x">
               {streams.map((st, idx) => {
                 const isActive = idx === activeStreamIndex;
                 const serverNum = idx + 1;
