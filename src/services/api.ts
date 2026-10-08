@@ -457,6 +457,26 @@ function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
       continue;
     }
 
+    // Filter out sample video shorts, teasers, trailers, and promo clips
+    const rawTitleStr = String(s?.title || s?.name || '').toLowerCase();
+    const isSampleStream =
+      /(?:^|[._\-\/\s])sample(?:[._\-\/\s\d]|$)/i.test(urlLower) ||
+      /(?:^|[._\-\/\s])sample(?:[._\-\/\s\d]|$)/i.test(rawTitleStr) ||
+      /(?:^|[._\-\/\s])trailer(?:[._\-\/\s\d]|$)/i.test(urlLower) ||
+      /(?:^|[._\-\/\s])trailer(?:[._\-\/\s\d]|$)/i.test(rawTitleStr) ||
+      /(?:^|[._\-\/\s])teaser(?:[._\-\/\s\d]|$)/i.test(urlLower) ||
+      /(?:^|[._\-\/\s])teaser(?:[._\-\/\s\d]|$)/i.test(rawTitleStr) ||
+      urlLower.includes('sample.mp4') ||
+      urlLower.includes('sample.mkv') ||
+      urlLower.includes('sample.webm') ||
+      rawTitleStr.includes('sample video') ||
+      rawTitleStr.includes('sample short') ||
+      rawTitleStr.includes('short sample');
+
+    if (isSampleStream) {
+      continue;
+    }
+
     const isDASH =
       Boolean(s?.isDASH) ||
       s?.type === 'dash' ||

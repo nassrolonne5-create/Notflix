@@ -49,6 +49,28 @@ const formatTime = (seconds: number) => {
   return `${m}:${String(s).padStart(2, '0')}`;
 };
 
+const isSampleStreamSource = (s?: StreamSource): boolean => {
+  if (!s) return false;
+  const u = (s.url || '').toLowerCase();
+  const t = (s.rawTitle || '').toLowerCase();
+  const p = (s.provider || '').toLowerCase();
+  return (
+    /(?:^|[._\-\/\s])sample(?:[._\-\/\s\d]|$)/i.test(u) ||
+    /(?:^|[._\-\/\s])sample(?:[._\-\/\s\d]|$)/i.test(t) ||
+    /(?:^|[._\-\/\s])trailer(?:[._\-\/\s\d]|$)/i.test(u) ||
+    /(?:^|[._\-\/\s])trailer(?:[._\-\/\s\d]|$)/i.test(t) ||
+    /(?:^|[._\-\/\s])teaser(?:[._\-\/\s\d]|$)/i.test(u) ||
+    /(?:^|[._\-\/\s])teaser(?:[._\-\/\s\d]|$)/i.test(t) ||
+    u.includes('sample.mp4') ||
+    u.includes('sample.mkv') ||
+    u.includes('sample.webm') ||
+    t.includes('sample video') ||
+    t.includes('sample short') ||
+    t.includes('short sample') ||
+    p.includes('sample')
+  );
+};
+
 export const VideoPlayerModal: React.FC = () => {
   const {
     activeModalItem,
@@ -71,7 +93,6 @@ export const VideoPlayerModal: React.FC = () => {
   const [streams, setStreams] = useState<StreamSource[]>([]);
   const [activeStreamIndex, setActiveStreamIndex] = useState<number>(0);
   const [isLoadingStreams, setIsLoadingStreams] = useState<boolean>(true);
-  const [isBuffering, setIsBuffering] = useState<boolean>(false);
   const [streamError, setStreamError] = useState<string | null>(null);
 
   // TV Seasons & Episodes
@@ -110,6 +131,7 @@ export const VideoPlayerModal: React.FC = () => {
   const hasResumedRef = useRef<boolean>(false);
   const lastSavedTimeRef = useRef<number>(0);
   const attemptedIndicesRef = useRef<Set<number>>(new Set());
+  const sampleSkippedIndicesRef = useRef<Set<number>>(new Set());
   const autoSwitchTimeoutRef = useRef<number | null>(null);
   const watchdogTimerRef = useRef<number | null>(null);
 
@@ -147,21 +169,6 @@ export const VideoPlayerModal: React.FC = () => {
     activeModalItem?.type === 'tv' ||
     activeModalItem?.media_type === 'tv' ||
     Boolean(!activeModalItem?.title && activeModalItem?.name);
-
-  // Poster & Backdrop image for blurred theater background
-  const posterUrl =
-    activeModalItem?.poster ||
-    (activeModalItem?.poster_path
-      ? `https://image.tmdb.org/t/p/w780${activeModalItem.poster_path}`
-      : '') ||
-    activeModalItem?.backdrop ||
-    (activeModalItem?.backdrop_path
-      ? `https://image.tmdb.org/t/p/w1280${activeModalItem.backdrop_path}`
-      : '') ||
-    '';
-
-  const isBufferingOrReconnecting =
-    isLoadingStreams || isBuffering || Boolean(streamError);
 
   // Load TV Seasons & Credits
   useEffect(() => {
@@ -302,8 +309,14 @@ export const VideoPlayerModal: React.FC = () => {
       });
 
       attemptedIndicesRef.current.clear();
+      sampleSkippedIndicesRef.current.clear();
+
+      // Pre-filter out known sample video / trailer streams if alternatives exist
+      const validStreams = sortedStreams.filter((s) => !isSampleStreamSource(s));
+      const finalStreams = validStreams.length > 0 ? validStreams : sortedStreams;
+
       attemptedIndicesRef.current.add(0);
-      setStreams(sortedStreams);
+      setStreams(finalStreams);
       setIsLoadingStreams(false);
       setStreamLoadAttempt(1);
     },
@@ -364,6 +377,34 @@ export const VideoPlayerModal: React.FC = () => {
   const handleStreamFailureRef = useRef(handleStreamFailure);
   handleStreamFailureRef.current = handleStreamFailure;
 
+  // Auto-skip servers hosting sample video shorts (e.g. trailers, watermarked promos, short sample clips)
+  const checkAndSkipSampleShort = useCallback(
+    (dur: number): boolean => {
+      if (!dur || !isFinite(dur) || dur <= 0) return false;
+      if (sampleSkippedIndicesRef.current.has(activeStreamIndex)) return true;
+
+      // Normal movies are > 45 min (2700s), TV episodes are > 10 min (600s).
+      // Any video with duration <= 180s (3 min) — or <= 240s (4 min) for movies — is a sample video short or teaser clip.
+      const isMovie = activeModalItem?.type === 'movie';
+      const sampleThresholdSeconds = isMovie ? 240 : 180;
+
+      if (dur <= sampleThresholdSeconds) {
+        sampleSkippedIndicesRef.current.add(activeStreamIndex);
+        console.warn(
+          `[AutoSkip] Server ${activeStreamIndex + 1} contains sample video short (duration: ${Math.round(dur)}s <= ${sampleThresholdSeconds}s). Auto-skipping to next server...`
+        );
+        showToast(`Skipped sample video on Server ${activeStreamIndex + 1}`, '⏭️');
+        handleStreamFailure(activeStreamIndex, `Sample video short (${Math.round(dur)}s) detected`);
+        return true;
+      }
+      return false;
+    },
+    [activeModalItem?.type, activeStreamIndex, handleStreamFailure, showToast]
+  );
+
+  const checkAndSkipSampleShortRef = useRef(checkAndSkipSampleShort);
+  checkAndSkipSampleShortRef.current = checkAndSkipSampleShort;
+
   // Load Subtitles
   useEffect(() => {
     if (!activeModalItem || !imdbId) return;
@@ -381,6 +422,15 @@ export const VideoPlayerModal: React.FC = () => {
 
     const stream = streams[activeStreamIndex];
     if (!stream) return;
+
+    // Immediately skip if stream URL or title is flagged as a sample video short
+    if (isSampleStreamSource(stream)) {
+      console.warn(`[AutoSkip] Server ${activeStreamIndex + 1} URL/title indicates sample video short. Auto-skipping...`);
+      sampleSkippedIndicesRef.current.add(activeStreamIndex);
+      showToast(`Skipped sample video on Server ${activeStreamIndex + 1}`, '⏭️');
+      handleStreamFailureRef.current(activeStreamIndex, 'Sample video URL/title detected');
+      return;
+    }
 
     // Clean up any active timers
     if (watchdogTimerRef.current) {
@@ -409,6 +459,10 @@ export const VideoPlayerModal: React.FC = () => {
 
     const onMediaActive = () => {
       clearWatchdog();
+      const dur = video.duration;
+      if (dur && isFinite(dur) && dur > 0) {
+        checkAndSkipSampleShortRef.current(dur);
+      }
     };
 
     video.addEventListener('loadedmetadata', onMediaActive);
@@ -520,6 +574,10 @@ export const VideoPlayerModal: React.FC = () => {
 
       hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
         clearWatchdog();
+        const dur = video.duration;
+        if (dur && isFinite(dur) && dur > 0 && checkAndSkipSampleShortRef.current(dur)) {
+          return;
+        }
         const levels = data.levels.map((lvl, idx) => ({
           id: idx,
           height: lvl.height,
@@ -605,6 +663,10 @@ export const VideoPlayerModal: React.FC = () => {
 
       const onReady = () => {
         clearWatchdog();
+        const dur = video.duration;
+        if (dur && isFinite(dur) && dur > 0 && checkAndSkipSampleShortRef.current(dur)) {
+          return;
+        }
         setIsLoadingStreams(false);
         setStreamError(null);
         resumeSavedPlayback();
@@ -651,6 +713,10 @@ export const VideoPlayerModal: React.FC = () => {
 
     const onDirectReady = () => {
       clearWatchdog();
+      const dur = video.duration;
+      if (dur && isFinite(dur) && dur > 0 && checkAndSkipSampleShortRef.current(dur)) {
+        return;
+      }
       setIsLoadingStreams(false);
       setStreamError(null);
       resumeSavedPlayback();
@@ -862,17 +928,23 @@ export const VideoPlayerModal: React.FC = () => {
     if (!video) return;
     const dur = video.duration;
     if (dur && isFinite(dur) && dur > 0) {
+      if (checkAndSkipSampleShort(dur)) {
+        return;
+      }
       setDuration(dur);
     }
   };
 
   const handleTimeUpdate = () => {
-    if (isBuffering) setIsBuffering(false);
     const video = videoRef.current;
     if (!video || !activeModalItem) return;
 
-    const ct = video.currentTime;
     const dur = video.duration || 0;
+    if (dur > 0 && isFinite(dur) && checkAndSkipSampleShort(dur)) {
+      return;
+    }
+
+    const ct = video.currentTime;
     setCurrentTime(ct);
     setDuration(dur);
 
@@ -1731,31 +1803,12 @@ export const VideoPlayerModal: React.FC = () => {
         >
           {/* Inner Video Layer with overflow-hidden */}
           <div className="absolute inset-0 overflow-hidden flex items-center justify-center">
-            {/* Blurred Movie / Series Poster Background during Buffering, Loading, or Reconnecting */}
-            {posterUrl && (
-              <div
-                className={`absolute inset-0 pointer-events-none transition-all duration-700 ease-in-out z-15 ${
-                  isBufferingOrReconnecting
-                    ? 'opacity-100 scale-100'
-                    : 'opacity-0 scale-105 pointer-events-none'
-                }`}
-              >
-                <div
-                  className="absolute inset-0 bg-cover bg-center filter blur-2xl md:blur-3xl scale-110 transform-gpu"
-                  style={{ backgroundImage: `url(${posterUrl})` }}
-                />
-                {/* Cinematic degraded dark vignette overlay so text & spinners stay sharp */}
-                <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/60 to-black/85 backdrop-blur-sm" />
-              </div>
-            )}
-
             {/* Native HTML5 Video Stream Element */}
             <video
               ref={videoRef}
               playsInline
               style={{ filter: `brightness(${brightness})` }}
               onPlay={() => {
-                setIsBuffering(false);
                 setIsPlaying(true);
                 telemetry.trackPlay(
                   activeModalItem,
@@ -1763,22 +1816,6 @@ export const VideoPlayerModal: React.FC = () => {
                   currentEpisode,
                   currentStream?.provider || `Server ${activeStreamIndex + 1}`
                 );
-              }}
-              onPlaying={() => {
-                setIsBuffering(false);
-                setIsPlaying(true);
-              }}
-              onWaiting={() => {
-                setIsBuffering(true);
-              }}
-              onCanPlay={() => {
-                setIsBuffering(false);
-              }}
-              onSeeking={() => {
-                setIsBuffering(true);
-              }}
-              onSeeked={() => {
-                setIsBuffering(false);
               }}
               onPause={() => {
                 setIsPlaying(false);
@@ -1884,46 +1921,16 @@ export const VideoPlayerModal: React.FC = () => {
             </button>
           )}
 
-          {/* Stream Buffering HUD (when playback is stalled) */}
-          {isBuffering && !isLoadingStreams && !streamError && (
-            <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 text-white pointer-events-none p-4 animate-in fade-in duration-200">
-              <div className="relative">
-                <div className="w-12 h-12 rounded-full border-3 border-blue-500/30 border-t-blue-400 animate-spin shadow-2xl" />
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="w-2.5 h-2.5 rounded-full bg-blue-400 animate-ping" />
-                </div>
-              </div>
-              <div className="px-3.5 py-1.5 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-xs font-semibold text-slate-200 shadow-xl flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-                <span>Buffering stream...</span>
-              </div>
-            </div>
-          )}
-
-          {/* Stream Loader Overlay (while loading / reconnecting) */}
+          {/* Stream Loader Overlay (while loading) */}
           {isLoadingStreams && (
-            <div className="absolute inset-0 z-30 bg-black/40 backdrop-blur-sm flex flex-col items-center justify-center gap-3 text-white pointer-events-none p-4">
+            <div className="absolute inset-0 z-30 bg-black/80 backdrop-blur-md flex flex-col items-center justify-center gap-3 text-white pointer-events-none p-4">
               <div className="w-11 h-11 rounded-full border-3 border-blue-500 border-t-transparent animate-spin shadow-lg" />
-              <div className="text-center max-w-sm">
-                <p className="text-sm font-semibold text-white tracking-wide">
-                  {streams.length > 0
-                    ? `Connecting to Server ${activeStreamIndex + 1}...`
-                    : streamLoadAttempt > 1
-                    ? `Scraping Servers (Attempt ${streamLoadAttempt} of 3)...`
-                    : 'Loading streaming servers...'}
-                </p>
-                <p className="text-[11px] text-slate-300 mt-1">
-                  {streamLoadAttempt > 1
-                    ? 'Allowing extra time for multi-source APIs to respond'
-                    : 'Connecting to multi-provider scraper network'}
-                </p>
-              </div>
             </div>
           )}
 
           {/* Stream Error Notice with Auto-Retry */}
           {streamError && !isLoadingStreams && (
-            <div className="absolute inset-0 z-30 bg-black/50 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center text-white">
+            <div className="absolute inset-0 z-30 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center text-white">
               <p className="text-amber-400 font-bold text-sm max-w-md mb-2">{streamError}</p>
               {retryCountdown !== null && (
                 <p className="text-xs text-blue-400 font-mono mb-4 animate-pulse">
@@ -2578,6 +2585,9 @@ export const VideoPlayerModal: React.FC = () => {
                     {/* Server Label - HIDE ORIGINAL SERVER NAMES */}
                     <span className="font-semibold text-xs tracking-tight whitespace-nowrap">
                       Server {serverNum}
+                      {sampleSkippedIndicesRef.current.has(idx) && (
+                        <span className="ml-1 text-[9px] text-amber-400 font-normal">(Sample)</span>
+                      )}
                     </span>
 
                     {/* Resolution badge */}
