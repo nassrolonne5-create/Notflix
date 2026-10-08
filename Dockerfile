@@ -21,6 +21,7 @@ FROM base AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
+ENV NODE_OPTIONS="--import tsx"
 
 # Copy runtime files
 COPY --from=builder /app/node_modules ./node_modules
@@ -29,7 +30,7 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server.ts ./server.ts
 
 # Create data directory for user persistence
-RUN mkdir -p /app/data && \
+RUN mkdir -p /app/data /app/downloads && \
     addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 notflix && \
     chown -R notflix:nodejs /app

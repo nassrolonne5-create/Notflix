@@ -7,5 +7,10 @@ cmds = ["npm install"]
 [phases.build]
 cmds = ["npm run build"]
 
+[variables]
+NODE_ENV = "production"
+NODE_OPTIONS = "--import tsx"
+PORT = "3000"
+
 [start]
 cmd = "npm start"

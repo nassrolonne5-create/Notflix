@@ -171,7 +171,7 @@ function isSafe(item: any): boolean {
 // ==========================================
 // 1. HEALTH CHECK
 // ==========================================
-app.get('/api/health', (req: Request, res: Response) => {
+app.get(['/api/health', '/health', '/healthz'], (req: Request, res: Response) => {
   res.json({
     status: 'ok',
     service: 'Notflix Backend',
@@ -1486,8 +1486,12 @@ Sitemap: https://notflixtv.com/sitemap.xml
     console.log(`📦 Serving production build from ${distPath} with instant-update cache policies`);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Notflix Full-Stack Server running on http://0.0.0.0:${PORT}`);
+  });
+
+  server.on('error', (err) => {
+    console.error('❌ Server listen error:', err);
   });
 }
 
