@@ -508,13 +508,18 @@ function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
       rawTitle.match(/\b(ENG|ENGLISH|PUNJABI|KANNADA|MALAYALAM|TELUGU|TAMIL|BENGALI|MARATHI|GUJARATI|URDU|HINDI|LATINO|ESPANOL|SPANISH|CASTILIAN|FRENCH|VF|VFF|RUSSIAN|GERMAN|DEUTSCH|ITALIAN|MULTI|DUAL)\b/i)?.[0] ||
       'Unknown';
 
+    let intro = s?.intro;
+    if (!intro && (urlLower.includes('professionaladvisory') || urlLower.includes('master.txt'))) {
+      intro = { start: 0, end: 28 };
+    }
+
     result.push({
       url: streamUrl,
       proxyUrl: proxyUrl || undefined,
       headers: headers || undefined,
       quality,
       provider: providerName,
-      intro: s?.intro,
+      intro,
       apiName,
       isM3U8,
       isDASH,

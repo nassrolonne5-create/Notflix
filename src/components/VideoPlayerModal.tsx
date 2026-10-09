@@ -403,13 +403,13 @@ export const VideoPlayerModal: React.FC = () => {
       }
     };
 
-    // 12-second connection watchdog: gives streaming CDNs ample time to initiate handshake and buffer
+    // 6.5-second connection watchdog: detects unplayable / dead CDN hosts quickly and auto-switches
     watchdogTimerRef.current = window.setTimeout(() => {
       if (video.readyState === 0) {
-        console.warn(`Server ${activeStreamIndex + 1} did not respond within 12s. Auto-switching to next server.`);
-        handleStreamFailureRef.current(activeStreamIndex, 'Connection timed out after 12s');
+        console.warn(`Server ${activeStreamIndex + 1} did not respond within 6.5s. Auto-switching to next server.`);
+        handleStreamFailureRef.current(activeStreamIndex, 'Connection timed out after 6.5s');
       }
-    }, 12000);
+    }, 6500);
 
     const onMediaActive = () => {
       clearWatchdog();
@@ -535,6 +535,11 @@ export const VideoPlayerModal: React.FC = () => {
         setStreamError(null);
 
         resumeSavedPlayback();
+        // Automatically skip dead black leader on streams with declared intro end
+        if (stream.intro && stream.intro.end > 0 && video.currentTime < 1) {
+          video.currentTime = stream.intro.end;
+        }
+
         video.play().then(() => {
           setIsPlaying(true);
         }).catch(() => {});
@@ -582,7 +587,19 @@ export const VideoPlayerModal: React.FC = () => {
         }
       });
 
+      let fragParsingErrorCount = 0;
       hls.on(Hls.Events.ERROR, (_event, data) => {
+        // Track demuxing/parsing errors (corrupted segments or unhandled fake headers)
+        if (data.details === 'fragParsingError' || data.details === 'remuxAllocError') {
+          fragParsingErrorCount++;
+          if (fragParsingErrorCount >= 2) {
+            clearWatchdog();
+            console.warn('Repeated fragParsingError on stream, auto-switching to next server...');
+            handleStreamFailureRef.current(activeStreamIndex, 'Corrupted video chunk / demux error');
+            return;
+          }
+        }
+
         if (data.fatal) {
           if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
             console.log('Recovering HLS media error...');
@@ -591,10 +608,10 @@ export const VideoPlayerModal: React.FC = () => {
           }
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
             networkErrorCount++;
-            if (networkErrorCount > 1) {
+            if (networkErrorCount > 1 || data.response?.code === 502 || data.response?.code === 404) {
               clearWatchdog();
-              console.warn('Repeated network error on HLS server, switching to next server...');
-              handleStreamFailureRef.current(activeStreamIndex, 'HLS network/403 error');
+              console.warn('Network / 502 / 404 error on HLS server, switching to next server...');
+              handleStreamFailureRef.current(activeStreamIndex, 'HLS network/403/502 error');
               return;
             }
             if (!hasRetriedProxy && stream.proxyUrl && initialUrl !== stream.proxyUrl) {

@@ -326,13 +326,17 @@ function normalizeStreams(data, apiName) {
     const quality = (s?.quality || s?.resolution || s?.label || "AUTO").toUpperCase();
     const rawTitle = [s?.name, s?.title].filter(Boolean).join(" \xB7 ") || "";
     const rawLang = s?.lang || s?.language || s?.audio || rawTitle.match(/\b(ENG|ENGLISH|PUNJABI|KANNADA|MALAYALAM|TELUGU|TAMIL|BENGALI|MARATHI|GUJARATI|URDU|HINDI|LATINO|ESPANOL|SPANISH|CASTILIAN|FRENCH|VF|VFF|RUSSIAN|GERMAN|DEUTSCH|ITALIAN|MULTI|DUAL)\b/i)?.[0] || "Unknown";
+    let intro = s?.intro;
+    if (!intro && (urlLower.includes("professionaladvisory") || urlLower.includes("master.txt"))) {
+      intro = { start: 0, end: 28 };
+    }
     return {
       url: streamUrl,
       proxyUrl: proxyUrl || void 0,
       headers: headers || void 0,
       quality,
       provider: providerName,
-      intro: s?.intro,
+      intro,
       apiName,
       isM3U8,
       isDASH,
@@ -686,7 +690,16 @@ app.get("/api/proxy/stream", async (req, res) => {
     let buffer = Buffer.from(arrayBuffer);
     const headerPrefix = buffer.subarray(0, 15).toString("utf8");
     const isM3u8Content = headerPrefix.startsWith("#EXTM3U") || headerPrefix.startsWith("#EXT");
-    const isPlaylist = isM3u8Content || targetUrl.includes(".m3u8") || contentType.includes("mpegurl") || contentType.includes("application/x-mpegURL");
+    const isPlaylist = isM3u8Content || targetUrl.includes(".m3u8") || targetUrl.includes("master.txt") || contentType.includes("mpegurl") || contentType.includes("application/x-mpegURL");
+    if (isPlaylist && !isM3u8Content) {
+      const textPreview = buffer.subarray(0, 200).toString("utf8").trim();
+      const isErrorPayload = textPreview.includes("WRONG HASH") || textPreview.includes("Link expired") || textPreview.includes("Invalid link") || textPreview.includes("Forbidden") || textPreview.includes("Access Denied") || textPreview.includes("Cloudflare") || textPreview.startsWith("<!DOCTYPE html") || textPreview.startsWith("<html") || buffer.length < 50;
+      if (isErrorPayload) {
+        console.warn(`[Stream Proxy] Upstream returned non-playable error payload: "${textPreview.slice(0, 50)}..."`);
+        res.setHeader("Content-Type", "text/plain");
+        return res.status(502).send(`Upstream returned non-playable payload: ${textPreview.slice(0, 60)}`);
+      }
+    }
     if (isPlaylist && buffer.length > 0) {
       const text = buffer.toString("utf8");
       if (text.includes("#EXTINF") || text.includes("#EXT-X-STREAM-INF") || text.startsWith("#EXT")) {
@@ -738,18 +751,29 @@ app.get("/api/proxy/stream", async (req, res) => {
         return res.send(rewritten);
       }
     }
-    if (buffer.length >= 8 && buffer[0] === 137 && buffer[1] === 80 && buffer[2] === 78 && buffer[3] === 71) {
+    const isFakeHeader = buffer.length >= 4 && buffer[0] === 137 && buffer[1] === 80 && buffer[2] === 78 && buffer[3] === 71 || buffer.length >= 3 && buffer[0] === 73 && buffer[1] === 68 && buffer[2] === 51 || buffer.length >= 4 && buffer[0] === 71 && buffer[1] === 73 && buffer[2] === 70 && buffer[3] === 56 || buffer.length > 0 && buffer[0] !== 71;
+    if (isFakeHeader && buffer.length > 188) {
       let syncIdx = -1;
-      for (let i = 8; i < Math.min(buffer.length - 188, 512); i++) {
-        if (buffer[i] === 71 && buffer[i + 188] === 71) {
+      const maxScan = Math.min(buffer.length - 376, 4096);
+      for (let i = 1; i < maxScan; i++) {
+        if (buffer[i] === 71 && buffer[i + 188] === 71 && buffer[i + 376] === 71) {
           syncIdx = i;
           break;
         }
       }
       if (syncIdx === -1) {
-        const candidate = buffer.indexOf(71, 8);
-        if (candidate > 0 && candidate < 512) {
-          syncIdx = candidate;
+        const fallbackScan = Math.min(buffer.length - 188, 4096);
+        for (let i = 1; i < fallbackScan; i++) {
+          if (buffer[i] === 71 && buffer[i + 188] === 71) {
+            syncIdx = i;
+            break;
+          }
+        }
+      }
+      if (syncIdx === -1) {
+        const ftypIdx = buffer.indexOf(Buffer.from("ftyp"), 0);
+        if (ftypIdx >= 4 && ftypIdx <= 2048) {
+          syncIdx = ftypIdx - 4;
         }
       }
       if (syncIdx > 0) {
@@ -835,18 +859,92 @@ app.get("/v1/proxy", async (req, res) => {
     const contentType = upstream.headers.get("content-type") || "";
     const arrayBuffer = await upstream.arrayBuffer();
     let buffer = Buffer.from(arrayBuffer);
-    if (buffer.length >= 8 && buffer[0] === 137 && buffer[1] === 80 && buffer[2] === 78 && buffer[3] === 71) {
+    const headerPrefix = buffer.subarray(0, 15).toString("utf8");
+    const isM3u8Content = headerPrefix.startsWith("#EXTM3U") || headerPrefix.startsWith("#EXT");
+    const isPlaylist = isM3u8Content || targetUrl.includes(".m3u8") || targetUrl.includes("master.txt") || contentType.includes("mpegurl") || contentType.includes("application/x-mpegURL");
+    if (isPlaylist && !isM3u8Content) {
+      const textPreview = buffer.subarray(0, 200).toString("utf8").trim();
+      const isErrorPayload = textPreview.includes("WRONG HASH") || textPreview.includes("Link expired") || textPreview.includes("Invalid link") || textPreview.includes("Forbidden") || textPreview.includes("Access Denied") || textPreview.includes("Cloudflare") || textPreview.startsWith("<!DOCTYPE html") || textPreview.startsWith("<html") || buffer.length < 50;
+      if (isErrorPayload) {
+        console.warn(`[CinePro Relay] Upstream returned non-playable error payload: "${textPreview.slice(0, 50)}..."`);
+        res.setHeader("Content-Type", "text/plain");
+        return res.status(502).send(`Upstream returned non-playable payload: ${textPreview.slice(0, 60)}`);
+      }
+    }
+    if (isPlaylist && buffer.length > 0) {
+      const text = buffer.toString("utf8");
+      if (text.includes("#EXTINF") || text.includes("#EXT-X-STREAM-INF") || text.startsWith("#EXT")) {
+        const baseUrl = new URL(targetUrl);
+        const lines = text.split("\n");
+        const rewritten = lines.map((line) => {
+          const trimmed = line.trim();
+          if (!trimmed) return line;
+          if (trimmed.startsWith("#")) {
+            if (trimmed.includes('URI="')) {
+              return trimmed.replace(/URI="([^"]+)"/g, (match, uri) => {
+                let full = uri;
+                try {
+                  full = new URL(uri, baseUrl).toString();
+                } catch (e) {
+                }
+                return `URI="/api/proxy/stream?url=${encodeURIComponent(full)}&headers=${encodeURIComponent(
+                  JSON.stringify(customHeaders)
+                )}"`;
+              });
+            }
+            return line;
+          }
+          let fullUrl = trimmed;
+          if (trimmed.includes("/v1/proxy") && trimmed.includes("data=")) {
+            try {
+              const dummy = trimmed.startsWith("http") ? trimmed : `http://127.0.0.1${trimmed}`;
+              const parsed = new URL(dummy);
+              const dataParam = parsed.searchParams.get("data");
+              if (dataParam) {
+                const unpacked = JSON.parse(dataParam);
+                if (unpacked.url) {
+                  fullUrl = unpacked.url;
+                }
+              }
+            } catch (e) {
+            }
+          } else {
+            try {
+              fullUrl = new URL(trimmed, baseUrl).toString();
+            } catch (e) {
+            }
+          }
+          return `/api/proxy/stream?url=${encodeURIComponent(fullUrl)}&headers=${encodeURIComponent(
+            JSON.stringify(customHeaders)
+          )}`;
+        }).join("\n");
+        res.setHeader("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8");
+        return res.send(rewritten);
+      }
+    }
+    const isFakeHeader = buffer.length >= 4 && buffer[0] === 137 && buffer[1] === 80 && buffer[2] === 78 && buffer[3] === 71 || buffer.length >= 3 && buffer[0] === 73 && buffer[1] === 68 && buffer[2] === 51 || buffer.length >= 4 && buffer[0] === 71 && buffer[1] === 73 && buffer[2] === 70 && buffer[3] === 56 || buffer.length > 0 && buffer[0] !== 71;
+    if (isFakeHeader && buffer.length > 188) {
       let syncIdx = -1;
-      for (let i = 8; i < Math.min(buffer.length - 188, 512); i++) {
-        if (buffer[i] === 71 && buffer[i + 188] === 71) {
+      const maxScan = Math.min(buffer.length - 376, 4096);
+      for (let i = 1; i < maxScan; i++) {
+        if (buffer[i] === 71 && buffer[i + 188] === 71 && buffer[i + 376] === 71) {
           syncIdx = i;
           break;
         }
       }
       if (syncIdx === -1) {
-        const candidate = buffer.indexOf(71, 8);
-        if (candidate > 0 && candidate < 512) {
-          syncIdx = candidate;
+        const fallbackScan = Math.min(buffer.length - 188, 4096);
+        for (let i = 1; i < fallbackScan; i++) {
+          if (buffer[i] === 71 && buffer[i + 188] === 71) {
+            syncIdx = i;
+            break;
+          }
+        }
+      }
+      if (syncIdx === -1) {
+        const ftypIdx = buffer.indexOf(Buffer.from("ftyp"), 0);
+        if (ftypIdx >= 4 && ftypIdx <= 2048) {
+          syncIdx = ftypIdx - 4;
         }
       }
       if (syncIdx > 0) {
