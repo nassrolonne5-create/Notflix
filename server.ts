@@ -219,7 +219,7 @@ app.get('/api/tmdb/*', async (req: Request, res: Response) => {
     apiCache.set(cacheKey, { timestamp: Date.now(), data });
     return res.json(data);
   } catch (err: any) {
-    console.error('TMDB Proxy Error:', err);
+    console.warn('TMDB Proxy Error:', err?.message || err);
     return res.status(500).json({ error: 'Failed to fetch from TMDB' });
   }
 });
@@ -310,11 +310,14 @@ function normalizeStreams(data: any, apiName: string) {
         return null;
       }
 
-      // Filter out dead CinePro scrapers (LMScript returns WRONG HASH, Icefy returns 500, finepulfe is Cloudflare blocked)
+      // Filter out permanently broken scrapers that cannot be resolved client-side:
+      // (LMScript returns WRONG HASH, boomchick/finepulfe return 404/403 expired links, streamflixserver has no DNS)
+      // Icefy and VidRock Orion are now handled cleanly by our proxy PNG-stripper & MIME normalizer
       if (
         provLower.includes('lmscript') ||
-        provLower.includes('icefy') ||
-        urlLower.includes('finepulfe.xyz')
+        urlLower.includes('finepulfe.xyz') ||
+        urlLower.includes('boomchick.org') ||
+        urlLower.includes('streamflixserver.site')
       ) {
         return null;
       }
@@ -363,13 +366,13 @@ function normalizeStreams(data: any, apiName: string) {
       }
 
       const quality = (s?.quality || s?.resolution || s?.label || 'AUTO').toUpperCase();
-      const rawTitle = s?.title || s?.name || '';
+      const rawTitle = [s?.name, s?.title].filter(Boolean).join(' · ') || '';
       const rawLang =
         s?.lang ||
         s?.language ||
         s?.audio ||
-        rawTitle.match(/\b(ENG|ENGLISH|HINDI|LATINO|ESPANOL|FRENCH|GERMAN|RUSSIAN|MULTI|DUAL)\b/i)?.[0] ||
-        'English';
+        rawTitle.match(/\b(ENG|ENGLISH|PUNJABI|KANNADA|MALAYALAM|TELUGU|TAMIL|BENGALI|MARATHI|GUJARATI|URDU|HINDI|LATINO|ESPANOL|SPANISH|CASTILIAN|FRENCH|VF|VFF|RUSSIAN|GERMAN|DEUTSCH|ITALIAN|MULTI|DUAL)\b/i)?.[0] ||
+        'Unknown';
 
       return {
         url: streamUrl,
@@ -389,6 +392,11 @@ function normalizeStreams(data: any, apiName: string) {
 }
 
 function rankStreams(streams: any[], isTV: boolean) {
+  const foreignRegex =
+    /\b(PUNJABI|KANNADA|MALAYALAM|TELUGU|TAMIL|BENGALI|MARATHI|GUJARATI|URDU|HINDI|LATINO|ESPANOL|SPANISH|CASTILIAN|FRENCH|VF|VFF|RUSSIAN|GERMAN|DEUTSCH|ITALIAN)\b/i;
+  const englishRegex = /\b(ENG|ENGLISH|ORIGINAL|VO)\b/i;
+  const multiRegex = /\b(MULTI|DUAL)\b/i;
+
   const getRank = (s: any) => {
     const rawT = (s.rawTitle || '').toString().toUpperCase();
     const prov = (s.provider || '').toString().toUpperCase();
@@ -399,40 +407,22 @@ function rankStreams(streams: any[], isTV: boolean) {
     // Full text of stream metadata
     const fullText = `${rawT} ${prov} ${lang}`;
 
-    // Explicit foreign-only indicators (Hindi, Latino, Spanish, French, German, Russian etc.)
-    const isExplicitForeignOnly =
-      (fullText.includes('HINDI') ||
-       fullText.includes('LATINO') ||
-       fullText.includes('ESPANOL') ||
-       fullText.includes('CASTILIAN') ||
-       fullText.includes('FRENCH') ||
-       fullText.includes('VF') ||
-       fullText.includes('VFF') ||
-       fullText.includes('RUSSIAN') ||
-       fullText.includes('GERMAN') ||
-       fullText.includes('DEUTSCH') ||
-       fullText.includes('ITALIAN') ||
-       fullText.includes('TAMIL') ||
-       fullText.includes('TELUGU')) &&
-      !fullText.includes('ENG') &&
-      !fullText.includes('ENGLISH');
-
     const isExplicitEnglish =
-      fullText.includes('ENG') ||
-      fullText.includes('ENGLISH') ||
-      fullText.includes('ORIGINAL') ||
-      fullText.includes('VO') ||
+      englishRegex.test(fullText) ||
       lang === 'EN' ||
       lang === 'ENG' ||
       lang === 'ENGLISH';
 
-    const isMultiAudio = fullText.includes('MULTI') || fullText.includes('DUAL');
+    // Explicit foreign-only indicators (Punjabi, Hindi, Kannada, Malayalam, Latino, Spanish, French, etc.)
+    const isExplicitForeignOnly = foreignRegex.test(fullText) && !isExplicitEnglish;
+
+    const isMultiAudio = multiRegex.test(fullText);
 
     // Language Priority Score:
     // 0: Confirmed English Audio (highest priority)
     // 1: Multi-Audio (includes English)
-    // 2: Standard/Default Server (CinePro / Primary default is English)
-    // 4: Foreign dubbed only (lowest priority)
+    // 2: Standard/Default Server
+    // 4: Foreign dubbed only (lowest priority - Punjabi, Kannada, Hindi, etc.)
     let langScore = 2;
     if (isExplicitEnglish) {
       langScore = 0;
@@ -444,11 +434,41 @@ function rankStreams(streams: any[], isTV: boolean) {
       langScore = 2;
     }
 
-    // Provider preference: CinePro and Primary provide high-reliability English streams
+    // Provider preference:
+    // When choosing movie servers (!isTV): PRIORITIZE TMDB EMBED API SERVERS TO SHOW FIRST ON THE LIST!
+    const isTMDBEmbed =
+      aName.includes('tmdb') ||
+      aName.includes('embed') ||
+      prov.includes('TMDB') ||
+      prov.includes('CASTLE') ||
+      prov.includes('ONETOUCH') ||
+      prov.includes('STREAMFLIX') ||
+      prov.includes('VAPLAYER');
+
     let pScore = 50;
-    if (aName.includes('cinepro') || prov.includes('CINEPRO')) pScore = 1;
-    else if (aName.includes('primary') || prov.includes('PRIMARY')) pScore = 2;
-    else if (prov.includes('TORRENTIO')) pScore = 3;
+    if (!isTV) {
+      // Movies: TMDB Embed API servers are given highest priority (1)
+      if (isTMDBEmbed) {
+        pScore = 1;
+      } else if (aName.includes('cinepro') || prov.includes('CINEPRO')) {
+        pScore = 10;
+      } else if (aName.includes('primary') || prov.includes('PRIMARY')) {
+        pScore = 15;
+      } else if (prov.includes('TORRENTIO')) {
+        pScore = 20;
+      }
+    } else {
+      // TV Series: Cinepro then TMDB Embed
+      if (aName.includes('cinepro') || prov.includes('CINEPRO')) {
+        pScore = 1;
+      } else if (isTMDBEmbed) {
+        pScore = 5;
+      } else if (aName.includes('primary') || prov.includes('PRIMARY')) {
+        pScore = 10;
+      } else if (prov.includes('TORRENTIO')) {
+        pScore = 20;
+      }
+    }
 
     // Quality preference: 1080p > 4K > 720p > Auto
     let qScore = 500;
@@ -601,7 +621,7 @@ app.get('/api/subtitles/search', async (req: Request, res: Response) => {
     const data = await fetchWithTimeout(url, 6000).catch(() => ({ subtitles: [] }));
     return res.json(data);
   } catch (err: any) {
-    console.error('Subtitles search error:', err);
+    console.warn('Subtitles search error:', err?.message || err);
     return res.json({ subtitles: [] });
   }
 });
@@ -633,7 +653,7 @@ app.get('/api/subtitles/proxy', async (req: Request, res: Response) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     return res.send(text);
   } catch (err: any) {
-    console.error('Subtitle proxy error:', err);
+    console.warn('Subtitle proxy error:', err?.message || err);
     return res.status(500).send('Error proxying subtitle');
   }
 });
@@ -654,7 +674,24 @@ app.get('/api/proxy/stream', async (req: Request, res: Response) => {
     }
 
     let targetUrl = decodeURIComponent(rawUrl);
-    if (targetUrl.startsWith('/v1/proxy')) {
+
+    // Unpack CinePro /v1/proxy?data= to bypass CinePro remote proxy's binary mangling
+    if (targetUrl.includes('/v1/proxy') && targetUrl.includes('data=')) {
+      try {
+        const dummy = targetUrl.startsWith('http') ? targetUrl : `http://127.0.0.1${targetUrl}`;
+        const parsed = new URL(dummy);
+        const dataStr = parsed.searchParams.get('data');
+        if (dataStr) {
+          const payload = JSON.parse(dataStr);
+          if (payload.url) {
+            targetUrl = payload.url;
+            if (payload.headers && typeof payload.headers === 'object') {
+              customHeaders = { ...payload.headers, ...customHeaders };
+            }
+          }
+        }
+      } catch (e) {}
+    } else if (targetUrl.startsWith('/v1/proxy')) {
       const queryString = targetUrl.includes('?') ? targetUrl.slice(targetUrl.indexOf('?')) : '';
       targetUrl = `${SCRAPER_API_CINEPRO}/v1/proxy${queryString}`;
     } else if (targetUrl.startsWith('/')) {
@@ -668,6 +705,7 @@ app.get('/api/proxy/stream', async (req: Request, res: Response) => {
     const forwardHeaders: Record<string, string> = {
       'User-Agent':
         customHeaders['User-Agent'] ||
+        (req.headers['user-agent'] as string) ||
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
       Accept: '*/*',
     };
@@ -677,116 +715,276 @@ app.get('/api/proxy/stream', async (req: Request, res: Response) => {
       forwardHeaders['Range'] = req.headers.range as string;
     }
 
-    const upstream = await fetch(targetUrl, {
-      headers: forwardHeaders,
-    });
+    const abortController = new AbortController();
+    const abortTimeout = setTimeout(() => abortController.abort(), 20000);
+
+    let upstream: globalThis.Response;
+    try {
+      upstream = await fetch(targetUrl, {
+        headers: forwardHeaders,
+        signal: abortController.signal,
+      });
+    } finally {
+      clearTimeout(abortTimeout);
+    }
 
     res.set('Access-Control-Allow-Origin', '*');
     res.set('Access-Control-Allow-Headers', '*');
     res.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
 
+    if (!upstream.ok && upstream.status !== 206) {
+      return res.status(upstream.status).send(`Upstream returned ${upstream.status}`);
+    }
+
     const contentType = upstream.headers.get('content-type') || '';
-    if (contentType) res.set('Content-Type', contentType);
-    if (upstream.headers.get('content-range')) res.set('Content-Range', upstream.headers.get('content-range')!);
-    if (upstream.headers.get('accept-ranges')) res.set('Accept-Ranges', upstream.headers.get('accept-ranges')!);
-    if (upstream.headers.get('content-length')) res.set('Content-Length', upstream.headers.get('content-length')!);
+    const arrayBuffer = await upstream.arrayBuffer();
+    let buffer = Buffer.from(arrayBuffer);
 
-    res.status(upstream.status);
-
+    // 1. Detect if it's an M3U8 Playlist (including disguised files like master.txt)
+    const headerPrefix = buffer.subarray(0, 15).toString('utf8');
+    const isM3u8Content = headerPrefix.startsWith('#EXTM3U') || headerPrefix.startsWith('#EXT');
     const isPlaylist =
+      isM3u8Content ||
       targetUrl.includes('.m3u8') ||
       contentType.includes('mpegurl') ||
       contentType.includes('application/x-mpegURL');
 
-    if (isPlaylist && upstream.status === 200) {
-      const text = await upstream.text();
-      const baseUrl = new URL(targetUrl);
-      const lines = text.split('\n');
-      const rewritten = lines
-        .map((line) => {
-          const trimmed = line.trim();
-          if (!trimmed) return line;
-          if (trimmed.startsWith('#')) {
-            // Rewrite URI="..." inside tags like #EXT-X-KEY or #EXT-X-MEDIA
-            if (trimmed.includes('URI="')) {
-              return trimmed.replace(/URI="([^"]+)"/g, (match, uri) => {
-                const full = new URL(uri, baseUrl).toString();
-                return `URI="/api/proxy/stream?url=${encodeURIComponent(full)}&headers=${encodeURIComponent(
-                  JSON.stringify(customHeaders)
-                )}"`;
-              });
+    if (isPlaylist && buffer.length > 0) {
+      const text = buffer.toString('utf8');
+      if (text.includes('#EXTINF') || text.includes('#EXT-X-STREAM-INF') || text.startsWith('#EXT')) {
+        const baseUrl = new URL(targetUrl);
+        const lines = text.split('\n');
+        const rewritten = lines
+          .map((line) => {
+            const trimmed = line.trim();
+            if (!trimmed) return line;
+            if (trimmed.startsWith('#')) {
+              if (trimmed.includes('URI="')) {
+                return trimmed.replace(/URI="([^"]+)"/g, (match, uri) => {
+                  let full = uri;
+                  try {
+                    full = new URL(uri, baseUrl).toString();
+                  } catch (e) {}
+                  return `URI="/api/proxy/stream?url=${encodeURIComponent(full)}&headers=${encodeURIComponent(
+                    JSON.stringify(customHeaders)
+                  )}"`;
+                });
+              }
+              return line;
             }
-            return line;
-          }
-          // Segment URL or child playlist URL
-          const full = new URL(trimmed, baseUrl).toString();
-          return `/api/proxy/stream?url=${encodeURIComponent(full)}&headers=${encodeURIComponent(
-            JSON.stringify(customHeaders)
-          )}`;
-        })
-        .join('\n');
 
-      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
-      return res.send(rewritten);
+            // Segment or child playlist URL
+            let fullUrl = trimmed;
+            if (trimmed.includes('/v1/proxy') && trimmed.includes('data=')) {
+              try {
+                const dummy = trimmed.startsWith('http') ? trimmed : `http://127.0.0.1${trimmed}`;
+                const parsed = new URL(dummy);
+                const dataParam = parsed.searchParams.get('data');
+                if (dataParam) {
+                  const unpacked = JSON.parse(dataParam);
+                  if (unpacked.url) {
+                    fullUrl = unpacked.url;
+                  }
+                }
+              } catch (e) {}
+            } else {
+              try {
+                fullUrl = new URL(trimmed, baseUrl).toString();
+              } catch (e) {}
+            }
+
+            return `/api/proxy/stream?url=${encodeURIComponent(fullUrl)}&headers=${encodeURIComponent(
+              JSON.stringify(customHeaders)
+            )}`;
+          })
+          .join('\n');
+
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+        return res.send(rewritten);
+      }
     }
 
-    // Binary video chunk or range stream
-    if (upstream.body) {
-      const { Readable } = await import('node:stream');
-      // @ts-ignore
-      Readable.fromWeb(upstream.body).pipe(res);
+    // 2. Binary Segment Processing: Strip Fake PNG Header (used by Icefy / 1x2.space CDNs)
+    if (
+      buffer.length >= 8 &&
+      buffer[0] === 0x89 &&
+      buffer[1] === 0x50 &&
+      buffer[2] === 0x4e &&
+      buffer[3] === 0x47
+    ) {
+      let syncIdx = -1;
+      for (let i = 8; i < Math.min(buffer.length - 188, 512); i++) {
+        if (buffer[i] === 0x47 && buffer[i + 188] === 0x47) {
+          syncIdx = i;
+          break;
+        }
+      }
+      if (syncIdx === -1) {
+        const candidate = buffer.indexOf(0x47, 8);
+        if (candidate > 0 && candidate < 512) {
+          syncIdx = candidate;
+        }
+      }
+
+      if (syncIdx > 0) {
+        buffer = buffer.subarray(syncIdx);
+      }
+    }
+
+    // 3. MIME Normalization for video segments (even if disguised as .woff2, .html, .png, .txt)
+    if (buffer.length > 0 && buffer[0] === 0x47) {
+      res.setHeader('Content-Type', 'video/mp2t');
+    } else if (buffer.length > 8 && buffer.subarray(4, 8).toString('latin1') === 'ftyp') {
+      res.setHeader('Content-Type', 'video/mp4');
+    } else if (contentType) {
+      res.setHeader('Content-Type', contentType);
     } else {
-      res.end();
+      res.setHeader('Content-Type', 'application/octet-stream');
     }
+
+    if (upstream.headers.get('content-range')) {
+      res.setHeader('Content-Range', upstream.headers.get('content-range')!);
+    }
+    if (upstream.headers.get('accept-ranges')) {
+      res.setHeader('Accept-Ranges', upstream.headers.get('accept-ranges')!);
+    }
+    res.setHeader('Content-Length', buffer.length.toString());
+
+    res.status(upstream.status);
+    return res.end(buffer);
   } catch (err: any) {
-    console.error('Stream proxy error:', err);
+    const isUnreachable =
+      err?.name === 'AbortError' ||
+      err?.code === 'ENOTFOUND' ||
+      err?.cause?.code === 'ENOTFOUND' ||
+      err?.code === 'ECONNREFUSED' ||
+      err?.cause?.code === 'ECONNREFUSED' ||
+      err?.code === 'ETIMEDOUT' ||
+      err?.cause?.code === 'ETIMEDOUT';
+
+    if (isUnreachable) {
+      console.warn(`[Stream Proxy] Upstream unreachable (${err?.cause?.code || err?.code || err?.name})`);
+    } else {
+      console.warn('[Stream Proxy] Proxy issue:', err?.message || err);
+    }
     if (!res.headersSent) {
       res.status(502).send('Upstream stream proxy failed');
     }
   }
 });
 
-// CinePro Proxy Relay (Eliminates Mixed Content HTTP/HTTPS blocks & routes relative /v1/proxy segments)
+// CinePro Proxy Relay (Eliminates Mixed Content HTTP/HTTPS blocks & direct binary unpacking)
 app.get('/v1/proxy', async (req: Request, res: Response) => {
   try {
-    const queryString = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-    const targetUrl = `${SCRAPER_API_CINEPRO}/v1/proxy${queryString}`;
+    let targetUrl = '';
+    let customHeaders: Record<string, string> = {};
+
+    // Unpack CinePro data payload directly if present
+    if (req.query.data) {
+      try {
+        const payload = JSON.parse(req.query.data as string);
+        if (payload.url) {
+          targetUrl = payload.url;
+          if (payload.headers && typeof payload.headers === 'object') {
+            customHeaders = payload.headers;
+          }
+        }
+      } catch (e) {}
+    }
+
+    if (!targetUrl) {
+      const queryString = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+      targetUrl = `${SCRAPER_API_CINEPRO}/v1/proxy${queryString}`;
+    }
 
     const forwardHeaders: Record<string, string> = {
       'User-Agent':
+        customHeaders['User-Agent'] ||
         (req.headers['user-agent'] as string) ||
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
       Accept: '*/*',
     };
+    if (customHeaders['Referer']) forwardHeaders['Referer'] = customHeaders['Referer'];
+    if (customHeaders['Origin']) forwardHeaders['Origin'] = customHeaders['Origin'];
     if (req.headers.range) {
       forwardHeaders['Range'] = req.headers.range as string;
     }
 
-    const upstream = await fetch(targetUrl, {
-      headers: forwardHeaders,
-    });
+    const abortController = new AbortController();
+    const abortTimeout = setTimeout(() => abortController.abort(), 20000);
+
+    let upstream: globalThis.Response;
+    try {
+      upstream = await fetch(targetUrl, {
+        headers: forwardHeaders,
+        signal: abortController.signal,
+      });
+    } finally {
+      clearTimeout(abortTimeout);
+    }
 
     res.set('Access-Control-Allow-Origin', '*');
     res.set('Access-Control-Allow-Headers', '*');
     res.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
 
+    if (!upstream.ok && upstream.status !== 206) {
+      return res.status(upstream.status).send(`Upstream returned ${upstream.status}`);
+    }
+
     const contentType = upstream.headers.get('content-type') || '';
-    if (contentType) res.set('Content-Type', contentType);
-    if (upstream.headers.get('content-range')) res.set('Content-Range', upstream.headers.get('content-range')!);
-    if (upstream.headers.get('accept-ranges')) res.set('Accept-Ranges', upstream.headers.get('accept-ranges')!);
-    if (upstream.headers.get('content-length')) res.set('Content-Length', upstream.headers.get('content-length')!);
+    const arrayBuffer = await upstream.arrayBuffer();
+    let buffer = Buffer.from(arrayBuffer);
+
+    // Strip Fake PNG Header if present
+    if (
+      buffer.length >= 8 &&
+      buffer[0] === 0x89 &&
+      buffer[1] === 0x50 &&
+      buffer[2] === 0x4e &&
+      buffer[3] === 0x47
+    ) {
+      let syncIdx = -1;
+      for (let i = 8; i < Math.min(buffer.length - 188, 512); i++) {
+        if (buffer[i] === 0x47 && buffer[i + 188] === 0x47) {
+          syncIdx = i;
+          break;
+        }
+      }
+      if (syncIdx === -1) {
+        const candidate = buffer.indexOf(0x47, 8);
+        if (candidate > 0 && candidate < 512) {
+          syncIdx = candidate;
+        }
+      }
+
+      if (syncIdx > 0) {
+        buffer = buffer.subarray(syncIdx);
+      }
+    }
+
+    // Set correct MIME type
+    if (buffer.length > 0 && buffer[0] === 0x47) {
+      res.setHeader('Content-Type', 'video/mp2t');
+    } else if (buffer.length > 8 && buffer.subarray(4, 8).toString('latin1') === 'ftyp') {
+      res.setHeader('Content-Type', 'video/mp4');
+    } else if (contentType) {
+      res.setHeader('Content-Type', contentType);
+    } else {
+      res.setHeader('Content-Type', 'application/octet-stream');
+    }
+
+    if (upstream.headers.get('content-range')) {
+      res.setHeader('Content-Range', upstream.headers.get('content-range')!);
+    }
+    if (upstream.headers.get('accept-ranges')) {
+      res.setHeader('Accept-Ranges', upstream.headers.get('accept-ranges')!);
+    }
+    res.setHeader('Content-Length', buffer.length.toString());
 
     res.status(upstream.status);
-
-    if (upstream.body) {
-      const { Readable } = await import('node:stream');
-      // @ts-ignore
-      Readable.fromWeb(upstream.body).pipe(res);
-    } else {
-      res.end();
-    }
+    return res.end(buffer);
   } catch (err: any) {
-    console.error('CinePro proxy relay error:', err);
+    console.warn('[CinePro Relay] Upstream unreachable:', err?.cause?.code || err?.code || err?.message);
     if (!res.headersSent) {
       res.status(502).send('CinePro proxy relay failed');
     }

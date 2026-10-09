@@ -428,11 +428,14 @@ function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
     const provLower = String(providerName).toLowerCase();
     const headers = s?.headers && typeof s.headers === 'object' ? s.headers : null;
 
-    // Filter out dead CinePro scrapers (LMScript returns WRONG HASH, Icefy returns 500, finepulfe is Cloudflare blocked)
+    // Filter out permanently broken scrapers that cannot be resolved client-side:
+    // (LMScript returns WRONG HASH, boomchick/finepulfe return 404/403 expired links, streamflixserver has no DNS)
+    // Icefy and VidRock Orion are now handled cleanly by our proxy PNG-stripper & MIME normalizer
     if (
       provLower.includes('lmscript') ||
-      provLower.includes('icefy') ||
-      urlLower.includes('finepulfe.xyz')
+      urlLower.includes('finepulfe.xyz') ||
+      urlLower.includes('boomchick.org') ||
+      urlLower.includes('streamflixserver.site')
     ) {
       continue;
     }
@@ -498,6 +501,13 @@ function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
     }
 
     const quality = (s?.quality || s?.resolution || s?.label || 'AUTO').toUpperCase();
+    const rawTitle = [s?.name, s?.title].filter(Boolean).join(' · ') || '';
+    const rawLang =
+      s?.lang ||
+      s?.language ||
+      s?.audio ||
+      rawTitle.match(/\b(ENG|ENGLISH|PUNJABI|KANNADA|MALAYALAM|TELUGU|TAMIL|BENGALI|MARATHI|GUJARATI|URDU|HINDI|LATINO|ESPANOL|SPANISH|CASTILIAN|FRENCH|VF|VFF|RUSSIAN|GERMAN|DEUTSCH|ITALIAN|MULTI|DUAL)\b/i)?.[0] ||
+      'Unknown';
 
     result.push({
       url: streamUrl,
@@ -509,11 +519,95 @@ function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
       apiName,
       isM3U8,
       isDASH,
-      rawTitle: s?.title || s?.name || '',
-      language: s?.language || 'English',
+      rawTitle,
+      language: rawLang,
     });
   }
   return result;
+}
+
+export function rankClientStreams(streams: StreamSource[], isTV: boolean): StreamSource[] {
+  const foreignRegex =
+    /\b(PUNJABI|KANNADA|MALAYALAM|TELUGU|TAMIL|BENGALI|MARATHI|GUJARATI|URDU|HINDI|LATINO|ESPANOL|SPANISH|CASTILIAN|FRENCH|VF|VFF|RUSSIAN|GERMAN|DEUTSCH|ITALIAN)\b/i;
+  const englishRegex = /\b(ENG|ENGLISH|ORIGINAL|VO)\b/i;
+  const multiRegex = /\b(MULTI|DUAL)\b/i;
+
+  const getRank = (s: StreamSource) => {
+    const rawT = (s.rawTitle || '').toString().toUpperCase();
+    const prov = (s.provider || '').toString().toUpperCase();
+    const lang = (s.language || '').toString().toUpperCase();
+    const q = (s.quality || '').toString().toUpperCase();
+    const aName = (s.apiName || '').toString().toLowerCase();
+
+    const fullText = `${rawT} ${prov} ${lang}`;
+
+    const isExplicitEnglish =
+      englishRegex.test(fullText) ||
+      lang === 'EN' ||
+      lang === 'ENG' ||
+      lang === 'ENGLISH';
+
+    const isExplicitForeignOnly = foreignRegex.test(fullText) && !isExplicitEnglish;
+    const isMultiAudio = multiRegex.test(fullText);
+
+    let langScore = 2;
+    if (isExplicitEnglish) {
+      langScore = 0;
+    } else if (isMultiAudio) {
+      langScore = 1;
+    } else if (isExplicitForeignOnly) {
+      langScore = 4;
+    } else {
+      langScore = 2;
+    }
+
+    const isTMDBEmbed =
+      aName.includes('tmdb') ||
+      aName.includes('embed') ||
+      prov.includes('TMDB') ||
+      prov.includes('CASTLE') ||
+      prov.includes('ONETOUCH') ||
+      prov.includes('STREAMFLIX') ||
+      prov.includes('VAPLAYER');
+
+    let pScore = 50;
+    if (!isTV) {
+      // Prioritize TMDB Embed API servers to show first for movies
+      if (isTMDBEmbed) {
+        pScore = 1;
+      } else if (aName.includes('cinepro') || prov.includes('CINEPRO')) {
+        pScore = 10;
+      } else if (aName.includes('primary') || prov.includes('PRIMARY')) {
+        pScore = 15;
+      } else if (prov.includes('TORRENTIO')) {
+        pScore = 20;
+      }
+    } else {
+      // TV Series
+      if (aName.includes('cinepro') || prov.includes('CINEPRO')) {
+        pScore = 1;
+      } else if (isTMDBEmbed) {
+        pScore = 5;
+      } else if (aName.includes('primary') || prov.includes('PRIMARY')) {
+        pScore = 10;
+      } else if (prov.includes('TORRENTIO')) {
+        pScore = 20;
+      }
+    }
+
+    let qScore = 500;
+    if (q.includes('LORDFIX')) qScore = 0;
+    else if (q.includes('1080') || q.includes('FHD')) qScore = 10;
+    else if (q.includes('2160') || q.includes('4K') || q.includes('UHD')) qScore = 20;
+    else if (q.includes('720') || q.includes('HD')) qScore = 30;
+    else if (q.includes('480')) qScore = 40;
+    else if (q.includes('360')) qScore = 50;
+    else if (q === 'AUTO') qScore = 60;
+
+    return langScore * 10000000 + pScore * 10000 + qScore;
+  };
+
+  return [...streams].sort((a, b) => getRank(a) - getRank(b));
 }
 
 // In-memory client stream cache (15-min TTL) to prevent duplicate scraper hits
@@ -616,21 +710,7 @@ export async function fetchStreams(
       }
 
       if (combined.length > 0) {
-        const sorted = [...combined].sort((a, b) => {
-          const strA = `${a.provider || ''} ${a.quality || ''} ${a.rawTitle || ''}`.toUpperCase();
-          const strB = `${b.provider || ''} ${b.quality || ''} ${b.rawTitle || ''}`.toUpperCase();
-          const aMulti = strA.includes('MULTI') || strA.includes('DUAL') ? 1 : 0;
-          const bMulti = strB.includes('MULTI') || strB.includes('DUAL') ? 1 : 0;
-          if (aMulti !== bMulti) return bMulti - aMulti;
-
-          const a4K = strA.includes('4K') || strA.includes('2160') ? 1 : 0;
-          const b4K = strB.includes('4K') || strB.includes('2160') ? 1 : 0;
-          if (a4K !== b4K) return b4K - a4K;
-
-          const a1080 = strA.includes('1080') ? 1 : 0;
-          const b1080 = strB.includes('1080') ? 1 : 0;
-          return b1080 - a1080;
-        });
+        const sorted = rankClientStreams(combined, isTV);
         streamClientCache.set(cacheKey, { streams: sorted, timestamp: Date.now() });
         return sorted;
       }

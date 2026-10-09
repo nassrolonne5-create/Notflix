@@ -3,6 +3,105 @@
   "favorites": [],
   "history": [
     {
+      "id": 969681,
+      "title": "Spider-Man: Brand New Day",
+      "year": "2026",
+      "rating": "8.3",
+      "vote_average": 8.3,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/bjiS5ipwxb9JFy3XRRN4OAilSeX.jpg",
+      "poster_path": "/bjiS5ipwxb9JFy3XRRN4OAilSeX.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/subj7knTn4DeS6KS7qI66EQKe9i.jpg",
+      "backdrop_path": "/subj7knTn4DeS6KS7qI66EQKe9i.jpg",
+      "overview": "Fighting crime full-time as Spider-Man in a world that doesn't remember him—and the pressure of seeing his old friends move on without him—sparks a change in Peter Parker he may not have the power to control. But that transformation might also be the only thing that can stop a shocking new threat to the city and those he loves - a powerful villain no one can even see.",
+      "genre_ids": [],
+      "adult": false,
+      "watchedAt": "08:35 PM"
+    },
+    {
+      "id": 285322,
+      "title": "Below",
+      "name": "Below",
+      "year": "2026",
+      "rating": "7.2",
+      "vote_average": 7.2,
+      "type": "tv",
+      "media_type": "tv",
+      "poster": "https://image.tmdb.org/t/p/w342/vgLqqhMUbljp585qPp1EFCyJtcz.jpg",
+      "poster_path": "/vgLqqhMUbljp585qPp1EFCyJtcz.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/cn0feYcDvVzVjUDoXa1O8sRgzz.jpg",
+      "backdrop_path": "/cn0feYcDvVzVjUDoXa1O8sRgzz.jpg",
+      "overview": "When a mysterious sea creature terrorizes a small Newfoundland town, a hard-bitten fisherman and his family fight to protect their close-knit community.",
+      "genre_ids": [
+        9648,
+        18
+      ],
+      "adult": false,
+      "watchedAt": "08:17 PM"
+    },
+    {
+      "id": 288673,
+      "title": "Carrie",
+      "name": "Carrie",
+      "year": "2026",
+      "rating": "8.8",
+      "vote_average": 8.792,
+      "type": "tv",
+      "media_type": "tv",
+      "poster": "https://image.tmdb.org/t/p/w342/eXjk4W4robXs7l1YXwaXMv4f2qb.jpg",
+      "poster_path": "/eXjk4W4robXs7l1YXwaXMv4f2qb.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/9yCJtipMeDe8uAdSJKvw8BnYfRz.jpg",
+      "backdrop_path": "/9yCJtipMeDe8uAdSJKvw8BnYfRz.jpg",
+      "overview": "After her father's sudden, untimely death thrusts her into the unforgiving ecosystem of public high school, Carrie is forced to navigate a viral bullying scandal that tears through her community, the relentless pressure and casual cruelty of the social‑media age, and the awakening of mysterious telekinetic powers that rise alongside her adolescence.",
+      "genre_ids": [
+        9648,
+        18
+      ],
+      "adult": false,
+      "watchedAt": "08:16 PM"
+    },
+    {
+      "id": 299534,
+      "title": "Avengers: Endgame",
+      "year": "2019",
+      "rating": "8.2",
+      "vote_average": 8.246,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/ulzhLuWrPK07P1YkdWQLZnQh1JL.jpg",
+      "poster_path": "/ulzhLuWrPK07P1YkdWQLZnQh1JL.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/7RyHsO4yDXtBv1zUU3mTpHeQ0d5.jpg",
+      "backdrop_path": "/7RyHsO4yDXtBv1zUU3mTpHeQ0d5.jpg",
+      "overview": "After the devastating events of Avengers: Infinity War, the universe is in ruins due to the efforts of the Mad Titan, Thanos. With the help of remaining allies, the Avengers must assemble once more in order to undo Thanos' actions and restore order to the universe once and for all, no matter what consequences may be in store.",
+      "genre_ids": [
+        12,
+        878,
+        28
+      ],
+      "adult": false,
+      "watchedAt": "07:53 PM"
+    },
+    {
+      "id": 1400837,
+      "title": "Other Mommy",
+      "year": "2026",
+      "rating": "8.1",
+      "vote_average": 8.1,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/fGRNCssTRrhYZxNzykGGCoMsAVq.jpg",
+      "poster_path": "/fGRNCssTRrhYZxNzykGGCoMsAVq.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/ncm7djsVTHQQMX2HEbEVxMUFchG.jpg",
+      "backdrop_path": "/ncm7djsVTHQQMX2HEbEVxMUFchG.jpg",
+      "overview": "Young Bela forms a relationship with a sinister entity in her home that looks uncannily like her own mother, drawing her into a terrifying and increasingly dark world.",
+      "genre_ids": [
+        27
+      ],
+      "adult": false,
+      "watchedAt": "07:51 PM"
+    },
+    {
       "id": 1458857,
       "title": "Doing Life",
       "year": "2026",
@@ -225,27 +324,6 @@
       "watchedAt": "09:04 AM"
     },
     {
-      "id": 969681,
-      "title": "Spider-Man: Brand New Day",
-      "year": "2026",
-      "rating": "7.9",
-      "vote_average": 7.9,
-      "type": "movie",
-      "media_type": "movie",
-      "poster": "https://image.tmdb.org/t/p/w342/bjiS5ipwxb9JFy3XRRN4OAilSeX.jpg",
-      "poster_path": "/bjiS5ipwxb9JFy3XRRN4OAilSeX.jpg",
-      "backdrop": "https://image.tmdb.org/t/p/w1280/qeQJx07rK2xm8SD2sJxFKhE7gs0.jpg",
-      "backdrop_path": "/qeQJx07rK2xm8SD2sJxFKhE7gs0.jpg",
-      "overview": "Fighting crime full-time as Spider-Man in a world that doesn't remember him—and the pressure of seeing his old friends move on without him—sparks a change in Peter Parker he may not have the power to control. But that transformation might also be the only thing that can stop a shocking new threat to the city and those he loves - a powerful villain no one can even see.",
-      "genre_ids": [
-        878,
-        28,
-        12
-      ],
-      "adult": false,
-      "watchedAt": "08:46 AM"
-    },
-    {
       "id": 1763619,
       "title": "Crazy Rich, Incredibly Broke",
       "year": "2026",
@@ -335,8 +413,8 @@
       "duration": 1168.6399999999999
     },
     "movie-969681": {
-      "time": 18.098921,
-      "duration": 8680.15999999997
+      "time": 31.577654,
+      "duration": 8700.607091999971
     },
     "movie-1377237": {
       "time": 129.966628,
@@ -419,6 +497,70 @@
     "movie-1339713": {
       "time": 5.272121,
       "duration": 6543.252089999927
+    },
+    "movie-299534": {
+      "time": 22.422799,
+      "duration": 10871.402690999994
+    },
+    "movie-1400837": {
+      "time": 11.681676,
+      "duration": 5528.750065000021
+    },
+    "tv-1508": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 3.231727,
+      "duration_1_1": 2608.56
+    },
+    "tv-84958": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 7.321912,
+      "duration_1_1": 3020.893133000004
+    },
+    "movie-1284046": {
+      "time": 20.081748,
+      "duration": 5278.25
+    },
+    "tv-63770": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 9.561919,
+      "duration_1_1": 7418.37505800004
+    },
+    "tv-76479": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 9.44254,
+      "duration_1_1": 3775.02099999997
+    },
+    "movie-1423191": {
+      "time": 74.752352,
+      "duration": 5079.466621999992
+    },
+    "movie-1291595": {
+      "time": 243.5059,
+      "duration": 6362.314403000003
+    },
+    "movie-299536": {
+      "time": 3.107892,
+      "duration": 12.083332
+    },
+    "movie-1400940": {
+      "time": 20.111351,
+      "duration": 145.937844
+    },
+    "tv-288673": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 13.788859,
+      "duration_1_1": 3311.1666809999983
+    },
+    "tv-285322": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 15.992186,
+      "duration_1_1": 2855.0416809999983
     }
   },
   "settings": {

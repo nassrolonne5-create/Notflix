@@ -49,28 +49,6 @@ const formatTime = (seconds: number) => {
   return `${m}:${String(s).padStart(2, '0')}`;
 };
 
-const isSampleStreamSource = (s?: StreamSource): boolean => {
-  if (!s) return false;
-  const u = (s.url || '').toLowerCase();
-  const t = (s.rawTitle || '').toLowerCase();
-  const p = (s.provider || '').toLowerCase();
-  return (
-    /(?:^|[._\-\/\s])sample(?:[._\-\/\s\d]|$)/i.test(u) ||
-    /(?:^|[._\-\/\s])sample(?:[._\-\/\s\d]|$)/i.test(t) ||
-    /(?:^|[._\-\/\s])trailer(?:[._\-\/\s\d]|$)/i.test(u) ||
-    /(?:^|[._\-\/\s])trailer(?:[._\-\/\s\d]|$)/i.test(t) ||
-    /(?:^|[._\-\/\s])teaser(?:[._\-\/\s\d]|$)/i.test(u) ||
-    /(?:^|[._\-\/\s])teaser(?:[._\-\/\s\d]|$)/i.test(t) ||
-    u.includes('sample.mp4') ||
-    u.includes('sample.mkv') ||
-    u.includes('sample.webm') ||
-    t.includes('sample video') ||
-    t.includes('sample short') ||
-    t.includes('short sample') ||
-    p.includes('sample')
-  );
-};
-
 export const VideoPlayerModal: React.FC = () => {
   const {
     activeModalItem,
@@ -131,7 +109,7 @@ export const VideoPlayerModal: React.FC = () => {
   const hasResumedRef = useRef<boolean>(false);
   const lastSavedTimeRef = useRef<number>(0);
   const attemptedIndicesRef = useRef<Set<number>>(new Set());
-  const sampleSkippedIndicesRef = useRef<Set<number>>(new Set());
+  const manuallySelectedServerRef = useRef<number | null>(null);
   const autoSwitchTimeoutRef = useRef<number | null>(null);
   const watchdogTimerRef = useRef<number | null>(null);
 
@@ -296,33 +274,11 @@ export const VideoPlayerModal: React.FC = () => {
         return;
       }
 
-      // Prioritize English language audio servers to show first
-      const sortedStreams = [...loaded].sort((a, b) => {
-        const aText = `${a.provider || ''} ${a.quality || ''} ${a.rawTitle || ''} ${a.language || ''}`.toUpperCase();
-        const bText = `${b.provider || ''} ${b.quality || ''} ${b.rawTitle || ''} ${b.language || ''}`.toUpperCase();
-
-        const aIsEng = aText.includes('ENG') || aText.includes('ENGLISH') || aText.includes('ORIGINAL') || a.language?.toLowerCase() === 'english';
-        const bIsEng = bText.includes('ENG') || bText.includes('ENGLISH') || bText.includes('ORIGINAL') || b.language?.toLowerCase() === 'english';
-
-        const aForeign = (aText.includes('HINDI') || aText.includes('LATINO') || aText.includes('ESPANOL') || aText.includes('FRENCH') || aText.includes('GERMAN') || aText.includes('RUSSIAN')) && !aIsEng;
-        const bForeign = (bText.includes('HINDI') || bText.includes('LATINO') || bText.includes('ESPANOL') || bText.includes('FRENCH') || bText.includes('GERMAN') || bText.includes('RUSSIAN')) && !bIsEng;
-
-        if (aIsEng && !bIsEng) return -1;
-        if (!aIsEng && bIsEng) return 1;
-        if (aForeign && !bForeign) return 1;
-        if (!aForeign && bForeign) return -1;
-        return 0;
-      });
-
       attemptedIndicesRef.current.clear();
-      sampleSkippedIndicesRef.current.clear();
-
-      // Pre-filter out known sample video / trailer streams if alternatives exist
-      const validStreams = sortedStreams.filter((s) => !isSampleStreamSource(s));
-      const finalStreams = validStreams.length > 0 ? validStreams : sortedStreams;
-
+      manuallySelectedServerRef.current = null;
       attemptedIndicesRef.current.add(0);
-      setStreams(finalStreams);
+      setStreams(loaded);
+      setActiveStreamIndex(0);
       setIsLoadingStreams(false);
       setStreamLoadAttempt(1);
     },
@@ -383,29 +339,30 @@ export const VideoPlayerModal: React.FC = () => {
   const handleStreamFailureRef = useRef(handleStreamFailure);
   handleStreamFailureRef.current = handleStreamFailure;
 
-  // Auto-skip servers hosting sample video shorts (e.g. trailers, watermarked promos, short sample clips)
+  // Auto-skip servers hosting sample video shorts (e.g. short 30s-240s teaser clips on unreleased items)
   const checkAndSkipSampleShort = useCallback(
     (dur: number): boolean => {
+      // Do not skip if user disabled auto-skip in settings
+      if (userData.settings && userData.settings.autoSkip === false) return false;
+      // Do not skip if user explicitly chose this server
+      if (manuallySelectedServerRef.current === activeStreamIndex) return false;
+      // Do not skip if stream has already played successfully past 5 seconds
+      const video = videoRef.current;
+      if (video && video.currentTime > 5) return false;
       if (!dur || !isFinite(dur) || dur <= 0) return false;
-      if (sampleSkippedIndicesRef.current.has(activeStreamIndex)) return true;
 
-      // Normal movies are > 45 min (2700s), TV episodes are > 10 min (600s).
-      // Any video with duration <= 180s (3 min) — or <= 240s (4 min) for movies — is a sample video short or teaser clip.
-      const isMovie = activeModalItem?.type === 'movie';
-      const sampleThresholdSeconds = isMovie ? 240 : 180;
-
-      if (dur <= sampleThresholdSeconds) {
-        sampleSkippedIndicesRef.current.add(activeStreamIndex);
+      // Sample clips / trailers on scrapers are typically under 4 minutes (<= 240s)
+      if (dur <= 240) {
         console.warn(
-          `[AutoSkip] Server ${activeStreamIndex + 1} contains sample video short (duration: ${Math.round(dur)}s <= ${sampleThresholdSeconds}s). Auto-skipping to next server...`
+          `[AutoSkip] Server ${activeStreamIndex + 1} appears to be a sample clip (${Math.round(dur)}s). Auto-skipping to next server...`
         );
-        showToast(`Skipped sample video on Server ${activeStreamIndex + 1}`, '⏭️');
-        handleStreamFailure(activeStreamIndex, `Sample video short (${Math.round(dur)}s) detected`);
+        showToast(`Skipped sample clip on Server ${activeStreamIndex + 1}`, '⏭️');
+        handleStreamFailure(activeStreamIndex, 'Sample clip detected');
         return true;
       }
       return false;
     },
-    [activeModalItem?.type, activeStreamIndex, handleStreamFailure, showToast]
+    [activeStreamIndex, handleStreamFailure, showToast, userData.settings]
   );
 
   const checkAndSkipSampleShortRef = useRef(checkAndSkipSampleShort);
@@ -428,15 +385,6 @@ export const VideoPlayerModal: React.FC = () => {
 
     const stream = streams[activeStreamIndex];
     if (!stream) return;
-
-    // Immediately skip if stream URL or title is flagged as a sample video short
-    if (isSampleStreamSource(stream)) {
-      console.warn(`[AutoSkip] Server ${activeStreamIndex + 1} URL/title indicates sample video short. Auto-skipping...`);
-      sampleSkippedIndicesRef.current.add(activeStreamIndex);
-      showToast(`Skipped sample video on Server ${activeStreamIndex + 1}`, '⏭️');
-      handleStreamFailureRef.current(activeStreamIndex, 'Sample video URL/title detected');
-      return;
-    }
 
     // Clean up any active timers
     if (watchdogTimerRef.current) {
@@ -465,17 +413,12 @@ export const VideoPlayerModal: React.FC = () => {
 
     const onMediaActive = () => {
       clearWatchdog();
-      const dur = video.duration;
-      if (dur && isFinite(dur) && dur > 0) {
-        checkAndSkipSampleShortRef.current(dur);
-      }
     };
 
     video.addEventListener('loadedmetadata', onMediaActive);
     video.addEventListener('loadeddata', onMediaActive);
     video.addEventListener('canplay', onMediaActive);
     video.addEventListener('playing', onMediaActive);
-    video.addEventListener('timeupdate', onMediaActive);
 
     // Clean up any active HLS or DASH players
     if (hlsRef.current) {
@@ -501,6 +444,7 @@ export const VideoPlayerModal: React.FC = () => {
       !isDASH &&
       (stream.isM3U8 === true ||
         cleanUrl.endsWith('.m3u8') ||
+        cleanUrl.endsWith('.txt') ||
         rawUrl.toLowerCase().includes('.m3u8') ||
         (!cleanUrl.match(/\.(mp4|webm|mkv|ogg|mov)$/i) && !rawUrl.toLowerCase().includes('.mpd')));
 
@@ -569,6 +513,7 @@ export const VideoPlayerModal: React.FC = () => {
       hlsRef.current = hls;
 
       let hasRetriedProxy = false;
+      let networkErrorCount = 0;
       const initialUrl = stream.proxyUrl || stream.url;
 
       const startHls = (sourceUrl: string) => {
@@ -580,10 +525,6 @@ export const VideoPlayerModal: React.FC = () => {
 
       hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
         clearWatchdog();
-        const dur = video.duration;
-        if (dur && isFinite(dur) && dur > 0 && checkAndSkipSampleShortRef.current(dur)) {
-          return;
-        }
         const levels = data.levels.map((lvl, idx) => ({
           id: idx,
           height: lvl.height,
@@ -599,7 +540,22 @@ export const VideoPlayerModal: React.FC = () => {
         }).catch(() => {});
       });
 
-      hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (event, data) => {
+      hls.on(Hls.Events.LEVEL_LOADED, (_event, data) => {
+        const totalDur = data.details?.totalduration;
+        if (
+          totalDur &&
+          isFinite(totalDur) &&
+          totalDur > 0 &&
+          totalDur <= 240 &&
+          data.details?.live === false &&
+          userData.settings.autoSkip &&
+          manuallySelectedServerRef.current !== activeStreamIndex
+        ) {
+          checkAndSkipSampleShortRef.current(totalDur);
+        }
+      });
+
+      hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (_event, data) => {
         const tracks = data.audioTracks.map((t, idx) => ({
           id: t.id,
           name: t.name || `Track ${idx + 1}`,
@@ -626,23 +582,33 @@ export const VideoPlayerModal: React.FC = () => {
         }
       });
 
-      hls.on(Hls.Events.ERROR, (event, data) => {
-        const isManifestError =
-          data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
-          data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT ||
-          data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR;
-
-        if (data.fatal || isManifestError) {
-          clearWatchdog();
-          // If direct CDN failed with CORS/network error, transparently retry via server stream proxy!
-          if (!hasRetriedProxy && stream.proxyUrl && initialUrl !== stream.proxyUrl) {
-            hasRetriedProxy = true;
-            console.log('Retrying HLS through backend proxy...', stream.proxyUrl);
-            startHls(stream.proxyUrl);
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (data.fatal) {
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            console.log('Recovering HLS media error...');
+            hls.recoverMediaError();
+            return;
+          }
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            networkErrorCount++;
+            if (networkErrorCount > 1) {
+              clearWatchdog();
+              console.warn('Repeated network error on HLS server, switching to next server...');
+              handleStreamFailureRef.current(activeStreamIndex, 'HLS network/403 error');
+              return;
+            }
+            if (!hasRetriedProxy && stream.proxyUrl && initialUrl !== stream.proxyUrl) {
+              hasRetriedProxy = true;
+              console.log('Retrying HLS through backend proxy...', stream.proxyUrl);
+              startHls(stream.proxyUrl);
+              return;
+            }
+            hls.startLoad();
             return;
           }
 
-          console.warn('HLS stream fatal or manifest error, switching immediately:', data.details || data.type);
+          clearWatchdog();
+          console.warn('HLS stream fatal error, switching immediately:', data.details || data.type);
           handleStreamFailureRef.current(activeStreamIndex, data.details || 'HLS playback error');
         }
       });
@@ -669,10 +635,6 @@ export const VideoPlayerModal: React.FC = () => {
 
       const onReady = () => {
         clearWatchdog();
-        const dur = video.duration;
-        if (dur && isFinite(dur) && dur > 0 && checkAndSkipSampleShortRef.current(dur)) {
-          return;
-        }
         setIsLoadingStreams(false);
         setStreamError(null);
         resumeSavedPlayback();
@@ -707,7 +669,6 @@ export const VideoPlayerModal: React.FC = () => {
         video.removeEventListener('loadeddata', onMediaActive);
         video.removeEventListener('canplay', onMediaActive);
         video.removeEventListener('playing', onMediaActive);
-        video.removeEventListener('timeupdate', onMediaActive);
       };
     }
 
@@ -720,7 +681,15 @@ export const VideoPlayerModal: React.FC = () => {
     const onDirectReady = () => {
       clearWatchdog();
       const dur = video.duration;
-      if (dur && isFinite(dur) && dur > 0 && checkAndSkipSampleShortRef.current(dur)) {
+      if (
+        dur &&
+        isFinite(dur) &&
+        dur > 0 &&
+        dur <= 240 &&
+        userData.settings.autoSkip &&
+        manuallySelectedServerRef.current !== activeStreamIndex
+      ) {
+        checkAndSkipSampleShortRef.current(dur);
         return;
       }
       setIsLoadingStreams(false);
@@ -934,9 +903,6 @@ export const VideoPlayerModal: React.FC = () => {
     if (!video) return;
     const dur = video.duration;
     if (dur && isFinite(dur) && dur > 0) {
-      if (checkAndSkipSampleShort(dur)) {
-        return;
-      }
       setDuration(dur);
     }
   };
@@ -946,13 +912,11 @@ export const VideoPlayerModal: React.FC = () => {
     if (!video || !activeModalItem) return;
 
     const dur = video.duration || 0;
-    if (dur > 0 && isFinite(dur) && checkAndSkipSampleShort(dur)) {
-      return;
-    }
-
     const ct = video.currentTime;
     setCurrentTime(ct);
-    setDuration(dur);
+    if (dur > 0 && isFinite(dur)) {
+      setDuration(dur);
+    }
 
     // Skip intro detection
     const stream = streams[activeStreamIndex];
@@ -975,6 +939,23 @@ export const VideoPlayerModal: React.FC = () => {
   };
 
   const handleEnded = () => {
+    const video = videoRef.current;
+    // If a movie or episode stream ended in under 240 seconds (a confirmed sample teaser clip), auto-switch!
+    if (
+      video &&
+      video.currentTime <= 240 &&
+      streams.length > 1 &&
+      userData.settings.autoSkip &&
+      manuallySelectedServerRef.current !== activeStreamIndex
+    ) {
+      showToast(
+        `Sample video ended. Switching to Server ${((activeStreamIndex + 1) % streams.length) + 1}...`,
+        '⏭️'
+      );
+      handleStreamFailureRef.current(activeStreamIndex, 'Sample video ended');
+      return;
+    }
+
     if (isTV) {
       // Auto-advance episode
       const nextEp = currentEpisode + 1;
@@ -2658,6 +2639,7 @@ export const VideoPlayerModal: React.FC = () => {
                       }
                       attemptedIndicesRef.current.clear();
                       attemptedIndicesRef.current.add(idx);
+                      manuallySelectedServerRef.current = idx;
                       setActiveStreamIndex(idx);
                       setStreamError(null);
                       showToast(`Connected to Server ${serverNum} · ${resolutionBadge}`, '⚡');
@@ -2680,9 +2662,6 @@ export const VideoPlayerModal: React.FC = () => {
                     {/* Server Label - HIDE ORIGINAL SERVER NAMES */}
                     <span className="font-semibold text-xs tracking-tight whitespace-nowrap">
                       Server {serverNum}
-                      {sampleSkippedIndicesRef.current.has(idx) && (
-                        <span className="ml-1 text-[9px] text-amber-400 font-normal">(Sample)</span>
-                      )}
                     </span>
 
                     {/* Resolution badge */}
