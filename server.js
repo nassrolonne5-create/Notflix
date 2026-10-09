@@ -21,7 +21,7 @@ app.use(express.json({ limit: "10mb" }));
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const DEFAULT_TMDB_KEY = "8265bd1679663a7ea12ac168da84d2e8";
 const TMDB_API_KEY = process.env.TMDB_API_KEY || DEFAULT_TMDB_KEY;
-const SCRAPER_API_CINEPRO = (process.env.SCRAPER_CINEPRO_URL || "http://62.171.179.144:3000").replace(/^https:\/\//i, "http://");
+const SCRAPER_API_CINEPRO = (process.env.SCRAPER_CINEPRO_URL || "http://62.171.179.144:3001").replace(/^https:\/\//i, "http://");
 const SCRAPER_API_TMDB_EMBED = (process.env.SCRAPER_TMDB_EMBED_URL || process.env.SCRAPER_PRIMARY_URL || "http://62.171.179.144:3005").replace(/^https:\/\//i, "http://");
 if (!process.env.NODE_TLS_REJECT_UNAUTHORIZED) {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";

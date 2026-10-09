@@ -101,16 +101,22 @@ function sendTelemetry(payload: Record<string, any>) {
     };
 
     const json = JSON.stringify(data);
+    const apiBase =
+      (typeof import.meta !== 'undefined' &&
+        ((import.meta as any).env?.VITE_BACKEND_URL ||
+          (import.meta as any).env?.VITE_API_URL)) ||
+      '';
+    const pingEndpoint = apiBase ? `${apiBase.replace(/\/$/, '')}/api/analytics/ping` : '/api/analytics/ping';
 
-    // Prefer navigator.sendBeacon if available
+    // Prefer navigator.sendBeacon if available (note: sendBeacon only works with relative or CORS-enabled endpoints)
     if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
       const blob = new Blob([json], { type: 'application/json' });
-      navigator.sendBeacon('/api/analytics/ping', blob);
+      navigator.sendBeacon(pingEndpoint, blob);
       return;
     }
 
     // Fire-and-forget fetch with keepalive
-    fetch('/api/analytics/ping', {
+    fetch(pingEndpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: json,

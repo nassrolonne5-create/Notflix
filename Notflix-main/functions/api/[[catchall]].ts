@@ -11,7 +11,7 @@ interface Env {
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const DEFAULT_TMDB_KEY = '8265bd1679663a7ea12ac168da84d2e8';
-const DEFAULT_SCRAPER_CINEPRO = 'http://62.171.179.144:3000';
+const DEFAULT_SCRAPER_CINEPRO = 'http://62.171.179.144:3001';
 const DEFAULT_SCRAPER_TMDB_EMBED = 'http://62.171.179.144:3005';
 const DEFAULT_COOLIFY_GATEWAY = 'http://kufenvi0cy9unwwgipjiluoh.62.171.179.144.sslip.io';
 

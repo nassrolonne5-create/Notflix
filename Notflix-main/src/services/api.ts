@@ -148,7 +148,7 @@ export function formatMediaItem(raw: any, defaultType: 'movie' | 'tv' = 'movie')
 
 const TMDB_DIRECT_KEY = '8265bd1679663a7ea12ac168da84d2e8';
 const TMDB_DIRECT_BASE = 'https://api.themoviedb.org/3';
-export const SCRAPER_CINEPRO = 'http://62.171.179.144:3000';
+export const SCRAPER_CINEPRO = ((import.meta.env.VITE_SCRAPER_CINEPRO_URL as string) || 'http://62.171.179.144:3001').replace(/^https:\/\//i, 'http://');
 export const SCRAPER_TMDB_EMBED = ((import.meta.env.VITE_SCRAPER_TMDB_EMBED_URL as string) || (import.meta.env.VITE_SCRAPER_PRIMARY_URL as string) || 'http://62.171.179.144:3005').replace(/^https:\/\//i, 'http://');
 
 // Fetch from Backend TMDB proxy, with seamless direct client fallback for static hosting (Drag & Drop)

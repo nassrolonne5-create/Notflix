@@ -31,7 +31,7 @@ const TMDB_BASE = 'https://api.themoviedb.org/3';
 const DEFAULT_TMDB_KEY = '8265bd1679663a7ea12ac168da84d2e8';
 const TMDB_API_KEY = process.env.TMDB_API_KEY || DEFAULT_TMDB_KEY;
 
-const SCRAPER_API_CINEPRO = (process.env.SCRAPER_CINEPRO_URL || 'http://62.171.179.144:3000').replace(/^https:\/\//i, 'http://');
+const SCRAPER_API_CINEPRO = (process.env.SCRAPER_CINEPRO_URL || 'http://62.171.179.144:3001').replace(/^https:\/\//i, 'http://');
 const SCRAPER_API_TMDB_EMBED = (process.env.SCRAPER_TMDB_EMBED_URL || process.env.SCRAPER_PRIMARY_URL || 'http://62.171.179.144:3005').replace(/^https:\/\//i, 'http://');
 
 // Allow connecting to upstream scrapers using HTTPS with self-signed / internal certificates
@@ -1531,7 +1531,7 @@ app.post('/api/analytics/ping', (req: Request, res: Response) => {
     analyticsStore.events.push(event);
     scheduleSaveAnalytics();
 
-    return res.json({ ok: true });
+    return res.json({ success: true });
   } catch (err) {
     console.error('Error logging analytics event:', err);
     return res.status(500).json({ error: 'Failed to record event' });
@@ -1550,6 +1550,7 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
       sessionId: string;
       title: string;
       device: string;
+      platform?: string;
       mediaType?: string;
       season?: number;
       episode?: number;
@@ -1627,8 +1628,11 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
       // Devices, browsers, OS
       if (e.device) {
         const d = e.device.toLowerCase();
-        if (devicesMap[d] !== undefined) devicesMap[d]++;
-        else devicesMap.desktop++;
+        if (devicesMap[d] !== undefined) {
+          devicesMap[d]++;
+        } else {
+          devicesMap.desktop++;
+        }
       }
       if (e.browser) {
         browsersMap[e.browser] = (browsersMap[e.browser] || 0) + 1;
