@@ -1721,11 +1721,11 @@ export const VideoPlayerModal: React.FC = () => {
         currentSeason,
         currentEpisode,
         25,
-        `Server ${activeStreamIndex + 1}`
+        currentStream?.provider || `Server ${activeStreamIndex + 1}`
       );
     }, 25000);
     return () => clearInterval(interval);
-  }, [isPlaying, activeModalItem, currentSeason, currentEpisode, activeStreamIndex]);
+  }, [isPlaying, activeModalItem, currentSeason, currentEpisode, currentStream, activeStreamIndex]);
 
   // Lock document.body scrolling while VideoPlayerModal is mounted
   useEffect(() => {
@@ -1843,7 +1843,7 @@ export const VideoPlayerModal: React.FC = () => {
                   activeModalItem,
                   currentSeason,
                   currentEpisode,
-                  `Server ${activeStreamIndex + 1}`
+                  currentStream?.provider || `Server ${activeStreamIndex + 1}`
                 );
               }}
               onPause={() => {

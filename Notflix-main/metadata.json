@@ -1,0 +1,6 @@
+{
+  "name": "Notflix - Movies & TV Shows",
+  "description": "Full-stack streaming entertainment platform with movies, TV series, anime, custom player, subtitles sync, and library management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

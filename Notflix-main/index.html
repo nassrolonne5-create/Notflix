@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Notflix — Movies & TV Shows</title>
+    <meta name="description" content="Discover and stream trending movies, popular TV shows, and anime in HD on Notflix. Enjoy high-speed playback, multi-language subtitles, and personalized recommendations." />
+    <meta name="keywords" content="Notflix, watch movies online, stream tv shows, watch series, watch anime, free streaming, hd movies, 1080p, 4k movies, cinematic stream" />
+    <meta name="author" content="Notflix" />
+    <meta name="theme-color" content="#0b0f19" />
+    <meta name="color-scheme" content="dark" />
+    
+    <!-- Search Engine Indexing & Crawling Directives -->
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
+    <meta name="googlebot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1" />
+    <meta name="bingbot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1" />
+    <link rel="canonical" href="https://notflixtv.com/" />
+    
+    <!-- OpenGraph Social Sharing Card -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Notflix" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:title" content="Notflix — Watch Movies & TV Shows in HD" />
+    <meta property="og:description" content="Discover and stream trending movies, popular TV shows, and anime in HD on Notflix. Multi-source streaming with subtitle support." />
+    <meta property="og:url" content="https://notflixtv.com/" />
+    <meta property="og:image" content="https://image.tmdb.org/t/p/w1280/8Y43POKjjKDGI9MH89NW0NAzzp8.jpg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Notflix Cinema Streaming Platform" />
+    
+    <!-- Twitter / X Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Notflix — Watch Movies & TV Shows in HD" />
+    <meta name="twitter:description" content="Discover and stream trending movies, popular TV shows, and anime in HD on Notflix with multi-language subtitles." />
+    <meta name="twitter:image" content="https://image.tmdb.org/t/p/w1280/8Y43POKjjKDGI9MH89NW0NAzzp8.jpg" />
+    
+    <!-- Schema.org JSON-LD Structured Data for Google Rich Snippets -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "WebSite",
+          "@id": "https://notflixtv.com/#website",
+          "url": "https://notflixtv.com/",
+          "name": "Notflix",
+          "description": "Full-stack streaming entertainment platform with movies, TV series, anime, and high-definition video playback.",
+          "inLanguage": "en-US",
+          "potentialAction": {
+            "@type": "SearchAction",
+            "target": {
+              "@type": "EntryPoint",
+              "urlTemplate": "https://notflixtv.com/search?q={search_term_string}"
+            },
+            "query-input": "required name=search_term_string"
+          }
+        },
+        {
+          "@type": "WebApplication",
+          "@id": "https://notflixtv.com/#webapp",
+          "name": "Notflix",
+          "url": "https://notflixtv.com/",
+          "applicationCategory": "EntertainmentApplication",
+          "operatingSystem": "All",
+          "browserRequirements": "Requires JavaScript. Requires HTML5.",
+          "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD"
+          }
+        }
+      ]
+    }
+    </script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  </head>
+  <body class="bg-[#0b0f19] text-[#f8fafc] font-sans antialiased overflow-x-hidden selection:bg-rose-600 selection:text-white">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

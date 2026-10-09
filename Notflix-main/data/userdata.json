@@ -1,0 +1,570 @@
+{
+  "watchlist": [],
+  "favorites": [],
+  "history": [
+    {
+      "id": 969681,
+      "title": "Spider-Man: Brand New Day",
+      "year": "2026",
+      "rating": "8.3",
+      "vote_average": 8.3,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/bjiS5ipwxb9JFy3XRRN4OAilSeX.jpg",
+      "poster_path": "/bjiS5ipwxb9JFy3XRRN4OAilSeX.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/subj7knTn4DeS6KS7qI66EQKe9i.jpg",
+      "backdrop_path": "/subj7knTn4DeS6KS7qI66EQKe9i.jpg",
+      "overview": "Fighting crime full-time as Spider-Man in a world that doesn't remember him—and the pressure of seeing his old friends move on without him—sparks a change in Peter Parker he may not have the power to control. But that transformation might also be the only thing that can stop a shocking new threat to the city and those he loves - a powerful villain no one can even see.",
+      "genre_ids": [],
+      "adult": false,
+      "watchedAt": "08:35 PM"
+    },
+    {
+      "id": 285322,
+      "title": "Below",
+      "name": "Below",
+      "year": "2026",
+      "rating": "7.2",
+      "vote_average": 7.2,
+      "type": "tv",
+      "media_type": "tv",
+      "poster": "https://image.tmdb.org/t/p/w342/vgLqqhMUbljp585qPp1EFCyJtcz.jpg",
+      "poster_path": "/vgLqqhMUbljp585qPp1EFCyJtcz.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/cn0feYcDvVzVjUDoXa1O8sRgzz.jpg",
+      "backdrop_path": "/cn0feYcDvVzVjUDoXa1O8sRgzz.jpg",
+      "overview": "When a mysterious sea creature terrorizes a small Newfoundland town, a hard-bitten fisherman and his family fight to protect their close-knit community.",
+      "genre_ids": [
+        9648,
+        18
+      ],
+      "adult": false,
+      "watchedAt": "08:17 PM"
+    },
+    {
+      "id": 288673,
+      "title": "Carrie",
+      "name": "Carrie",
+      "year": "2026",
+      "rating": "8.8",
+      "vote_average": 8.792,
+      "type": "tv",
+      "media_type": "tv",
+      "poster": "https://image.tmdb.org/t/p/w342/eXjk4W4robXs7l1YXwaXMv4f2qb.jpg",
+      "poster_path": "/eXjk4W4robXs7l1YXwaXMv4f2qb.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/9yCJtipMeDe8uAdSJKvw8BnYfRz.jpg",
+      "backdrop_path": "/9yCJtipMeDe8uAdSJKvw8BnYfRz.jpg",
+      "overview": "After her father's sudden, untimely death thrusts her into the unforgiving ecosystem of public high school, Carrie is forced to navigate a viral bullying scandal that tears through her community, the relentless pressure and casual cruelty of the social‑media age, and the awakening of mysterious telekinetic powers that rise alongside her adolescence.",
+      "genre_ids": [
+        9648,
+        18
+      ],
+      "adult": false,
+      "watchedAt": "08:16 PM"
+    },
+    {
+      "id": 299534,
+      "title": "Avengers: Endgame",
+      "year": "2019",
+      "rating": "8.2",
+      "vote_average": 8.246,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/ulzhLuWrPK07P1YkdWQLZnQh1JL.jpg",
+      "poster_path": "/ulzhLuWrPK07P1YkdWQLZnQh1JL.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/7RyHsO4yDXtBv1zUU3mTpHeQ0d5.jpg",
+      "backdrop_path": "/7RyHsO4yDXtBv1zUU3mTpHeQ0d5.jpg",
+      "overview": "After the devastating events of Avengers: Infinity War, the universe is in ruins due to the efforts of the Mad Titan, Thanos. With the help of remaining allies, the Avengers must assemble once more in order to undo Thanos' actions and restore order to the universe once and for all, no matter what consequences may be in store.",
+      "genre_ids": [
+        12,
+        878,
+        28
+      ],
+      "adult": false,
+      "watchedAt": "07:53 PM"
+    },
+    {
+      "id": 1400837,
+      "title": "Other Mommy",
+      "year": "2026",
+      "rating": "8.1",
+      "vote_average": 8.1,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/fGRNCssTRrhYZxNzykGGCoMsAVq.jpg",
+      "poster_path": "/fGRNCssTRrhYZxNzykGGCoMsAVq.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/ncm7djsVTHQQMX2HEbEVxMUFchG.jpg",
+      "backdrop_path": "/ncm7djsVTHQQMX2HEbEVxMUFchG.jpg",
+      "overview": "Young Bela forms a relationship with a sinister entity in her home that looks uncannily like her own mother, drawing her into a terrifying and increasingly dark world.",
+      "genre_ids": [
+        27
+      ],
+      "adult": false,
+      "watchedAt": "07:51 PM"
+    },
+    {
+      "id": 1458857,
+      "title": "Doing Life",
+      "year": "2026",
+      "rating": "6.9",
+      "vote_average": 6.9,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/5nZVjsCk5tWyyhLGt5U2TxsR85w.jpg",
+      "poster_path": "/5nZVjsCk5tWyyhLGt5U2TxsR85w.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/nDScZ6YR2nfNCeK5bmJ1ujb355b.jpg",
+      "backdrop_path": "/nDScZ6YR2nfNCeK5bmJ1ujb355b.jpg",
+      "overview": "A single mother and an incarcerated man forge an unlikely bond through heartfelt letters, unlocking a door to redemption, hope and love against all odds.",
+      "genre_ids": [
+        18,
+        10749
+      ],
+      "adult": false,
+      "watchedAt": "09:47 AM"
+    },
+    {
+      "id": 1339713,
+      "title": "Obsession",
+      "year": "2026",
+      "rating": "8.2",
+      "vote_average": 8.185,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/bRwnj8WEKBCvmfeUNOukJPwB43K.jpg",
+      "poster_path": "/bRwnj8WEKBCvmfeUNOukJPwB43K.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/5lTZyuBTNOfawsfPT8Q0cIg6qAF.jpg",
+      "backdrop_path": "/5lTZyuBTNOfawsfPT8Q0cIg6qAF.jpg",
+      "overview": "After breaking the mysterious \"One Wish Willow\" to win his crush's heart, a hopeless romantic finds himself getting exactly what he asked for but soon discovers that some desires come at a dark, sinister price.",
+      "genre_ids": [
+        27,
+        53
+      ],
+      "adult": false,
+      "watchedAt": "09:45 AM"
+    },
+    {
+      "id": 91258,
+      "title": "Husbands and Lovers",
+      "year": "1991",
+      "rating": "6.5",
+      "vote_average": 6.5,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/zFvUXQ0QcILwPyoUqqcv6pwpuuT.jpg",
+      "poster_path": "/zFvUXQ0QcILwPyoUqqcv6pwpuuT.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/u5XwGD4aP67IPzYGttFXLf6og8I.jpg",
+      "backdrop_path": "/u5XwGD4aP67IPzYGttFXLf6og8I.jpg",
+      "overview": "Stefan finds that he can no longer tolerate the arrangement of his cheating wife ... he, the husband, gets her during the week and her lover gets her on the weekends. At the same time the wife finds herself increasingly drawn to the violence of her lover versus the adoration of her husband.",
+      "genre_ids": [
+        18
+      ],
+      "adult": false,
+      "watchedAt": "09:43 AM"
+    },
+    {
+      "id": 204269,
+      "title": "Caressing My Hibernating Bear",
+      "name": "Caressing My Hibernating Bear",
+      "year": "2022",
+      "rating": "5.9",
+      "vote_average": 5.9,
+      "type": "tv",
+      "media_type": "tv",
+      "poster": "https://image.tmdb.org/t/p/w342/jSRmnyrqY1wmECpCCk7jv7AGFn6.jpg",
+      "poster_path": "/jSRmnyrqY1wmECpCCk7jv7AGFn6.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/gH3HCoEBuiLqzZii0sOMfMyXSR8.jpg",
+      "backdrop_path": "/gH3HCoEBuiLqzZii0sOMfMyXSR8.jpg",
+      "overview": "Nowa, a bear living in the forest, decides to take an abandoned puppy under his wing. He names it Airi and takes care of it with great care. Time passes and Nowa soon has to leave him temporarily alone in order to hibernate. Waking up several months later, he discovers that Airi has grown well into an attractive young man.",
+      "genre_ids": [
+        16
+      ],
+      "adult": false,
+      "watchedAt": "09:43 AM"
+    },
+    {
+      "id": 100937,
+      "title": "Crazy Over His Fingers: Just the Two of Us in a Salon After Closing",
+      "name": "Crazy Over His Fingers: Just the Two of Us in a Salon After Closing",
+      "year": "2020",
+      "rating": "6.4",
+      "vote_average": 6.4,
+      "type": "tv",
+      "media_type": "tv",
+      "poster": "https://image.tmdb.org/t/p/w342/hlk5xhZw5uSBJvpJD3xbX2k6BhA.jpg",
+      "poster_path": "/hlk5xhZw5uSBJvpJD3xbX2k6BhA.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/uV1nCntdsTVhw7bDrd85qtiqdY9.jpg",
+      "backdrop_path": "/uV1nCntdsTVhw7bDrd85qtiqdY9.jpg",
+      "overview": "Fumi works as an assistant at a popular salon in the city and is aiming to become a hairdresser. She receives strict guidance from Sousuke, the salon's charismatic hairdresser and manager. Every time he touches Fumi, she becomes agitated. One day after the salon closed, Fumi stands in as Sousuke's practice partner at the shampoo station. As he touches her and sprinkles her with water, she becomes angry again! Or so the thought...could she actually be attracted to him? Sousuke flashes an evil smile as he senses Fumi's heart, and his fingertips start to stroke every corner of her body...Fumi cannot refuse his fingers anymore.",
+      "genre_ids": [
+        16
+      ],
+      "adult": false,
+      "watchedAt": "09:43 AM"
+    },
+    {
+      "id": 95897,
+      "title": "Overflow",
+      "name": "Overflow",
+      "year": "2020",
+      "rating": "7.5",
+      "vote_average": 7.505,
+      "type": "tv",
+      "media_type": "tv",
+      "poster": "https://image.tmdb.org/t/p/w342/8RtwL5gxUvh9YViqjhNlVRvJpum.jpg",
+      "poster_path": "/8RtwL5gxUvh9YViqjhNlVRvJpum.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/4NRBKA8qVzCvuD3WeLieiLGmIjm.jpg",
+      "backdrop_path": "/4NRBKA8qVzCvuD3WeLieiLGmIjm.jpg",
+      "overview": "Kazushi Sudou is a university student who is visited by his two childhood friends, the sisters Ayane and Kotone Shirakawa. When Ayane discovers that Kazushi not only forgot to buy her pudding but is also using her special lotion in the bath, she decides to take revenge and join Kazushi in his bath along with Kotone. Will the perverted Kazushi be able to remain indifferent to them both?",
+      "genre_ids": [
+        16
+      ],
+      "adult": false,
+      "watchedAt": "09:42 AM"
+    },
+    {
+      "id": 1377237,
+      "title": "Runner",
+      "year": "2026",
+      "rating": "8.3",
+      "vote_average": 8.266,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/yBKMAIj7clP42UkFejhGDBBoTpb.jpg",
+      "poster_path": "/yBKMAIj7clP42UkFejhGDBBoTpb.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/2c9zNZJL0ZdagD6JbmU3hH4hovs.jpg",
+      "backdrop_path": "/2c9zNZJL0ZdagD6JbmU3hH4hovs.jpg",
+      "overview": "A former soldier is thrown into a brutal race against time when a critical medical delivery makes him and his unlikely partner the targets of a ruthless cartel. As the mission spirals into a deadly manhunt, every detour, delay, and bullet pushes them closer to failure. With betrayal closing in from every side, they must survive the chase and deliver their cargo to save the life of a little girl.",
+      "genre_ids": [
+        28,
+        35
+      ],
+      "adult": false,
+      "watchedAt": "09:55 AM"
+    },
+    {
+      "id": 1248832,
+      "title": "Digger",
+      "year": "2026",
+      "rating": "7.7",
+      "vote_average": 7.7,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/1ATXKrIPJyKNwnJ6lcG088Sa6zi.jpg",
+      "poster_path": "/1ATXKrIPJyKNwnJ6lcG088Sa6zi.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/b7t3r39Oll5qPxBKzLZ8eHMBD7l.jpg",
+      "backdrop_path": "/b7t3r39Oll5qPxBKzLZ8eHMBD7l.jpg",
+      "overview": "The most powerful man in the world embarks on a frantic mission to prove he is humanity's savior before the disaster he's unleashed destroys everything.",
+      "genre_ids": [
+        35,
+        18
+      ],
+      "adult": false,
+      "watchedAt": "09:54 AM"
+    },
+    {
+      "id": 977942,
+      "title": "The Uprising",
+      "year": "2026",
+      "rating": "8.1",
+      "vote_average": 8.1,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/7TUl15TOsIvndKlgMWTtLgtEzZP.jpg",
+      "poster_path": "/7TUl15TOsIvndKlgMWTtLgtEzZP.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/y0reRTsewsPh0ePtgvDeLIsb5Wk.jpg",
+      "backdrop_path": "/y0reRTsewsPh0ePtgvDeLIsb5Wk.jpg",
+      "overview": "As war and plague devastate 14th-century England, a humble peasant ignites a rebellion, uniting an army of commoners to defy the King’s might in a desperate fight for justice and survival.",
+      "genre_ids": [
+        36,
+        18
+      ],
+      "adult": false,
+      "watchedAt": "09:51 AM"
+    },
+    {
+      "id": 1307118,
+      "title": "Soulm8te",
+      "year": "2026",
+      "rating": "7.4",
+      "vote_average": 7.4,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/bNErActDctl6cdUGw9pnjSCmyhQ.jpg",
+      "poster_path": "/bNErActDctl6cdUGw9pnjSCmyhQ.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/7t6f6VxA2ZXbbZSVctgt7bZG2DI.jpg",
+      "backdrop_path": "/7t6f6VxA2ZXbbZSVctgt7bZG2DI.jpg",
+      "overview": "After a ruthless tech giant acquires a small robotics company, a grieving engineer is tasked with testing their new AI companion. But when he attempts to reprogram her to be a truly sentient soulmate, she develops needs of her own—unleashing a relentless spree of precision-engineered mayhem.",
+      "genre_ids": [
+        27,
+        878,
+        53
+      ],
+      "adult": false,
+      "watchedAt": "09:11 AM"
+    },
+    {
+      "id": 980431,
+      "title": "Avatar Aang: The Last Airbender",
+      "year": "2026",
+      "rating": "9.1",
+      "vote_average": 9.147,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/3sgnSfNT27Bx5O5ukr7B26mhEQq.jpg",
+      "poster_path": "/3sgnSfNT27Bx5O5ukr7B26mhEQq.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/ezbrL1dMymKQZw7mDEWa2ZTzN7d.jpg",
+      "backdrop_path": "/ezbrL1dMymKQZw7mDEWa2ZTzN7d.jpg",
+      "overview": "Avatar Aang, the world's last Airbender, learns of an ancient power that could save his culture from extinction. With the help of his friends, he embarks on a global quest to find it before it falls into the wrong hands and threatens to upend the peace they sacrificed everything to achieve.",
+      "genre_ids": [
+        16,
+        12,
+        14,
+        28
+      ],
+      "adult": false,
+      "watchedAt": "09:04 AM"
+    },
+    {
+      "id": 1763619,
+      "title": "Crazy Rich, Incredibly Broke",
+      "year": "2026",
+      "rating": "—",
+      "vote_average": 0,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/zXrxCpD6UR96mk3umb93ub3RmSs.jpg",
+      "poster_path": "/zXrxCpD6UR96mk3umb93ub3RmSs.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/e20V500lJHkQbf1iGet34Jc5h8r.jpg",
+      "backdrop_path": "/e20V500lJHkQbf1iGet34Jc5h8r.jpg",
+      "overview": "When the snobbish and wealthy AlThahabi family find out they're actually not as loaded as they think, they're forced to fake their affluence to survive.",
+      "genre_ids": [
+        35,
+        18
+      ],
+      "adult": false,
+      "watchedAt": "08:46 AM"
+    },
+    {
+      "id": 1423191,
+      "title": "Resident Evil",
+      "year": "2026",
+      "rating": "7.3",
+      "vote_average": 7.301,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/i7UyjfPio0VFHB9rBUZSFyhOoM8.jpg",
+      "poster_path": "/i7UyjfPio0VFHB9rBUZSFyhOoM8.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/3icyRAqgakNcQn6aDVz9libFmBA.jpg",
+      "backdrop_path": "/3icyRAqgakNcQn6aDVz9libFmBA.jpg",
+      "overview": "Medical courier Bryan unwittingly finds himself fighting for survival as one fateful, horrifying night collapses around him in chaos.",
+      "genre_ids": [
+        27,
+        878,
+        12
+      ],
+      "adult": false,
+      "watchedAt": "08:45 AM"
+    },
+    {
+      "id": 1283515,
+      "title": "Verity",
+      "year": "2026",
+      "rating": "6.9",
+      "vote_average": 6.9,
+      "type": "movie",
+      "media_type": "movie",
+      "poster": "https://image.tmdb.org/t/p/w342/dGSsPovyUW5XVekXcy7F2GyhTEh.jpg",
+      "poster_path": "/dGSsPovyUW5XVekXcy7F2GyhTEh.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/9qxyrJfjk577ym5WD6HCDmunoyO.jpg",
+      "backdrop_path": "/9qxyrJfjk577ym5WD6HCDmunoyO.jpg",
+      "overview": "Lowen Ashleigh is hired by Jeremy Crawford to ghostwrite novels for his bestselling author wife Verity, who is unable to finish following an accident. Lowen gradually uncovers Verity's disturbing truths while residing at the Crawfords' home to work.",
+      "genre_ids": [
+        9648,
+        53
+      ],
+      "adult": false,
+      "watchedAt": "10:16 PM"
+    }
+  ],
+  "playbackPosition": {
+    "movie-1248832": {
+      "time": 23.657983,
+      "duration": 600.399988
+    },
+    "movie-1204680": {
+      "time": 22.220239,
+      "duration": 6166.543639999941
+    },
+    "tv-108978": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 729.411853,
+      "duration_1_1": 3345.592398999995
+    },
+    "movie-977942": {
+      "time": 37.222698,
+      "duration": 7692.643631000005
+    },
+    "movie-27834": {
+      "time": 34.289369,
+      "duration": 4608.0833330000005
+    },
+    "movie-1283515": {
+      "time": 67.019018,
+      "duration": 1168.6399999999999
+    },
+    "movie-969681": {
+      "time": 31.577654,
+      "duration": 8700.607091999971
+    },
+    "movie-1377237": {
+      "time": 129.966628,
+      "duration": 5926.000040000029
+    },
+    "movie-980431": {
+      "time": 25.23779,
+      "duration": 119.99999999999999
+    },
+    "tv-5920": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 7.502339,
+      "duration_1_1": 2709.3035110000023
+    },
+    "tv-1399": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 7.423064,
+      "duration_1_1": 3697.110173000002
+    },
+    "tv-95350": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 53.733606,
+      "duration_1_1": 3400.8737329999663
+    },
+    "tv-4194": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 5.422878,
+      "duration_1_1": 1357.0837700000002
+    },
+    "movie-1368337": {
+      "time": 77.675527,
+      "duration": 9986.794859999954
+    },
+    "movie-1288445": {
+      "time": 33.046863,
+      "duration": 5703.793489999958
+    },
+    "movie-1007757": {
+      "time": 3.217851,
+      "duration": 119.99999999999999
+    },
+    "movie-298618": {
+      "time": 90.381196,
+      "duration": 8179.041676000002
+    },
+    "movie-102382": {
+      "time": 51.094045,
+      "duration": 8519.427901000035
+    },
+    "movie-24428": {
+      "time": 22.434237,
+      "duration": 8575.711079999885
+    },
+    "movie-54065": {
+      "time": 22.260412,
+      "duration": 2742.2399999999975
+    },
+    "tv-76669": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 109.556857,
+      "duration_1_1": 3356.376070000013
+    },
+    "tv-241002": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 3.123379,
+      "duration_1_1": 392.51780199999973
+    },
+    "tv-113962": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 45.618539,
+      "duration_1_1": 2523.146816000001
+    },
+    "movie-1339713": {
+      "time": 5.272121,
+      "duration": 6543.252089999927
+    },
+    "movie-299534": {
+      "time": 22.422799,
+      "duration": 10871.402690999994
+    },
+    "movie-1400837": {
+      "time": 11.681676,
+      "duration": 5528.750065000021
+    },
+    "tv-1508": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 3.231727,
+      "duration_1_1": 2608.56
+    },
+    "tv-84958": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 7.321912,
+      "duration_1_1": 3020.893133000004
+    },
+    "movie-1284046": {
+      "time": 20.081748,
+      "duration": 5278.25
+    },
+    "tv-63770": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 9.561919,
+      "duration_1_1": 7418.37505800004
+    },
+    "tv-76479": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 9.44254,
+      "duration_1_1": 3775.02099999997
+    },
+    "movie-1423191": {
+      "time": 74.752352,
+      "duration": 5079.466621999992
+    },
+    "movie-1291595": {
+      "time": 243.5059,
+      "duration": 6362.314403000003
+    },
+    "movie-299536": {
+      "time": 3.107892,
+      "duration": 12.083332
+    },
+    "movie-1400940": {
+      "time": 20.111351,
+      "duration": 145.937844
+    },
+    "tv-288673": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 13.788859,
+      "duration_1_1": 3311.1666809999983
+    },
+    "tv-285322": {
+      "s": 1,
+      "e": 1,
+      "time_1_1": 15.992186,
+      "duration_1_1": 2855.0416809999983
+    }
+  },
+  "settings": {
+    "autoSkip": true,
+    "globalSubtitles": true
+  }
+}
