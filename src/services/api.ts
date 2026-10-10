@@ -429,11 +429,10 @@ function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
     const headers = s?.headers && typeof s.headers === 'object' ? s.headers : null;
 
     // Filter out permanently broken scrapers that cannot be resolved client-side:
-    // (boomchick/finepulfe return 404/403 expired links, streamflixserver has no DNS)
-    // VidRock Orion, Icefy, and LMScript are prioritized and supported via local proxy relays
+    // (finepulfe returns 404/403 expired links, streamflixserver has no DNS)
+    // VidRock (Nova/Atlas/Orion), Icefy, and LMScript are prioritized and supported via local proxy relays
     if (
       urlLower.includes('finepulfe.xyz') ||
-      urlLower.includes('boomchick.org') ||
       urlLower.includes('streamflixserver.site')
     ) {
       continue;
@@ -479,6 +478,18 @@ function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
       continue;
     }
 
+    let streamHeaders = headers ? { ...headers } : null;
+    if (urlLower.includes('boomchick') || provLower.includes('vidrock') || urlLower.includes('sprintspeedlight')) {
+      streamHeaders = {
+        Referer: 'https://vidrock.to/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        ...(streamHeaders || {}),
+      };
+      if (!streamHeaders.Referer) {
+        streamHeaders.Referer = 'https://vidrock.to/';
+      }
+    }
+
     const isDASH =
       Boolean(s?.isDASH) ||
       s?.type === 'dash' ||
@@ -493,9 +504,30 @@ function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
         (!urlLower.match(/\.(mp4|webm|mkv|ogg|mov)$/i) && !urlLower.includes('.mpd')));
 
     let proxyUrl = '';
-    if (!streamUrl.startsWith('/v1/proxy') && (headers || urlLower.includes('boomchick') || urlLower.includes('hakunaymatata') || urlLower.includes('flwuok') || urlLower.includes('flcwuk') || urlLower.includes('hbsxcn') || urlLower.includes('flowxn') || urlLower.includes('fsonxn') || urlLower.includes('111477.xyz') || urlLower.includes('devcorp.me') || urlLower.includes('crmseraph') || urlLower.includes('1x2.space') || urlLower.includes('neward.cyou') || urlLower.includes('professionaladvisory.sbs'))) {
+    if (
+      !streamUrl.startsWith('/v1/proxy') &&
+      (streamHeaders ||
+        urlLower.includes('boomchick') ||
+        urlLower.includes('sprintspeedlight') ||
+        urlLower.includes('hakunaymatata') ||
+        urlLower.includes('flwuok') ||
+        urlLower.includes('flcwuk') ||
+        urlLower.includes('hbsxcn') ||
+        urlLower.includes('flowxn') ||
+        urlLower.includes('fsonxn') ||
+        urlLower.includes('111477.xyz') ||
+        urlLower.includes('devcorp.me') ||
+        urlLower.includes('crmseraph') ||
+        urlLower.includes('1x2.space') ||
+        urlLower.includes('neward.cyou') ||
+        urlLower.includes('professionaladvisory.sbs') ||
+        provLower.includes('vidrock') ||
+        provLower.includes('icefy') ||
+        provLower.includes('orion') ||
+        provLower.includes('lmscript'))
+    ) {
       proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrl)}${
-        headers ? `&headers=${encodeURIComponent(JSON.stringify(headers))}` : ''
+        streamHeaders ? `&headers=${encodeURIComponent(JSON.stringify(streamHeaders))}` : ''
       }`;
     }
 
@@ -619,6 +651,23 @@ function isLMScriptStream(s: StreamSource): boolean {
   return false;
 }
 
+function isVidRockStream(s: StreamSource): boolean {
+  if (!s) return false;
+  const prov = (s.provider || '').toString().toLowerCase();
+  const rawT = (s.rawTitle || (s as any).title || (s as any).name || '').toString().toLowerCase();
+  const url = (s.url || '').toString().toLowerCase();
+  const proxyUrl = (s.proxyUrl || '').toString().toLowerCase();
+  const server = ((s as any).server || (s as any).source || s.apiName || '').toString().toLowerCase();
+  const combined = `${prov} ${rawT} ${server}`.toLowerCase();
+  return (
+    combined.includes('vidrock') ||
+    url.includes('boomchick') ||
+    proxyUrl.includes('boomchick') ||
+    url.includes('sprintspeedlight') ||
+    proxyUrl.includes('sprintspeedlight')
+  );
+}
+
 export function rankClientStreams(streams: StreamSource[], isTV: boolean): StreamSource[] {
   const foreignRegex =
     /\b(PUNJABI|KANNADA|MALAYALAM|TELUGU|TAMIL|BENGALI|MARATHI|GUJARATI|URDU|HINDI|LATINO|ESPANOL|SPANISH|CASTILIAN|FRENCH|VF|VFF|RUSSIAN|GERMAN|DEUTSCH|ITALIAN)\b/i;
@@ -627,12 +676,12 @@ export function rankClientStreams(streams: StreamSource[], isTV: boolean): Strea
 
   const getRank = (s: StreamSource) => {
     // 1. Primary Source Prioritization Tier:
-    // Tier 0: VidRock Orion (Highest Priority - Always First if available)
-    // Tier 1: Icefy (Second Priority - Follows VidRock Orion if available)
+    // Tier 0: VidRock (Orion, Atlas, Nova - Highest Priority - Always First if available)
+    // Tier 1: Icefy (Second Priority - Follows VidRock if available)
     // Tier 2: LMScript (Third Priority - Follows Icefy if available)
-    // Tier 3: Other providers (TMDB Embed, Primary, etc.)
+    // Tier 3: Other providers (TMDB Embed, CastleTV, DahmerMovies, etc.)
     let tierScore = 3;
-    if (isVidRockOrionStream(s)) {
+    if (isVidRockOrionStream(s) || isVidRockStream(s)) {
       tierScore = 0;
     } else if (isIcefyStream(s)) {
       tierScore = 1;
