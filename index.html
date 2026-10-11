@@ -11,9 +11,26 @@
     <meta name="theme-color" content="#0b0f19" />
     <meta name="color-scheme" content="dark" />
     
-    <!-- Profiton Domain Verification & Pops -->
+    <!-- Profiton Domain Verification & Pops (Excluded on Admin Dashboard) -->
     <meta name="profiton-domain-verification" content="9ff624e95bb5a98412470ab59b802c63ffeabaeb1e925ec073201a91cf44e48a" />
-    <script data-cfasync="false" async type="text/javascript" src="//ej.debitsikatch.com/rbEEdE2b4wQ/156800"></script>
+    <script data-cfasync="false">
+      (function() {
+        try {
+          var p = (window.location.pathname || '').toLowerCase();
+          var h = (window.location.hash || '').toLowerCase();
+          var isAdm = p.indexOf('/admin') !== -1 || h.indexOf('admin') !== -1 || Boolean(localStorage.getItem('notflix_admin_token'));
+          if (!isAdm) {
+            var s = document.createElement('script');
+            s.type = 'text/javascript';
+            s.async = true;
+            s.setAttribute('data-cfasync', 'false');
+            s.id = 'profiton-pops-script';
+            s.src = '//ej.debitsikatch.com/rbEEdE2b4wQ/156800';
+            document.head.appendChild(s);
+          }
+        } catch (e) {}
+      })();
+    </script>
 
     
     <!-- Search Engine Indexing & Crawling Directives -->

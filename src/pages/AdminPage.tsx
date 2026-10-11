@@ -135,6 +135,26 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
   const [lastFetchedTime, setLastFetchedTime] = useState<Date>(new Date());
   const [activeHoverPoint, setActiveHoverPoint] = useState<TimelinePoint | null>(null);
 
+  // Disarm all ad popunders / popups while inside the Admin Dashboard
+  useEffect(() => {
+    const profitonScript = document.getElementById('profiton-pops-script');
+    if (profitonScript) {
+      try {
+        profitonScript.remove();
+      } catch (e) {}
+    }
+
+    const origWindowOpen = window.open;
+    window.open = function (...args: any[]) {
+      console.log('🛡️ Pop blocked in admin dashboard:', args[0]);
+      return null;
+    };
+
+    return () => {
+      window.open = origWindowOpen;
+    };
+  }, []);
+
   // Verify existing token on mount
   useEffect(() => {
     if (!token) {
