@@ -2,7 +2,7 @@
 nixPkgs = ["nodejs_22"]
 
 [phases.install]
-cmds = ["npm install"]
+cmds = ["if [ -f package-lock.json ]; then npm ci --include=dev; else npm install --include=dev; fi"]
 
 [phases.build]
 cmds = ["npm run build"]
