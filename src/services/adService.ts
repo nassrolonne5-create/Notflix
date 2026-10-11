@@ -1,8 +1,7 @@
-// Adsterra Smart Link Service
-// Mirrors original index.html frequency & logic, opening ads in external tabs/windows without leaving movie page
+// Profiton Pops Service
+// Handled by Profiton pops script in index.html (//ej.debitsikatch.com/rbEEdE2b4wQ/156800)
 
-export const SMART_LINK_URL =
-  'https://www.effectivecpmnetwork.com/iguja6tv?key=64d3ff50e48f5a21653b7b6c4c49933b';
+export const SMART_LINK_URL = '';
 
 export type AdTriggerType =
   | 'poster'
