@@ -1530,9 +1530,9 @@ Sitemap: https://notflixtv.com/sitemap.xml
   });
   app.get("/sitemap.xml", (req, res) => {
     res.setHeader("Content-Type", "application/xml; charset=utf-8");
-    res.setHeader("Cache-Control", "public, max-age=86400, s-maxage=86400");
     return res.status(200).send(SITEMAP_XML);
   });
+  app.use(express.static(path.join(__dirname, "public")));
   if (!isProd) {
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({

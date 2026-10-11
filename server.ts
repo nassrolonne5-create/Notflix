@@ -2036,9 +2036,11 @@ Sitemap: https://notflixtv.com/sitemap.xml
 
   app.get('/sitemap.xml', (req: Request, res: Response) => {
     res.setHeader('Content-Type', 'application/xml; charset=utf-8');
-    res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
     return res.status(200).send(SITEMAP_XML);
   });
+
+  // Serve static assets from public directory (favicons, manifest, robots, etc.)
+  app.use(express.static(path.join(__dirname, 'public')));
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');

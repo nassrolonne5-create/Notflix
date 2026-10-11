@@ -11,6 +11,16 @@
     <meta name="theme-color" content="#0b0f19" />
     <meta name="color-scheme" content="dark" />
     
+    <!-- Favicon & Brand Site Logo (Google Search Central & Devices) -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png" />
+    <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" href="/favicon.ico" sizes="48x48" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    
     <!-- Profiton Domain Verification & Pops (Excluded on Admin Dashboard) -->
     <meta name="profiton-domain-verification" content="9ff624e95bb5a98412470ab59b802c63ffeabaeb1e925ec073201a91cf44e48a" />
     <script data-cfasync="false">
@@ -63,10 +73,25 @@
       "@context": "https://schema.org",
       "@graph": [
         {
+          "@type": "Organization",
+          "@id": "https://notflixtv.com/#organization",
+          "name": "Notflix",
+          "url": "https://notflixtv.com/",
+          "logo": {
+            "@type": "ImageObject",
+            "url": "https://notflixtv.com/icon-512.png",
+            "width": 512,
+            "height": 512
+          }
+        },
+        {
           "@type": "WebSite",
           "@id": "https://notflixtv.com/#website",
           "url": "https://notflixtv.com/",
           "name": "Notflix",
+          "publisher": {
+            "@id": "https://notflixtv.com/#organization"
+          },
           "description": "Full-stack streaming entertainment platform with movies, TV series, anime, and high-definition video playback.",
           "inLanguage": "en-US",
           "potentialAction": {
@@ -85,6 +110,7 @@
           "url": "https://notflixtv.com/",
           "applicationCategory": "EntertainmentApplication",
           "operatingSystem": "All",
+          "image": "https://notflixtv.com/icon-512.png",
           "browserRequirements": "Requires JavaScript. Requires HTML5.",
           "offers": {
             "@type": "Offer",
