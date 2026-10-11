@@ -28,7 +28,7 @@ if (!process.env.NODE_TLS_REJECT_UNAUTHORIZED) {
 }
 const apiCache = /* @__PURE__ */ new Map();
 const CACHE_TTL_MS = 5 * 60 * 1e3;
-const DATA_DIR = path.join(__dirname, "data");
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const USER_DATA_FILE = path.join(DATA_DIR, "userdata.json");
 if (!fs.existsSync(DATA_DIR)) {
   try {
@@ -1055,16 +1055,26 @@ let analyticsStore = {
   lastUpdated: Date.now()
 };
 function readAnalyticsData() {
-  try {
-    if (fs.existsSync(ANALYTICS_DATA_FILE)) {
-      const content = fs.readFileSync(ANALYTICS_DATA_FILE, "utf-8");
-      const parsed = JSON.parse(content);
-      if (Array.isArray(parsed.events)) {
-        return parsed;
+  const candidatePaths = [
+    ANALYTICS_DATA_FILE,
+    path.join(process.cwd(), "data", "analytics.json"),
+    path.join(__dirname, "data", "analytics.json"),
+    "/app/data/analytics.json",
+    "/data/analytics.json"
+  ];
+  for (const candidate of candidatePaths) {
+    try {
+      if (fs.existsSync(candidate)) {
+        const content = fs.readFileSync(candidate, "utf-8");
+        const parsed = JSON.parse(content);
+        if (Array.isArray(parsed.events) && parsed.events.length > 0) {
+          console.log(`\u{1F4CA} Loaded analytics data from ${candidate} (${parsed.events.length} events)`);
+          return parsed;
+        }
       }
+    } catch (e) {
+      console.warn(`Could not read analytics candidate ${candidate}:`, e);
     }
-  } catch (e) {
-    console.error("Error reading analytics data:", e);
   }
   return { events: [], lastUpdated: Date.now() };
 }
@@ -1373,6 +1383,55 @@ app.get("/api/admin/analytics", requireAdminAuth, (req, res) => {
   } catch (err) {
     console.error("Error generating analytics:", err);
     return res.status(500).json({ error: "Failed to compute analytics" });
+  }
+});
+app.get("/api/admin/analytics/export", requireAdminAuth, (_req, res) => {
+  res.setHeader("Content-Type", "application/json");
+  res.setHeader("Content-Disposition", `attachment; filename="notflix-analytics-backup-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.json"`);
+  return res.send(JSON.stringify(analyticsStore, null, 2));
+});
+app.post("/api/admin/analytics/import", requireAdminAuth, (req, res) => {
+  try {
+    const payload = req.body;
+    let newEvents = [];
+    if (Array.isArray(payload)) {
+      newEvents = payload;
+    } else if (payload && Array.isArray(payload.events)) {
+      newEvents = payload.events;
+    } else {
+      return res.status(400).json({ error: "Invalid format. Expected JSON with { events: [...] } or an array of events." });
+    }
+    const existingIds = new Set(analyticsStore.events.map((e) => e.id));
+    let addedCount = 0;
+    for (const ev of newEvents) {
+      if (ev && ev.id && !existingIds.has(ev.id)) {
+        analyticsStore.events.push(ev);
+        existingIds.add(ev.id);
+        addedCount++;
+      } else if (ev && !ev.id && ev.ts) {
+        analyticsStore.events.push({ ...ev, id: crypto.randomUUID() });
+        addedCount++;
+      }
+    }
+    analyticsStore.events.sort((a, b) => a.ts - b.ts);
+    analyticsStore.lastUpdated = Date.now();
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+      fs.writeFileSync(ANALYTICS_DATA_FILE, JSON.stringify(analyticsStore, null, 2), "utf-8");
+    } catch (writeErr) {
+      console.error("Error persisting imported analytics:", writeErr);
+    }
+    return res.json({
+      success: true,
+      message: `Successfully imported ${addedCount} analytics events. Total in database: ${analyticsStore.events.length}`,
+      importedCount: addedCount,
+      totalEvents: analyticsStore.events.length
+    });
+  } catch (err) {
+    console.error("Error importing analytics:", err);
+    return res.status(500).json({ error: "Failed to import analytics: " + (err?.message || err) });
   }
 });
 const SERVER_BOOT_TIME = Date.now().toString();

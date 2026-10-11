@@ -29,12 +29,15 @@ COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server.js ./server.js
 COPY --from=builder /app/server.ts ./server.ts
+COPY --from=builder /app/data ./data
 
-# Create data directory for user persistence
+# Create data directory for user persistence with correct ownership
 RUN mkdir -p /app/data /app/downloads && \
     addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 notflix && \
     chown -R notflix:nodejs /app
+
+VOLUME ["/app/data", "/app/downloads"]
 
 USER notflix
 

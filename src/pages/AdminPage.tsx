@@ -25,6 +25,8 @@ import {
   CheckCircle2,
   Globe,
   Film,
+  Download,
+  Upload,
 } from 'lucide-react';
 
 interface AdminPageProps {
@@ -259,6 +261,64 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
       setLoadingData(false);
     }
   }, [token, dateRange]);
+
+  // Analytics Backup & Restore handlers
+  const [backupMessage, setBackupMessage] = useState<string | null>(null);
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+
+  const handleExportBackup = async () => {
+    try {
+      const res = await fetch('/api/admin/analytics/export', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error('Export request failed');
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `notflix-analytics-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      setBackupMessage('Backup exported successfully');
+      setTimeout(() => setBackupMessage(null), 3500);
+    } catch {
+      setBackupMessage('Failed to export backup');
+      setTimeout(() => setBackupMessage(null), 3500);
+    }
+  };
+
+  const handleImportBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      try {
+        const json = JSON.parse(ev.target?.result as string);
+        const res = await fetch('/api/admin/analytics/import', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(json),
+        });
+        const result = await res.json();
+        if (result.success) {
+          fetchAnalytics();
+          setBackupMessage(result.message || 'Analytics restored!');
+        } else {
+          setBackupMessage(result.error || 'Failed to restore analytics');
+        }
+      } catch (err: any) {
+        setBackupMessage('Invalid JSON backup file: ' + err.message);
+      }
+      setTimeout(() => setBackupMessage(null), 4000);
+    };
+    reader.readAsText(file);
+    if (e.target) e.target.value = '';
+  };
 
   // Initial fetch and on dateRange change
   useEffect(() => {
@@ -509,6 +569,32 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
             <RefreshCw className={`w-4 h-4 ${loadingData ? 'animate-spin text-blue-400' : ''}`} />
           </button>
 
+          {/* Export Backup Button */}
+          <button
+            onClick={handleExportBackup}
+            title="Download Analytics JSON Backup"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-xs font-semibold transition-all cursor-pointer"
+          >
+            <Download className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="hidden sm:inline">Backup</span>
+          </button>
+
+          {/* Import / Restore Backup Button */}
+          <label
+            title="Restore / Import Analytics JSON Backup"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-xs font-semibold transition-all cursor-pointer"
+          >
+            <Upload className="w-3.5 h-3.5 text-blue-400" />
+            <span className="hidden sm:inline">Restore</span>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json"
+              onChange={handleImportBackup}
+              className="hidden"
+            />
+          </label>
+
 
           {/* Back to Website */}
           <button
@@ -534,6 +620,19 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
           Main Dashboard Content
          ========================================================= */}
       <main className="flex-1 p-4 md:p-8 max-w-7xl w-full mx-auto flex flex-col gap-6">
+        {/* Backup Status Banner */}
+        {backupMessage && (
+          <div className="p-3 rounded-xl bg-blue-500/20 border border-blue-500/40 text-blue-200 text-xs font-semibold flex items-center justify-between">
+            <span>{backupMessage}</span>
+            <button
+              onClick={() => setBackupMessage(null)}
+              className="text-slate-400 hover:text-white px-2 py-0.5 rounded cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         {/* Top KPI Summary Cards (YouTube Studio Style) */}
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3 md:gap-4">
           {/* 1. Live Viewers */}
