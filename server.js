@@ -28,6 +28,146 @@ if (!process.env.NODE_TLS_REJECT_UNAUTHORIZED) {
 }
 const apiCache = /* @__PURE__ */ new Map();
 const CACHE_TTL_MS = 5 * 60 * 1e3;
+const STREAM_SECURITY_SECRET = process.env.STREAM_SECURITY_SECRET || "notflix-stream-secret-" + crypto.randomBytes(16).toString("hex");
+const SEARCH_ENGINE_BOTS = [
+  /googlebot/i,
+  /bingbot/i,
+  /bingpreview/i,
+  /duckduckbot/i,
+  /yandexbot/i,
+  /baiduspider/i,
+  /applebot/i,
+  /slurp/i,
+  /linkedinbot/i,
+  /twitterbot/i,
+  /facebookexternalhit/i
+];
+function isLegitimateSearchCrawler(userAgent) {
+  if (!userAgent) return false;
+  return SEARCH_ENGINE_BOTS.some((pattern) => pattern.test(userAgent));
+}
+const SCRAPER_USER_AGENTS = [
+  /python-requests/i,
+  /aiohttp/i,
+  /scrapy/i,
+  /urllib/i,
+  /curl\//i,
+  /wget\//i,
+  /headlesschrome/i,
+  /phantomjs/i,
+  /go-http-client/i,
+  /libwww-perl/i,
+  /httpclient/i,
+  /postmanruntime/i,
+  /node-fetch\//i,
+  /got\//i,
+  /playwright/i,
+  /puppeteer/i,
+  /mechanize/i
+];
+function isKnownScraperBot(userAgent) {
+  if (!userAgent) return true;
+  return SCRAPER_USER_AGENTS.some((pattern) => pattern.test(userAgent));
+}
+const securityMetrics = {
+  totalBlockedScrapers: 0,
+  totalRateLimited: 0,
+  totalHoneypotTrapped: 0,
+  recentSecurityEvents: []
+};
+function recordSecurityEvent(ip, reason, userAgent, path2) {
+  securityMetrics.recentSecurityEvents.unshift({
+    ip,
+    reason,
+    userAgent: (userAgent || "unknown").slice(0, 80),
+    path: path2,
+    ts: Date.now()
+  });
+  if (securityMetrics.recentSecurityEvents.length > 50) {
+    securityMetrics.recentSecurityEvents.pop();
+  }
+}
+const bannedIps = /* @__PURE__ */ new Map();
+const globalApiRateLimiter = /* @__PURE__ */ new Map();
+const streamRateLimiter = /* @__PURE__ */ new Map();
+function getClientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string") {
+    return forwarded.split(",")[0].trim();
+  }
+  if (Array.isArray(forwarded) && forwarded[0]) {
+    return forwarded[0].trim();
+  }
+  return req.socket.remoteAddress || "127.0.0.1";
+}
+function checkRateLimit(ip, map, maxRequests, windowMs) {
+  const now = Date.now();
+  let timestamps = map.get(ip) || [];
+  timestamps = timestamps.filter((t) => now - t < windowMs);
+  if (timestamps.length >= maxRequests) {
+    map.set(ip, timestamps);
+    return false;
+  }
+  timestamps.push(now);
+  map.set(ip, timestamps);
+  return true;
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, timestamps] of globalApiRateLimiter.entries()) {
+    const valid = timestamps.filter((t) => now - t < 6e4);
+    if (valid.length === 0) globalApiRateLimiter.delete(ip);
+    else globalApiRateLimiter.set(ip, valid);
+  }
+  for (const [ip, timestamps] of streamRateLimiter.entries()) {
+    const valid = timestamps.filter((t) => now - t < 3e5);
+    if (valid.length === 0) streamRateLimiter.delete(ip);
+    else streamRateLimiter.set(ip, valid);
+  }
+  for (const [ip, expireAt] of bannedIps.entries()) {
+    if (now > expireAt) bannedIps.delete(ip);
+  }
+}, 5 * 60 * 1e3);
+const antiScraperMiddleware = (req, res, next) => {
+  const ip = getClientIp(req);
+  const userAgent = req.headers["user-agent"] || "";
+  const now = Date.now();
+  const banExpiry = bannedIps.get(ip);
+  if (banExpiry && now < banExpiry) {
+    securityMetrics.totalBlockedScrapers++;
+    recordSecurityEvent(ip, "Banned IP (Honeypot Trigger)", userAgent, req.path);
+    return res.status(403).json({
+      error: "Access denied: Automated scraping activity detected from your network.",
+      code: "SCRAPER_BLOCKED"
+    });
+  }
+  if (isLegitimateSearchCrawler(userAgent)) {
+    return next();
+  }
+  if (req.path === "/health" || req.path === "/api/health" || req.path.startsWith("/trap") || req.path.startsWith("/api/trap") || req.path.startsWith("/admin") || req.path.startsWith("/api/admin")) {
+    return next();
+  }
+  if (isKnownScraperBot(userAgent)) {
+    securityMetrics.totalBlockedScrapers++;
+    recordSecurityEvent(ip, "Blacklisted Scraper User-Agent", userAgent, req.path);
+    return res.status(403).json({
+      error: "Automated scraping forbidden. Please use a standard web browser.",
+      code: "BOT_DETECTED"
+    });
+  }
+  const allowed = checkRateLimit(ip, globalApiRateLimiter, 120, 60 * 1e3);
+  if (!allowed) {
+    securityMetrics.totalRateLimited++;
+    recordSecurityEvent(ip, "Global API Rate Limit Exceeded", userAgent, req.path);
+    res.setHeader("Retry-After", "60");
+    return res.status(429).json({
+      error: "Too many requests. Please slow down and try again shortly.",
+      code: "RATE_LIMITED"
+    });
+  }
+  next();
+};
+app.use("/api", antiScraperMiddleware);
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const USER_DATA_FILE = path.join(DATA_DIR, "userdata.json");
 if (!fs.existsSync(DATA_DIR)) {
@@ -355,145 +495,9 @@ function normalizeStreams(data, apiName) {
     };
   }).filter((s) => Boolean(s && s.url && (s.url.startsWith("http") || s.url.startsWith("/v1/proxy") || s.url.startsWith("/api/proxy"))));
 }
-function isVidRockOrionStream(s) {
-  if (!s) return false;
-  const prov = (s.provider || "").toString().toLowerCase();
-  const rawT = (s.rawTitle || s.title || s.name || "").toString().toLowerCase();
-  const url = (s.url || s.stream_url || s.link || s.playlist || "").toString().toLowerCase();
-  const proxyUrl = (s.proxyUrl || "").toString().toLowerCase();
-  const server = (s.server || s.source || s.apiName || "").toString().toLowerCase();
-  const combined = `${prov} ${rawT} ${server}`.toLowerCase();
-  if (combined.includes("atlas")) return false;
-  if (url.includes("crmseraph") || proxyUrl.includes("crmseraph")) {
-    return true;
-  }
-  if (combined.includes("vidrockorion") || combined.includes("vidrock-orion") || combined.includes("vidrock_orion")) {
-    return true;
-  }
-  if (combined.includes("vidrock") && combined.includes("orion")) {
-    return true;
-  }
-  if (prov.includes("vidrock") && (rawT.includes("orion") || url.includes("crmseraph"))) {
-    return true;
-  }
-  if (combined.includes("orion")) {
-    return true;
-  }
-  return false;
-}
-function isIcefyStream(s) {
-  if (!s) return false;
-  if (isVidRockOrionStream(s)) return false;
-  const prov = (s.provider || "").toString().toLowerCase();
-  const rawT = (s.rawTitle || s.title || s.name || "").toString().toLowerCase();
-  const url = (s.url || s.stream_url || s.link || s.playlist || "").toString().toLowerCase();
-  const proxyUrl = (s.proxyUrl || "").toString().toLowerCase();
-  const server = (s.server || s.source || s.apiName || "").toString().toLowerCase();
-  const combined = `${prov} ${rawT} ${server}`.toLowerCase();
-  if (combined.includes("icefy")) {
-    return true;
-  }
-  if (url.includes("1x2.space") || proxyUrl.includes("1x2.space") || url.includes("mov3.4pa.top") || proxyUrl.includes("mov3.4pa.top") || url.includes("professionaladvisory.sbs") || proxyUrl.includes("professionaladvisory.sbs") || url.includes("tik.1x2") || url.includes("vip.1x2")) {
-    return true;
-  }
-  return false;
-}
-function isLMScriptStream(s) {
-  if (!s) return false;
-  if (isVidRockOrionStream(s) || isIcefyStream(s)) return false;
-  const prov = (s.provider || "").toString().toLowerCase();
-  const rawT = (s.rawTitle || s.title || s.name || "").toString().toLowerCase();
-  const url = (s.url || s.stream_url || s.link || s.playlist || "").toString().toLowerCase();
-  const proxyUrl = (s.proxyUrl || "").toString().toLowerCase();
-  const server = (s.server || s.source || s.apiName || "").toString().toLowerCase();
-  const combined = `${prov} ${rawT} ${server}`.toLowerCase();
-  if (combined.includes("lmscript") || combined.includes("lm script") || combined.includes("lm-script") || combined.includes("lm_script")) {
-    return true;
-  }
-  if (url.includes("neward.cyou") || proxyUrl.includes("neward.cyou")) {
-    return true;
-  }
-  return false;
-}
-function isVidRockStream(s) {
-  if (!s) return false;
-  const prov = (s.provider || "").toString().toLowerCase();
-  const rawT = (s.rawTitle || s.title || s.name || "").toString().toLowerCase();
-  const url = (s.url || s.stream_url || s.link || s.playlist || "").toString().toLowerCase();
-  const proxyUrl = (s.proxyUrl || "").toString().toLowerCase();
-  const server = (s.server || s.source || s.apiName || "").toString().toLowerCase();
-  const combined = `${prov} ${rawT} ${server}`.toLowerCase();
-  return combined.includes("vidrock") || url.includes("boomchick") || proxyUrl.includes("boomchick") || url.includes("sprintspeedlight") || proxyUrl.includes("sprintspeedlight");
-}
-function rankStreams(streams, isTV) {
-  const foreignRegex = /\b(PUNJABI|KANNADA|MALAYALAM|TELUGU|TAMIL|BENGALI|MARATHI|GUJARATI|URDU|HINDI|LATINO|ESPANOL|SPANISH|CASTILIAN|FRENCH|VF|VFF|RUSSIAN|GERMAN|DEUTSCH|ITALIAN)\b/i;
-  const englishRegex = /\b(ENG|ENGLISH|ORIGINAL|VO)\b/i;
-  const multiRegex = /\b(MULTI|DUAL)\b/i;
-  const getRank = (s) => {
-    let tierScore = 3;
-    if (isVidRockOrionStream(s) || isVidRockStream(s)) {
-      tierScore = 0;
-    } else if (isIcefyStream(s)) {
-      tierScore = 1;
-    } else if (isLMScriptStream(s)) {
-      tierScore = 2;
-    } else {
-      tierScore = 3;
-    }
-    const rawT = (s.rawTitle || s.title || s.name || "").toString().toUpperCase();
-    const prov = (s.provider || "").toString().toUpperCase();
-    const lang = (s.language || "").toString().toUpperCase();
-    const q = (s.quality || "").toString().toUpperCase();
-    const aName = (s.apiName || "").toString().toLowerCase();
-    const fullText = `${rawT} ${prov} ${lang}`;
-    const isExplicitEnglish = englishRegex.test(fullText) || lang === "EN" || lang === "ENG" || lang === "ENGLISH";
-    const isExplicitForeignOnly = foreignRegex.test(fullText) && !isExplicitEnglish;
-    const isMultiAudio = multiRegex.test(fullText);
-    let langScore = 2;
-    if (isExplicitEnglish) {
-      langScore = 0;
-    } else if (isMultiAudio) {
-      langScore = 1;
-    } else if (isExplicitForeignOnly) {
-      langScore = 4;
-    } else {
-      langScore = 2;
-    }
-    const isTMDBEmbed = aName.includes("tmdb") || aName.includes("embed") || prov.includes("TMDB") || prov.includes("CASTLE") || prov.includes("ONETOUCH") || prov.includes("STREAMFLIX") || prov.includes("VAPLAYER");
-    let pScore = 50;
-    if (!isTV) {
-      if (isTMDBEmbed) {
-        pScore = 1;
-      } else if (aName.includes("cinepro") || prov.includes("CINEPRO")) {
-        pScore = 10;
-      } else if (aName.includes("primary") || prov.includes("PRIMARY")) {
-        pScore = 15;
-      } else if (prov.includes("TORRENTIO")) {
-        pScore = 20;
-      }
-    } else {
-      if (aName.includes("cinepro") || prov.includes("CINEPRO")) {
-        pScore = 1;
-      } else if (isTMDBEmbed) {
-        pScore = 5;
-      } else if (aName.includes("primary") || prov.includes("PRIMARY")) {
-        pScore = 10;
-      } else if (prov.includes("TORRENTIO")) {
-        pScore = 20;
-      }
-    }
-    let qScore = 500;
-    if (q.includes("LORDFIX")) qScore = 0;
-    else if (q.includes("1080") || q.includes("FHD")) qScore = 10;
-    else if (q.includes("2160") || q.includes("4K") || q.includes("UHD")) qScore = 20;
-    else if (q.includes("720") || q.includes("HD")) qScore = 30;
-    else if (q.includes("480")) qScore = 40;
-    else if (q.includes("360")) qScore = 50;
-    else if (q === "AUTO") qScore = 60;
-    return tierScore * 1e11 + langScore * 1e7 + pScore * 1e4 + qScore;
-  };
-  const sorted = [...streams].sort((a, b) => getRank(a) - getRank(b));
-  return sorted.map((s, idx) => {
+function rankStreams(streams, _isTV = false) {
+  if (!Array.isArray(streams) || streams.length === 0) return [];
+  return streams.map((s, idx) => {
     const anonymousName = `Server ${idx + 1}`;
     const cleaned = { ...s };
     delete cleaned.rawTitle;
@@ -511,9 +515,70 @@ function rankStreams(streams, isTV) {
     };
   });
 }
+app.get("/api/security/stream-token", (req, res) => {
+  const type = req.query.type || "movie";
+  const id = req.query.id || "0";
+  const ip = getClientIp(req);
+  const ts = Date.now();
+  const signature = crypto.createHmac("sha256", STREAM_SECURITY_SECRET).update(`${ts}:${type}:${id}:${ip}`).digest("hex");
+  const token = `${ts}.${signature}`;
+  return res.json({
+    token,
+    expiresAt: ts + 9e4
+  });
+});
+app.get("/api/trap/probe", (req, res) => {
+  const ip = getClientIp(req);
+  const userAgent = req.headers["user-agent"] || "";
+  bannedIps.set(ip, Date.now() + 24 * 60 * 60 * 1e3);
+  securityMetrics.totalHoneypotTrapped++;
+  recordSecurityEvent(ip, "Honeypot Trap Triggered", userAgent, req.path);
+  console.warn(`\u{1F6A8} Anti-Scraper Honeypot triggered by ${ip} (UA: ${userAgent})`);
+  return res.status(403).json({
+    error: "Access blocked: Automated crawler activity detected.",
+    code: "TRAP_TRIGGERED"
+  });
+});
 app.get("/api/streams/:type/:id", async (req, res) => {
   try {
     const { type, id } = req.params;
+    const ip = getClientIp(req);
+    const userAgent = req.headers["user-agent"] || "";
+    const streamAllowed = checkRateLimit(ip, streamRateLimiter, 30, 5 * 60 * 1e3);
+    if (!streamAllowed) {
+      securityMetrics.totalRateLimited++;
+      recordSecurityEvent(ip, "Stream Rate Limit Exceeded", userAgent, req.path);
+      res.setHeader("Retry-After", "120");
+      return res.status(429).json({
+        error: "Stream resolution limit reached. Please wait before switching streams.",
+        code: "STREAM_RATE_LIMITED"
+      });
+    }
+    const token = req.query.token || req.headers["x-stream-token"];
+    let isTokenValid = false;
+    if (token && token.includes(".")) {
+      const [tsStr, sig] = token.split(".");
+      const tokenTs = parseInt(tsStr, 10);
+      const age = Date.now() - tokenTs;
+      if (!isNaN(tokenTs) && age >= 0 && age <= 12e4) {
+        const expectedSigWithIp = crypto.createHmac("sha256", STREAM_SECURITY_SECRET).update(`${tokenTs}:${type}:${id}:${ip}`).digest("hex");
+        const expectedSigGeneral = crypto.createHmac("sha256", STREAM_SECURITY_SECRET).update(`${tokenTs}:${type}:${id}`).digest("hex");
+        if (sig === expectedSigWithIp || sig === expectedSigGeneral) {
+          isTokenValid = true;
+        }
+      }
+    }
+    const referer = req.headers["referer"] || "";
+    const host = req.headers["host"] || "";
+    const isDirectBrowser = !referer || referer.includes(host) || referer.includes("localhost") || referer.includes("127.0.0.1") || referer.includes("run.app");
+    if (!isTokenValid && !isDirectBrowser) {
+      securityMetrics.totalBlockedScrapers++;
+      recordSecurityEvent(ip, "Hotlinking / Invalid Stream Token", userAgent, req.path);
+      return res.status(403).json({
+        error: "Unauthorized stream request. Direct scraping or hotlinking is prohibited.",
+        code: "STREAM_FORBIDDEN"
+      });
+    }
     const isTV = type === "tv";
     const s = parseInt(req.query.s || "1", 10);
     const e = parseInt(req.query.e || "1", 10);
@@ -1377,8 +1442,14 @@ app.get("/api/admin/analytics", requireAdminAuth, (req, res) => {
       recentEvents,
       devices: devicesMap,
       browsers: browsersMap,
-      operatingSystems: osMap,
-      serverHealth
+      serverHealth,
+      security: {
+        totalBlockedScrapers: securityMetrics.totalBlockedScrapers,
+        totalRateLimited: securityMetrics.totalRateLimited,
+        totalHoneypotTrapped: securityMetrics.totalHoneypotTrapped,
+        activeBannedIps: bannedIps.size,
+        recentEvents: securityMetrics.recentSecurityEvents.slice(0, 20)
+      }
     });
   } catch (err) {
     console.error("Error generating analytics:", err);

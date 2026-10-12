@@ -27,6 +27,9 @@ import {
   Film,
   Download,
   Upload,
+  Shield,
+  ShieldAlert,
+  Bug,
 } from 'lucide-react';
 
 interface AdminPageProps {
@@ -112,6 +115,19 @@ interface AnalyticsResponse {
   browsers: Record<string, number>;
   operatingSystems: Record<string, number>;
   serverHealth: ServerHealthItem[];
+  security?: {
+    totalBlockedScrapers: number;
+    totalRateLimited: number;
+    totalHoneypotTrapped: number;
+    activeBannedIps: number;
+    recentEvents: Array<{
+      ip: string;
+      reason: string;
+      userAgent: string;
+      path: string;
+      ts: number;
+    }>;
+  };
 }
 
 export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
@@ -1153,6 +1169,119 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                   </div>
                 ))}
               </div>
+            </div>
+          </div>
+        </div>
+
+        {/* =========================================================
+            Anti-Bot & Anti-Scraping Defense Shield Telemetry
+           ========================================================= */}
+        <div className="bg-[#0e1424] border border-white/10 rounded-2xl p-5 md:p-6 flex flex-col gap-5">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-400">
+                <Shield className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <span>Anti-Bot & Scraper Defense Shield</span>
+                  <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-400">
+                    Live Active
+                  </span>
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Protecting stream extractors and media APIs from automated leeches, crawlers, and hotlink abuse.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 text-xs text-slate-400">
+              <span className="w-2 h-2 rounded-full bg-emerald-400" />
+              <span>Googlebot & Search Engines Whitelisted</span>
+            </div>
+          </div>
+
+          {/* Security KPI Grid */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="p-3.5 rounded-xl bg-[#12192b] border border-white/5 flex flex-col justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Blocked Scrapers
+              </span>
+              <div className="text-2xl md:text-3xl font-extrabold font-mono text-rose-400 my-1">
+                {analytics?.security?.totalBlockedScrapers || 0}
+              </div>
+              <span className="text-[10px] text-slate-400">Python, Scrapy & headless tools</span>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-[#12192b] border border-white/5 flex flex-col justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Rate-Limit Throttled
+              </span>
+              <div className="text-2xl md:text-3xl font-extrabold font-mono text-amber-400 my-1">
+                {analytics?.security?.totalRateLimited || 0}
+              </div>
+              <span className="text-[10px] text-slate-400">Burst extraction prevented</span>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-[#12192b] border border-white/5 flex flex-col justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Honeypot Trapped
+              </span>
+              <div className="text-2xl md:text-3xl font-extrabold font-mono text-purple-400 my-1">
+                {analytics?.security?.totalHoneypotTrapped || 0}
+              </div>
+              <span className="text-[10px] text-slate-400">DOM spider auto-banned</span>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-[#12192b] border border-white/5 flex flex-col justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Active IP Bans
+              </span>
+              <div className="text-2xl md:text-3xl font-extrabold font-mono text-blue-400 my-1">
+                {analytics?.security?.activeBannedIps || 0}
+              </div>
+              <span className="text-[10px] text-slate-400">24-hour scraper quarantine</span>
+            </div>
+          </div>
+
+          {/* Blocked Incidents Log */}
+          <div>
+            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2.5 flex items-center gap-1.5">
+              <Bug className="w-3.5 h-3.5 text-rose-400" />
+              <span>Recent Blocked Incident Log</span>
+            </h4>
+
+            <div className="max-h-56 overflow-y-auto flex flex-col gap-1.5 pr-1">
+              {analytics?.security?.recentEvents && analytics.security.recentEvents.length > 0 ? (
+                analytics.security.recentEvents.map((ev, idx) => (
+                  <div
+                    key={idx}
+                    className="flex items-center justify-between p-2.5 rounded-xl bg-[#11182a] border border-white/5 text-xs gap-3"
+                  >
+                    <div className="flex items-center gap-2.5 truncate">
+                      <ShieldAlert className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                      <div className="truncate">
+                        <span className="text-rose-300 font-bold">{ev.reason}</span>
+                        <span className="text-slate-500 mx-1.5">on</span>
+                        <span className="font-mono text-slate-300">{ev.path}</span>
+                        <span className="text-slate-500 ml-2 text-[11px] truncate hidden md:inline">
+                          ({ev.userAgent})
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0 font-mono text-[10px] text-slate-400">
+                      <span className="text-slate-300">{ev.ip}</span>
+                      <span>·</span>
+                      <span>{new Date(ev.ts).toLocaleTimeString()}</span>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="py-6 text-center text-xs text-slate-500 bg-[#11182a]/50 rounded-xl border border-white/5">
+                  Shield active: No scraper attacks or malicious automated bots detected.
+                </div>
+              )}
             </div>
           </div>
         </div>

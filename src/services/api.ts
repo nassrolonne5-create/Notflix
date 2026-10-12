@@ -562,213 +562,12 @@ function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
   return result;
 }
 
-function isVidRockOrionStream(s: StreamSource): boolean {
-  if (!s) return false;
-  const prov = (s.provider || '').toString().toLowerCase();
-  const rawT = (s.rawTitle || (s as any).title || (s as any).name || '').toString().toLowerCase();
-  const url = (s.url || '').toString().toLowerCase();
-  const proxyUrl = (s.proxyUrl || '').toString().toLowerCase();
-  const server = ((s as any).server || (s as any).source || s.apiName || '').toString().toLowerCase();
-  const combined = `${prov} ${rawT} ${server}`.toLowerCase();
+// Process client streams without server prioritization: preserve natural discovery order as resolved by scrapers
+export function rankClientStreams(streams: StreamSource[], _isTV?: boolean): StreamSource[] {
+  if (!Array.isArray(streams) || streams.length === 0) return [];
 
-  // If it's explicitly Atlas, it is not Orion
-  if (combined.includes('atlas')) return false;
-
-  // Direct Orion match or crmseraph CDN host
-  if (url.includes('crmseraph') || proxyUrl.includes('crmseraph')) {
-    return true;
-  }
-  if (
-    combined.includes('vidrockorion') ||
-    combined.includes('vidrock-orion') ||
-    combined.includes('vidrock_orion')
-  ) {
-    return true;
-  }
-  if (combined.includes('vidrock') && combined.includes('orion')) {
-    return true;
-  }
-  if (prov.includes('vidrock') && (rawT.includes('orion') || url.includes('crmseraph'))) {
-    return true;
-  }
-  if (combined.includes('orion')) {
-    return true;
-  }
-  return false;
-}
-
-function isIcefyStream(s: StreamSource): boolean {
-  if (!s) return false;
-  if (isVidRockOrionStream(s)) return false;
-
-  const prov = (s.provider || '').toString().toLowerCase();
-  const rawT = (s.rawTitle || (s as any).title || (s as any).name || '').toString().toLowerCase();
-  const url = (s.url || '').toString().toLowerCase();
-  const proxyUrl = (s.proxyUrl || '').toString().toLowerCase();
-  const server = ((s as any).server || (s as any).source || s.apiName || '').toString().toLowerCase();
-  const combined = `${prov} ${rawT} ${server}`.toLowerCase();
-
-  if (combined.includes('icefy')) {
-    return true;
-  }
-  if (
-    url.includes('1x2.space') ||
-    proxyUrl.includes('1x2.space') ||
-    url.includes('mov3.4pa.top') ||
-    proxyUrl.includes('mov3.4pa.top') ||
-    url.includes('professionaladvisory.sbs') ||
-    proxyUrl.includes('professionaladvisory.sbs') ||
-    url.includes('tik.1x2') ||
-    url.includes('vip.1x2')
-  ) {
-    return true;
-  }
-  return false;
-}
-
-function isLMScriptStream(s: StreamSource): boolean {
-  if (!s) return false;
-  if (isVidRockOrionStream(s) || isIcefyStream(s)) return false;
-
-  const prov = (s.provider || '').toString().toLowerCase();
-  const rawT = (s.rawTitle || (s as any).title || (s as any).name || '').toString().toLowerCase();
-  const url = (s.url || '').toString().toLowerCase();
-  const proxyUrl = (s.proxyUrl || '').toString().toLowerCase();
-  const server = ((s as any).server || (s as any).source || s.apiName || '').toString().toLowerCase();
-  const combined = `${prov} ${rawT} ${server}`.toLowerCase();
-
-  if (
-    combined.includes('lmscript') ||
-    combined.includes('lm script') ||
-    combined.includes('lm-script') ||
-    combined.includes('lm_script')
-  ) {
-    return true;
-  }
-  if (url.includes('neward.cyou') || proxyUrl.includes('neward.cyou')) {
-    return true;
-  }
-  return false;
-}
-
-function isVidRockStream(s: StreamSource): boolean {
-  if (!s) return false;
-  const prov = (s.provider || '').toString().toLowerCase();
-  const rawT = (s.rawTitle || (s as any).title || (s as any).name || '').toString().toLowerCase();
-  const url = (s.url || '').toString().toLowerCase();
-  const proxyUrl = (s.proxyUrl || '').toString().toLowerCase();
-  const server = ((s as any).server || (s as any).source || s.apiName || '').toString().toLowerCase();
-  const combined = `${prov} ${rawT} ${server}`.toLowerCase();
-  return (
-    combined.includes('vidrock') ||
-    url.includes('boomchick') ||
-    proxyUrl.includes('boomchick') ||
-    url.includes('sprintspeedlight') ||
-    proxyUrl.includes('sprintspeedlight')
-  );
-}
-
-export function rankClientStreams(streams: StreamSource[], isTV: boolean): StreamSource[] {
-  const foreignRegex =
-    /\b(PUNJABI|KANNADA|MALAYALAM|TELUGU|TAMIL|BENGALI|MARATHI|GUJARATI|URDU|HINDI|LATINO|ESPANOL|SPANISH|CASTILIAN|FRENCH|VF|VFF|RUSSIAN|GERMAN|DEUTSCH|ITALIAN)\b/i;
-  const englishRegex = /\b(ENG|ENGLISH|ORIGINAL|VO)\b/i;
-  const multiRegex = /\b(MULTI|DUAL)\b/i;
-
-  const getRank = (s: StreamSource) => {
-    // 1. Primary Source Prioritization Tier:
-    // Tier 0: VidRock (Orion, Atlas, Nova - Highest Priority - Always First if available)
-    // Tier 1: Icefy (Second Priority - Follows VidRock if available)
-    // Tier 2: LMScript (Third Priority - Follows Icefy if available)
-    // Tier 3: Other providers (TMDB Embed, CastleTV, DahmerMovies, etc.)
-    let tierScore = 3;
-    if (isVidRockOrionStream(s) || isVidRockStream(s)) {
-      tierScore = 0;
-    } else if (isIcefyStream(s)) {
-      tierScore = 1;
-    } else if (isLMScriptStream(s)) {
-      tierScore = 2;
-    } else {
-      tierScore = 3;
-    }
-
-    const rawT = (s.rawTitle || (s as any).title || (s as any).name || '').toString().toUpperCase();
-    const prov = (s.provider || '').toString().toUpperCase();
-    const lang = (s.language || '').toString().toUpperCase();
-    const q = (s.quality || '').toString().toUpperCase();
-    const aName = (s.apiName || '').toString().toLowerCase();
-
-    const fullText = `${rawT} ${prov} ${lang}`;
-
-    const isExplicitEnglish =
-      englishRegex.test(fullText) ||
-      lang === 'EN' ||
-      lang === 'ENG' ||
-      lang === 'ENGLISH';
-
-    const isExplicitForeignOnly = foreignRegex.test(fullText) && !isExplicitEnglish;
-    const isMultiAudio = multiRegex.test(fullText);
-
-    let langScore = 2;
-    if (isExplicitEnglish) {
-      langScore = 0;
-    } else if (isMultiAudio) {
-      langScore = 1;
-    } else if (isExplicitForeignOnly) {
-      langScore = 4;
-    } else {
-      langScore = 2;
-    }
-
-    const isTMDBEmbed =
-      aName.includes('tmdb') ||
-      aName.includes('embed') ||
-      prov.includes('TMDB') ||
-      prov.includes('CASTLE') ||
-      prov.includes('ONETOUCH') ||
-      prov.includes('STREAMFLIX') ||
-      prov.includes('VAPLAYER');
-
-    let pScore = 50;
-    if (!isTV) {
-      // Prioritize TMDB Embed API servers to show first for movies in tier 3
-      if (isTMDBEmbed) {
-        pScore = 1;
-      } else if (aName.includes('cinepro') || prov.includes('CINEPRO')) {
-        pScore = 10;
-      } else if (aName.includes('primary') || prov.includes('PRIMARY')) {
-        pScore = 15;
-      } else if (prov.includes('TORRENTIO')) {
-        pScore = 20;
-      }
-    } else {
-      // TV Series
-      if (aName.includes('cinepro') || prov.includes('CINEPRO')) {
-        pScore = 1;
-      } else if (isTMDBEmbed) {
-        pScore = 5;
-      } else if (aName.includes('primary') || prov.includes('PRIMARY')) {
-        pScore = 10;
-      } else if (prov.includes('TORRENTIO')) {
-        pScore = 20;
-      }
-    }
-
-    let qScore = 500;
-    if (q.includes('LORDFIX')) qScore = 0;
-    else if (q.includes('1080') || q.includes('FHD')) qScore = 10;
-    else if (q.includes('2160') || q.includes('4K') || q.includes('UHD')) qScore = 20;
-    else if (q.includes('720') || q.includes('HD')) qScore = 30;
-    else if (q.includes('480')) qScore = 40;
-    else if (q.includes('360')) qScore = 50;
-    else if (q === 'AUTO') qScore = 60;
-
-    return tierScore * 100000000000 + langScore * 10000000 + pScore * 10000 + qScore;
-  };
-
-  const sorted = [...streams].sort((a, b) => getRank(a) - getRank(b));
-
-  // Keep server names completely anonymous as Server 1, Server 2, Server 3, etc.
-  return sorted.map((s, idx) => {
+  // Remove server prioritizing: keep streams in natural discovery order without server or provider bias
+  return streams.map((s, idx) => {
     const anonymousName = `Server ${idx + 1}`;
     const cleaned = { ...s };
     delete (cleaned as any).rawTitle;
@@ -785,6 +584,20 @@ export function rankClientStreams(streams: StreamSource[], isTV: boolean): Strea
       title: anonymousName,
     };
   });
+}
+
+// Obtains ephemeral HMAC stream authorization token to prevent scraper hotlinking
+async function getStreamToken(type: string, id: number): Promise<string | null> {
+  try {
+    const res = await fetch(`/api/security/stream-token?type=${type}&id=${id}`, {
+      headers: { Accept: 'application/json' },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return data.token || null;
+    }
+  } catch {}
+  return null;
 }
 
 // In-memory client stream cache (15-min TTL) to prevent duplicate scraper hits
@@ -808,12 +621,18 @@ export async function fetchStreams(
     streamClientCache.delete(cacheKey);
   }
 
+  // Obtain short-lived stream authorization token
+  const streamToken = await getStreamToken(type, id);
+
   const queryParts = [];
   if (type === 'tv') {
     queryParts.push(`s=${s}`, `e=${e}`);
   }
   if (forceRefresh) {
     queryParts.push(`refresh=1`, `_t=${Date.now()}`);
+  }
+  if (streamToken) {
+    queryParts.push(`token=${encodeURIComponent(streamToken)}`);
   }
   const queryString = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
 
@@ -824,6 +643,7 @@ export async function fetchStreams(
       const timer = setTimeout(() => controller.abort(), 28000);
       const res = await fetch(`/api/streams/${type}/${id}${queryString}`, {
         signal: controller.signal,
+        headers: streamToken ? { 'X-Stream-Token': streamToken } : {},
         cache: forceRefresh || backendAttempt > 1 ? 'no-cache' : 'default',
       });
       clearTimeout(timer);

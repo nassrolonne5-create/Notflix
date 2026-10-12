@@ -1,0 +1,6 @@
+{
+  "summary":  "Architectural blueprint for implementing a multi-layered anti-bot and anti-scraping defense system for Notflix. Features seamless sliding-window rate limiting, browser fingerprinting, time-limited HMAC stream token signing, search crawler SEO whitelisting, invisible scraper honeypots, and an admin security monitor.",
+  "updatedAt":  "2026-10-12T06:27:37.454758878Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

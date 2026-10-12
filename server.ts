@@ -47,6 +47,201 @@ interface CacheEntry {
 const apiCache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
+// ============================================================================
+// Anti-Bot, Anti-Scraping & Stream Protection Subsystem
+// ============================================================================
+const STREAM_SECURITY_SECRET =
+  process.env.STREAM_SECURITY_SECRET ||
+  'notflix-stream-secret-' + crypto.randomBytes(16).toString('hex');
+
+// Legitimate Search Engine Crawler Whitelist (Preserves SEO and favicon indexing)
+const SEARCH_ENGINE_BOTS = [
+  /googlebot/i,
+  /bingbot/i,
+  /bingpreview/i,
+  /duckduckbot/i,
+  /yandexbot/i,
+  /baiduspider/i,
+  /applebot/i,
+  /slurp/i,
+  /linkedinbot/i,
+  /twitterbot/i,
+  /facebookexternalhit/i,
+];
+
+function isLegitimateSearchCrawler(userAgent: string): boolean {
+  if (!userAgent) return false;
+  return SEARCH_ENGINE_BOTS.some((pattern) => pattern.test(userAgent));
+}
+
+// Known Scraper and Headless User-Agent Signatures
+const SCRAPER_USER_AGENTS = [
+  /python-requests/i,
+  /aiohttp/i,
+  /scrapy/i,
+  /urllib/i,
+  /curl\//i,
+  /wget\//i,
+  /headlesschrome/i,
+  /phantomjs/i,
+  /go-http-client/i,
+  /libwww-perl/i,
+  /httpclient/i,
+  /postmanruntime/i,
+  /node-fetch\//i,
+  /got\//i,
+  /playwright/i,
+  /puppeteer/i,
+  /mechanize/i,
+];
+
+function isKnownScraperBot(userAgent: string): boolean {
+  if (!userAgent) return true; // Missing User-Agent is standard scraper pattern
+  return SCRAPER_USER_AGENTS.some((pattern) => pattern.test(userAgent));
+}
+
+interface SecurityMetrics {
+  totalBlockedScrapers: number;
+  totalRateLimited: number;
+  totalHoneypotTrapped: number;
+  recentSecurityEvents: Array<{
+    ip: string;
+    reason: string;
+    userAgent: string;
+    path: string;
+    ts: number;
+  }>;
+}
+
+const securityMetrics: SecurityMetrics = {
+  totalBlockedScrapers: 0,
+  totalRateLimited: 0,
+  totalHoneypotTrapped: 0,
+  recentSecurityEvents: [],
+};
+
+function recordSecurityEvent(ip: string, reason: string, userAgent: string, path: string) {
+  securityMetrics.recentSecurityEvents.unshift({
+    ip,
+    reason,
+    userAgent: (userAgent || 'unknown').slice(0, 80),
+    path,
+    ts: Date.now(),
+  });
+  if (securityMetrics.recentSecurityEvents.length > 50) {
+    securityMetrics.recentSecurityEvents.pop();
+  }
+}
+
+// Active bans (IP -> expiration timestamp)
+const bannedIps = new Map<string, number>();
+
+// In-Memory Sliding-Window Rate Limiters (IP -> timestamp[])
+const globalApiRateLimiter = new Map<string, number[]>();
+const streamRateLimiter = new Map<string, number[]>();
+
+function getClientIp(req: Request): string {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string') {
+    return forwarded.split(',')[0].trim();
+  }
+  if (Array.isArray(forwarded) && forwarded[0]) {
+    return forwarded[0].trim();
+  }
+  return req.socket.remoteAddress || '127.0.0.1';
+}
+
+function checkRateLimit(ip: string, map: Map<string, number[]>, maxRequests: number, windowMs: number): boolean {
+  const now = Date.now();
+  let timestamps = map.get(ip) || [];
+  timestamps = timestamps.filter((t) => now - t < windowMs);
+  if (timestamps.length >= maxRequests) {
+    map.set(ip, timestamps);
+    return false;
+  }
+  timestamps.push(now);
+  map.set(ip, timestamps);
+  return true;
+}
+
+// Periodic cleanup of expired rate-limit buckets
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, timestamps] of globalApiRateLimiter.entries()) {
+    const valid = timestamps.filter((t) => now - t < 60000);
+    if (valid.length === 0) globalApiRateLimiter.delete(ip);
+    else globalApiRateLimiter.set(ip, valid);
+  }
+  for (const [ip, timestamps] of streamRateLimiter.entries()) {
+    const valid = timestamps.filter((t) => now - t < 300000);
+    if (valid.length === 0) streamRateLimiter.delete(ip);
+    else streamRateLimiter.set(ip, valid);
+  }
+  for (const [ip, expireAt] of bannedIps.entries()) {
+    if (now > expireAt) bannedIps.delete(ip);
+  }
+}, 5 * 60 * 1000);
+
+const antiScraperMiddleware = (req: Request, res: Response, next: NextFunction) => {
+  const ip = getClientIp(req);
+  const userAgent = (req.headers['user-agent'] as string) || '';
+  const now = Date.now();
+
+  // 1. Check if IP is actively banned (e.g. from honeypot trap)
+  const banExpiry = bannedIps.get(ip);
+  if (banExpiry && now < banExpiry) {
+    securityMetrics.totalBlockedScrapers++;
+    recordSecurityEvent(ip, 'Banned IP (Honeypot Trigger)', userAgent, req.path);
+    return res.status(403).json({
+      error: 'Access denied: Automated scraping activity detected from your network.',
+      code: 'SCRAPER_BLOCKED',
+    });
+  }
+
+  // 2. Allow whitelisted legitimate search engine crawlers (Google, Bing)
+  if (isLegitimateSearchCrawler(userAgent)) {
+    return next();
+  }
+
+  // 3. Skip anti-bot checks for health check, honeypot trap itself, and admin auth endpoints
+  if (
+    req.path === '/health' ||
+    req.path === '/api/health' ||
+    req.path.startsWith('/trap') ||
+    req.path.startsWith('/api/trap') ||
+    req.path.startsWith('/admin') ||
+    req.path.startsWith('/api/admin')
+  ) {
+    return next();
+  }
+
+  // 4. Block known scraper signatures and headless tools
+  if (isKnownScraperBot(userAgent)) {
+    securityMetrics.totalBlockedScrapers++;
+    recordSecurityEvent(ip, 'Blacklisted Scraper User-Agent', userAgent, req.path);
+    return res.status(403).json({
+      error: 'Automated scraping forbidden. Please use a standard web browser.',
+      code: 'BOT_DETECTED',
+    });
+  }
+
+  // 5. Global API Rate Limiting: 120 requests per 60 seconds per IP
+  const allowed = checkRateLimit(ip, globalApiRateLimiter, 120, 60 * 1000);
+  if (!allowed) {
+    securityMetrics.totalRateLimited++;
+    recordSecurityEvent(ip, 'Global API Rate Limit Exceeded', userAgent, req.path);
+    res.setHeader('Retry-After', '60');
+    return res.status(429).json({
+      error: 'Too many requests. Please slow down and try again shortly.',
+      code: 'RATE_LIMITED',
+    });
+  }
+
+  next();
+};
+
+app.use('/api', antiScraperMiddleware);
+
 // Persistent User Data storage
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const USER_DATA_FILE = path.join(DATA_DIR, 'userdata.json');
@@ -435,223 +630,12 @@ function normalizeStreams(data: any, apiName: string) {
     .filter((s): s is NonNullable<typeof s> => Boolean(s && s.url && (s.url.startsWith('http') || s.url.startsWith('/v1/proxy') || s.url.startsWith('/api/proxy'))));
 }
 
-function isVidRockOrionStream(s: any): boolean {
-  if (!s) return false;
-  const prov = (s.provider || '').toString().toLowerCase();
-  const rawT = (s.rawTitle || s.title || s.name || '').toString().toLowerCase();
-  const url = (s.url || s.stream_url || s.link || s.playlist || '').toString().toLowerCase();
-  const proxyUrl = (s.proxyUrl || '').toString().toLowerCase();
-  const server = (s.server || s.source || s.apiName || '').toString().toLowerCase();
-  const combined = `${prov} ${rawT} ${server}`.toLowerCase();
+// Process streams without server prioritization: preserve natural discovery order as resolved by scrapers
+function rankStreams(streams: any[], _isTV = false): any[] {
+  if (!Array.isArray(streams) || streams.length === 0) return [];
 
-  // If it's explicitly Atlas, it is not Orion
-  if (combined.includes('atlas')) return false;
-
-  // Direct Orion match or crmseraph CDN host
-  if (url.includes('crmseraph') || proxyUrl.includes('crmseraph')) {
-    return true;
-  }
-  if (
-    combined.includes('vidrockorion') ||
-    combined.includes('vidrock-orion') ||
-    combined.includes('vidrock_orion')
-  ) {
-    return true;
-  }
-  if (combined.includes('vidrock') && combined.includes('orion')) {
-    return true;
-  }
-  if (prov.includes('vidrock') && (rawT.includes('orion') || url.includes('crmseraph'))) {
-    return true;
-  }
-  if (combined.includes('orion')) {
-    return true;
-  }
-  return false;
-}
-
-function isIcefyStream(s: any): boolean {
-  if (!s) return false;
-  if (isVidRockOrionStream(s)) return false;
-
-  const prov = (s.provider || '').toString().toLowerCase();
-  const rawT = (s.rawTitle || s.title || s.name || '').toString().toLowerCase();
-  const url = (s.url || s.stream_url || s.link || s.playlist || '').toString().toLowerCase();
-  const proxyUrl = (s.proxyUrl || '').toString().toLowerCase();
-  const server = (s.server || s.source || s.apiName || '').toString().toLowerCase();
-  const combined = `${prov} ${rawT} ${server}`.toLowerCase();
-
-  if (combined.includes('icefy')) {
-    return true;
-  }
-  if (
-    url.includes('1x2.space') ||
-    proxyUrl.includes('1x2.space') ||
-    url.includes('mov3.4pa.top') ||
-    proxyUrl.includes('mov3.4pa.top') ||
-    url.includes('professionaladvisory.sbs') ||
-    proxyUrl.includes('professionaladvisory.sbs') ||
-    url.includes('tik.1x2') ||
-    url.includes('vip.1x2')
-  ) {
-    return true;
-  }
-  return false;
-}
-
-function isLMScriptStream(s: any): boolean {
-  if (!s) return false;
-  if (isVidRockOrionStream(s) || isIcefyStream(s)) return false;
-
-  const prov = (s.provider || '').toString().toLowerCase();
-  const rawT = (s.rawTitle || s.title || s.name || '').toString().toLowerCase();
-  const url = (s.url || s.stream_url || s.link || s.playlist || '').toString().toLowerCase();
-  const proxyUrl = (s.proxyUrl || '').toString().toLowerCase();
-  const server = (s.server || s.source || s.apiName || '').toString().toLowerCase();
-  const combined = `${prov} ${rawT} ${server}`.toLowerCase();
-
-  if (
-    combined.includes('lmscript') ||
-    combined.includes('lm script') ||
-    combined.includes('lm-script') ||
-    combined.includes('lm_script')
-  ) {
-    return true;
-  }
-  if (url.includes('neward.cyou') || proxyUrl.includes('neward.cyou')) {
-    return true;
-  }
-  return false;
-}
-
-function isVidRockStream(s: any): boolean {
-  if (!s) return false;
-  const prov = (s.provider || '').toString().toLowerCase();
-  const rawT = (s.rawTitle || s.title || s.name || '').toString().toLowerCase();
-  const url = (s.url || s.stream_url || s.link || s.playlist || '').toString().toLowerCase();
-  const proxyUrl = (s.proxyUrl || '').toString().toLowerCase();
-  const server = (s.server || s.source || s.apiName || '').toString().toLowerCase();
-  const combined = `${prov} ${rawT} ${server}`.toLowerCase();
-  return (
-    combined.includes('vidrock') ||
-    url.includes('boomchick') ||
-    proxyUrl.includes('boomchick') ||
-    url.includes('sprintspeedlight') ||
-    proxyUrl.includes('sprintspeedlight')
-  );
-}
-
-function rankStreams(streams: any[], isTV: boolean) {
-  const foreignRegex =
-    /\b(PUNJABI|KANNADA|MALAYALAM|TELUGU|TAMIL|BENGALI|MARATHI|GUJARATI|URDU|HINDI|LATINO|ESPANOL|SPANISH|CASTILIAN|FRENCH|VF|VFF|RUSSIAN|GERMAN|DEUTSCH|ITALIAN)\b/i;
-  const englishRegex = /\b(ENG|ENGLISH|ORIGINAL|VO)\b/i;
-  const multiRegex = /\b(MULTI|DUAL)\b/i;
-
-  const getRank = (s: any) => {
-    // 1. Primary Source Prioritization Tier:
-    // Tier 0: VidRock (Orion, Atlas, Nova - Highest Priority - Always First if available)
-    // Tier 1: Icefy (Second Priority - Follows VidRock if available)
-    // Tier 2: LMScript (Third Priority - Follows Icefy if available)
-    // Tier 3: Other providers (TMDB Embed, CastleTV, DahmerMovies, etc.)
-    let tierScore = 3;
-    if (isVidRockOrionStream(s) || isVidRockStream(s)) {
-      tierScore = 0;
-    } else if (isIcefyStream(s)) {
-      tierScore = 1;
-    } else if (isLMScriptStream(s)) {
-      tierScore = 2;
-    } else {
-      tierScore = 3;
-    }
-
-    const rawT = (s.rawTitle || s.title || s.name || '').toString().toUpperCase();
-    const prov = (s.provider || '').toString().toUpperCase();
-    const lang = (s.language || '').toString().toUpperCase();
-    const q = (s.quality || '').toString().toUpperCase();
-    const aName = (s.apiName || '').toString().toLowerCase();
-
-    // Full text of stream metadata
-    const fullText = `${rawT} ${prov} ${lang}`;
-
-    const isExplicitEnglish =
-      englishRegex.test(fullText) ||
-      lang === 'EN' ||
-      lang === 'ENG' ||
-      lang === 'ENGLISH';
-
-    // Explicit foreign-only indicators (Punjabi, Hindi, Kannada, Malayalam, Latino, Spanish, French, etc.)
-    const isExplicitForeignOnly = foreignRegex.test(fullText) && !isExplicitEnglish;
-
-    const isMultiAudio = multiRegex.test(fullText);
-
-    // Language Priority Score:
-    // 0: Confirmed English Audio (highest priority)
-    // 1: Multi-Audio (includes English)
-    // 2: Standard/Default Server
-    // 4: Foreign dubbed only (lowest priority - Punjabi, Kannada, Hindi, etc.)
-    let langScore = 2;
-    if (isExplicitEnglish) {
-      langScore = 0;
-    } else if (isMultiAudio) {
-      langScore = 1;
-    } else if (isExplicitForeignOnly) {
-      langScore = 4;
-    } else {
-      langScore = 2;
-    }
-
-    // Provider preference for tier 3
-    const isTMDBEmbed =
-      aName.includes('tmdb') ||
-      aName.includes('embed') ||
-      prov.includes('TMDB') ||
-      prov.includes('CASTLE') ||
-      prov.includes('ONETOUCH') ||
-      prov.includes('STREAMFLIX') ||
-      prov.includes('VAPLAYER');
-
-    let pScore = 50;
-    if (!isTV) {
-      // Movies: TMDB Embed API servers are given highest priority among tier 3
-      if (isTMDBEmbed) {
-        pScore = 1;
-      } else if (aName.includes('cinepro') || prov.includes('CINEPRO')) {
-        pScore = 10;
-      } else if (aName.includes('primary') || prov.includes('PRIMARY')) {
-        pScore = 15;
-      } else if (prov.includes('TORRENTIO')) {
-        pScore = 20;
-      }
-    } else {
-      // TV Series: Cinepro then TMDB Embed
-      if (aName.includes('cinepro') || prov.includes('CINEPRO')) {
-        pScore = 1;
-      } else if (isTMDBEmbed) {
-        pScore = 5;
-      } else if (aName.includes('primary') || prov.includes('PRIMARY')) {
-        pScore = 10;
-      } else if (prov.includes('TORRENTIO')) {
-        pScore = 20;
-      }
-    }
-
-    // Quality preference: 1080p > 4K > 720p > Auto
-    let qScore = 500;
-    if (q.includes('LORDFIX')) qScore = 0;
-    else if (q.includes('1080') || q.includes('FHD')) qScore = 10;
-    else if (q.includes('2160') || q.includes('4K') || q.includes('UHD')) qScore = 20;
-    else if (q.includes('720') || q.includes('HD')) qScore = 30;
-    else if (q.includes('480')) qScore = 40;
-    else if (q.includes('360')) qScore = 50;
-    else if (q === 'AUTO') qScore = 60;
-
-    return tierScore * 100000000000 + langScore * 10000000 + pScore * 10000 + qScore;
-  };
-
-  const sorted = [...streams].sort((a, b) => getRank(a) - getRank(b));
-
-  // Keep server names completely anonymous as Server 1, Server 2, Server 3, etc.
-  return sorted.map((s, idx) => {
+  // Remove server prioritizing: keep streams in natural resolution order without server or provider bias
+  return streams.map((s, idx) => {
     const anonymousName = `Server ${idx + 1}`;
     const cleaned = { ...s };
     delete cleaned.rawTitle;
@@ -670,9 +654,99 @@ function rankStreams(streams: any[], isTV: boolean) {
   });
 }
 
+// GET /api/security/stream-token - Issues short-lived HMAC token for playback
+app.get('/api/security/stream-token', (req: Request, res: Response) => {
+  const type = (req.query.type as string) || 'movie';
+  const id = (req.query.id as string) || '0';
+  const ip = getClientIp(req);
+
+  const ts = Date.now();
+  const signature = crypto
+    .createHmac('sha256', STREAM_SECURITY_SECRET)
+    .update(`${ts}:${type}:${id}:${ip}`)
+    .digest('hex');
+
+  const token = `${ts}.${signature}`;
+  return res.json({
+    token,
+    expiresAt: ts + 90000,
+  });
+});
+
+// GET /api/trap/probe - Honeypot Trap for automated DOM scrapers
+app.get('/api/trap/probe', (req: Request, res: Response) => {
+  const ip = getClientIp(req);
+  const userAgent = (req.headers['user-agent'] as string) || '';
+  // Ban IP for 24 hours
+  bannedIps.set(ip, Date.now() + 24 * 60 * 60 * 1000);
+  securityMetrics.totalHoneypotTrapped++;
+  recordSecurityEvent(ip, 'Honeypot Trap Triggered', userAgent, req.path);
+  console.warn(`🚨 Anti-Scraper Honeypot triggered by ${ip} (UA: ${userAgent})`);
+  return res.status(403).json({
+    error: 'Access blocked: Automated crawler activity detected.',
+    code: 'TRAP_TRIGGERED',
+  });
+});
+
 app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
   try {
     const { type, id } = req.params;
+    const ip = getClientIp(req);
+    const userAgent = (req.headers['user-agent'] as string) || '';
+
+    // 1. Stream Rate Limit: Max 30 stream resolutions per 5 minutes per IP
+    const streamAllowed = checkRateLimit(ip, streamRateLimiter, 30, 5 * 60 * 1000);
+    if (!streamAllowed) {
+      securityMetrics.totalRateLimited++;
+      recordSecurityEvent(ip, 'Stream Rate Limit Exceeded', userAgent, req.path);
+      res.setHeader('Retry-After', '120');
+      return res.status(429).json({
+        error: 'Stream resolution limit reached. Please wait before switching streams.',
+        code: 'STREAM_RATE_LIMITED',
+      });
+    }
+
+    // 2. Token Signature & Hotlink Protection Check
+    const token = (req.query.token as string) || (req.headers['x-stream-token'] as string);
+    let isTokenValid = false;
+    if (token && token.includes('.')) {
+      const [tsStr, sig] = token.split('.');
+      const tokenTs = parseInt(tsStr, 10);
+      const age = Date.now() - tokenTs;
+      if (!isNaN(tokenTs) && age >= 0 && age <= 120000) {
+        const expectedSigWithIp = crypto
+          .createHmac('sha256', STREAM_SECURITY_SECRET)
+          .update(`${tokenTs}:${type}:${id}:${ip}`)
+          .digest('hex');
+        const expectedSigGeneral = crypto
+          .createHmac('sha256', STREAM_SECURITY_SECRET)
+          .update(`${tokenTs}:${type}:${id}`)
+          .digest('hex');
+
+        if (sig === expectedSigWithIp || sig === expectedSigGeneral) {
+          isTokenValid = true;
+        }
+      }
+    }
+
+    // Referer / Origin verification for hotlinking prevention
+    const referer = (req.headers['referer'] as string) || '';
+    const host = (req.headers['host'] as string) || '';
+    const isDirectBrowser =
+      !referer ||
+      referer.includes(host) ||
+      referer.includes('localhost') ||
+      referer.includes('127.0.0.1') ||
+      referer.includes('run.app');
+
+    if (!isTokenValid && !isDirectBrowser) {
+      securityMetrics.totalBlockedScrapers++;
+      recordSecurityEvent(ip, 'Hotlinking / Invalid Stream Token', userAgent, req.path);
+      return res.status(403).json({
+        error: 'Unauthorized stream request. Direct scraping or hotlinking is prohibited.',
+        code: 'STREAM_FORBIDDEN',
+      });
+    }
     const isTV = type === 'tv';
     const s = parseInt((req.query.s as string) || '1', 10);
     const e = parseInt((req.query.e as string) || '1', 10);
@@ -1853,8 +1927,14 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
       recentEvents,
       devices: devicesMap,
       browsers: browsersMap,
-      operatingSystems: osMap,
       serverHealth,
+      security: {
+        totalBlockedScrapers: securityMetrics.totalBlockedScrapers,
+        totalRateLimited: securityMetrics.totalRateLimited,
+        totalHoneypotTrapped: securityMetrics.totalHoneypotTrapped,
+        activeBannedIps: bannedIps.size,
+        recentEvents: securityMetrics.recentSecurityEvents.slice(0, 20),
+      },
     });
   } catch (err) {
     console.error('Error generating analytics:', err);
