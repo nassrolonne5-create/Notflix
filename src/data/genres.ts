@@ -47,6 +47,7 @@ export const CLEAN_ANIME_GENRES: Genre[] = [
   { id: 10759, name: 'Action & Adventure' },
   { id: 35, name: 'Comedy' },
   { id: 18, name: 'Drama' },
+  { id: 10749, name: 'Romance' },
   { id: 10765, name: 'Sci-Fi & Fantasy' },
 ];
 

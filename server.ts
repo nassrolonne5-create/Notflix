@@ -305,17 +305,15 @@ function writeUserData(data: UserData) {
 }
 
 // Server-side SafeFilter matching client constitution
-// Blocks pornography, erotic movies/shows, romance, and suggestive themes WITHOUT blocking violent/bloody action movies
+// Blocks pornography, erotic movies/shows, and suggestive themes WITHOUT blocking violent/bloody action movies, mainstream animation, or family romance subplots
 const ADULT_BLOCKLIST = [
-  'romance', 'romantic', 'rom-com', 'erotic', 'sexy', 'sensual', 'love story', 'erotica', 'nsfw',
-  'porn', 'pornography', 'xxx', 'sensuality', 'softcore', 'hardcore porn', 'adult content',
-  'strip club', 'striptease', 'sexuality', 'fifty shades', 'nude', 'nudity', 'lust', 'seduction',
-  'intimate', 'intimacy', 'kama sutra', 'playboy', 'penthouse', 'brazzers', 'bangbros',
-  'busty', 'milf', 'stepmom', 'stepmommy', 'stepdad', 'stepsister', 'stepbrother', 'incest',
-  'taboo sex', 'fetish', 'bdsm', 'bondage', 'gay', 'lesbian', 'homosexual', 'queer', 'lgbt',
-  'bisexual', 'transgender', 'orgasm', 'menage a trois', 'threesome', 'infidelity',
-  'love triangle', 'passionate affair', '365 days', '365 dni', 'voyeur', 'erotic thriller',
-  'passion', 'passionate', 'affair', 'affaire', 'dating'
+  'erotic', 'erotica', 'nsfw', 'porn', 'pornography', 'xxx', 'sensuality', 'softcore', 'hardcore porn',
+  'adult content', 'strip club', 'striptease', 'sexuality', 'fifty shades', 'nude', 'nudity', 'lust',
+  'seduction', 'kama sutra', 'playboy', 'penthouse', 'brazzers', 'bangbros', 'busty', 'milf',
+  'stepmom', 'stepmommy', 'stepdad', 'stepsister', 'stepbrother', 'incest', 'taboo sex', 'fetish',
+  'bdsm', 'bondage', 'gay', 'lesbian', 'homosexual', 'queer', 'lgbt', 'bisexual', 'transgender',
+  'orgasm', 'menage a trois', 'threesome', 'infidelity', 'passionate affair', '365 days', '365 dni',
+  'voyeur', 'erotic thriller', 'hentai', 'ecchi'
 ];
 const safePattern = new RegExp(
   `\\b(${ADULT_BLOCKLIST.join('|')})\\b|\\bsex(?!\\s*(trafficking|crime|worker|trade|slave))\\b`,
@@ -323,23 +321,37 @@ const safePattern = new RegExp(
 );
 
 const ADULT_KEYWORDS = [
-  'romance', 'romantic', 'erotic', 'erotica', 'pornography', 'porn', 'softcore', 'hardcore porn',
+  'erotic', 'erotica', 'pornography', 'porn', 'softcore', 'hardcore porn',
   'explicit sex', 'unsimulated sex', 'sexual content', 'bdsm', 'erotic thriller',
   'fetish', 'kama sutra', 'masturbation', 'orgasm', 'hentai', 'ecchi', 'nude', 'nudity',
-  'penetration', 'seduction', 'menage a trois', 'threesome', 'infidelity', 'love triangle',
-  'gay', 'lesbian', 'lgbt', 'gay theme', 'sexuality', 'sensuality', 'lust', 'sexy', 'love story',
-  'striptease', 'voyeur', 'intimacy', 'adultery', 'affair', 'erotic drama', 'erotic comedy'
+  'penetration', 'seduction', 'menage a trois', 'threesome', 'infidelity',
+  'gay', 'lesbian', 'lgbt', 'gay theme', 'sexuality', 'sensuality', 'lust', 'sexy',
+  'striptease', 'voyeur', 'adultery', 'erotic drama', 'erotic comedy'
 ];
 const kwPattern = new RegExp(`\\b(${ADULT_KEYWORDS.join('|')})\\b`, 'i');
+
+const EXPLICIT_ADULT_KEYWORDS = [
+  'erotic', 'erotica', 'pornography', 'porn', 'softcore', 'hardcore porn',
+  'explicit sex', 'unsimulated sex', 'sexual content', 'bdsm', 'fetish',
+  'kama sutra', 'masturbation', 'orgasm', 'hentai', 'ecchi', 'nude', 'nudity',
+  'penetration', 'menage a trois', 'threesome'
+];
+const explicitKwPattern = new RegExp(`\\b(${EXPLICIT_ADULT_KEYWORDS.join('|')})\\b`, 'i');
 
 function isSafe(item: any): boolean {
   if (!item) return false;
   if (item.error) return false;
   if (item.adult === true || item.adult === 'true') return false;
 
-  // Romance genre 10749 filter
-  if (item.genre_ids && Array.isArray(item.genre_ids) && item.genre_ids.includes(10749)) return false;
-  if (item.genres && Array.isArray(item.genres) && item.genres.some((g: any) => g.id === 10749 || (g.name && g.name.toLowerCase() === 'romance'))) return false;
+  const isAnimation =
+    (item.genre_ids && Array.isArray(item.genre_ids) && (item.genre_ids.includes(16) || item.genre_ids.includes(10751))) ||
+    (item.genres && Array.isArray(item.genres) && item.genres.some((g: any) => g.id === 16 || g.id === 10751 || (g.name && (g.name.toLowerCase() === 'animation' || g.name.toLowerCase() === 'family'))));
+
+  // Romance genre 10749 filter: Animation & Family titles are exempt from genre 10749 blocking
+  if (!isAnimation) {
+    if (item.genre_ids && Array.isArray(item.genre_ids) && item.genre_ids.includes(10749)) return false;
+    if (item.genres && Array.isArray(item.genres) && item.genres.some((g: any) => g.id === 10749 || (g.name && g.name.toLowerCase() === 'romance'))) return false;
+  }
 
   const title = (item.title || item.name || '').toLowerCase();
   const desc = (item.overview || item.desc || '').toLowerCase();
@@ -358,7 +370,8 @@ function isSafe(item: any): boolean {
   if (item.keywords) {
     kwds = item.keywords.results || item.keywords.keywords || [];
   }
-  if (kwds.some((k: any) => kwPattern.test(k.name))) return false;
+  const kwTester = isAnimation ? explicitKwPattern : kwPattern;
+  if (kwds.some((k: any) => kwTester.test(k.name))) return false;
 
   return true;
 }
@@ -387,7 +400,15 @@ app.get('/api/tmdb/*', async (req: Request, res: Response) => {
     queryParams.set('api_key', TMDB_API_KEY);
     queryParams.set('language', queryParams.get('language') || 'en-US');
     queryParams.set('include_adult', 'false');
-    if (!queryParams.has('without_genres')) {
+    const isAnimationOrTitleQuery =
+      queryParams.get('with_genres')?.includes('16') ||
+      queryParams.get('with_genres')?.includes('10751') ||
+      queryParams.get('with_keywords')?.includes('210024') ||
+      tmdbPath.includes('search') ||
+      tmdbPath.startsWith('movie/') ||
+      tmdbPath.startsWith('tv/');
+
+    if (!isAnimationOrTitleQuery && !queryParams.has('without_genres')) {
       queryParams.set('without_genres', '10749');
     }
 
@@ -505,12 +526,16 @@ function normalizeStreams(data: any, apiName: string) {
         return null;
       }
 
-      // Filter out permanently broken scrapers that cannot be resolved client-side:
-      // (finepulfe returns 404/403 expired links, streamflixserver has no DNS)
-      // VidRock (Nova/Atlas/Orion), Icefy, and LMScript are prioritized and supported via local proxy relays
+      // Filter out permanently broken scrapers that cannot be resolved:
+      // (trendimovies, valhallastream/mirage 403s, finepulfe 404s, streamflixserver no DNS)
       if (
+        urlLower.includes('trendimovies.com') ||
+        urlLower.includes('valhallastream.com') ||
         urlLower.includes('finepulfe.xyz') ||
-        urlLower.includes('streamflixserver.site')
+        urlLower.includes('streamflixserver.site') ||
+        urlLower.includes('/tgstream/stream/') ||
+        provLower.includes('trendimovies') ||
+        provLower.includes('valhallastream')
       ) {
         return null;
       }
@@ -579,19 +604,19 @@ function normalizeStreams(data: any, apiName: string) {
 
       let proxyUrl = '';
       if (
-        isPriorityProxyStream ||
-        (!streamUrl.startsWith('/v1/proxy') &&
-          (headers ||
-            urlLower.includes('boomchick') ||
-            urlLower.includes('sprintspeedlight') ||
-            urlLower.includes('hakunaymatata') ||
-            urlLower.includes('flwuok') ||
-            urlLower.includes('flcwuk') ||
-            urlLower.includes('hbsxcn') ||
-            urlLower.includes('flowxn') ||
-            urlLower.includes('fsonxn') ||
-            urlLower.includes('111477.xyz') ||
-            urlLower.includes('devcorp.me')))
+        !streamUrl.startsWith('/v1/proxy') &&
+        (isPriorityProxyStream ||
+          headers ||
+          urlLower.includes('boomchick') ||
+          urlLower.includes('sprintspeedlight') ||
+          urlLower.includes('hakunaymatata') ||
+          urlLower.includes('flwuok') ||
+          urlLower.includes('flcwuk') ||
+          urlLower.includes('hbsxcn') ||
+          urlLower.includes('flowxn') ||
+          urlLower.includes('fsonxn') ||
+          urlLower.includes('111477.xyz') ||
+          urlLower.includes('devcorp.me'))
       ) {
         proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrl)}${
           headers ? `&headers=${encodeURIComponent(JSON.stringify(headers))}` : ''
@@ -630,12 +655,87 @@ function normalizeStreams(data: any, apiName: string) {
     .filter((s): s is NonNullable<typeof s> => Boolean(s && s.url && (s.url.startsWith('http') || s.url.startsWith('/v1/proxy') || s.url.startsWith('/api/proxy'))));
 }
 
-// Process streams without server prioritization: preserve natural discovery order as resolved by scrapers
-function rankStreams(streams: any[], _isTV = false): any[] {
+// Process streams without server prioritization: preserve natural discovery order as resolved by scrapers,
+// with fast parallel health validation to ensure Server 1 is alive and starts playback instantly.
+async function rankStreams(streams: any[], _isTV = false): Promise<any[]> {
   if (!Array.isArray(streams) || streams.length === 0) return [];
 
-  // Remove server prioritizing: keep streams in natural resolution order without server or provider bias
-  return streams.map((s, idx) => {
+  // 1. Deduplicate streams by normalized URL to avoid identical redundant mirrors
+  const seenUrls = new Set<string>();
+  const uniqueStreams: any[] = [];
+  for (const s of streams) {
+    if (!s || !s.url) continue;
+    const urlKey = (s.url || '').split('?')[0].trim().toLowerCase();
+    if (!seenUrls.has(urlKey)) {
+      seenUrls.add(urlKey);
+      uniqueStreams.push(s);
+    }
+  }
+
+  if (uniqueStreams.length === 0) return [];
+
+  // 2. Ultra-fast parallel health probe on top candidate streams (max 8)
+  // Ensures candidate servers are responsive in under 850ms without server brand bias
+  const candidates = uniqueStreams.slice(0, 8);
+  const remaining = uniqueStreams.slice(8);
+
+  const probeResults = await Promise.allSettled(
+    candidates.map(async (s) => {
+      let probeUrl = s.url;
+      if (probeUrl.startsWith('/')) {
+        probeUrl = `http://127.0.0.1:3000${probeUrl}`;
+      }
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 850);
+      try {
+        const headers: Record<string, string> = {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+          Range: 'bytes=0-150',
+          ...(s.headers || {}),
+        };
+        const pRes = await fetch(probeUrl, {
+          method: 'GET',
+          headers,
+          signal: ctrl.signal,
+          redirect: 'follow',
+        });
+        clearTimeout(timer);
+        if (!pRes.ok && pRes.status !== 206) return false;
+        const textSlice = await pRes.text().catch(() => '');
+        if (
+          textSlice.includes('WRONG HASH') ||
+          textSlice.includes('Link expired') ||
+          textSlice.includes('Invalid link') ||
+          textSlice.includes('Forbidden') ||
+          textSlice.includes('Access Denied') ||
+          textSlice.startsWith('<!DOCTYPE html') ||
+          textSlice.startsWith('<html')
+        ) {
+          return false;
+        }
+        return true;
+      } catch {
+        clearTimeout(timer);
+        return false;
+      }
+    })
+  );
+
+  const fastHealthy: any[] = [];
+  const otherCandidates: any[] = [];
+  candidates.forEach((s, idx) => {
+    if (probeResults[idx].status === 'fulfilled' && probeResults[idx].value) {
+      fastHealthy.push(s);
+    } else {
+      otherCandidates.push(s);
+    }
+  });
+
+  // Healthy responsive streams are placed at the front so Server 1 connects instantly
+  const streamlined = [...fastHealthy, ...otherCandidates, ...remaining].slice(0, 20);
+
+  return streamlined.map((s, idx) => {
     const anonymousName = `Server ${idx + 1}`;
     const cleaned = { ...s };
     delete cleaned.rawTitle;
@@ -763,57 +863,63 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
       ? `${SCRAPER_API_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}`
       : `${SCRAPER_API_CINEPRO}/v1/movies/${id}`;
 
-    // 25-second timeout gives multi-provider scrapers sufficient time to resolve with auto-retry
-    const tasks: Promise<any>[] = [fetchWithRetry(cineproUrl, 25000, 1)];
-
-    let tmdbEmbedUrl = '';
-    if (SCRAPER_API_TMDB_EMBED && SCRAPER_API_TMDB_EMBED !== SCRAPER_API_CINEPRO) {
-      tmdbEmbedUrl = isTV
-        ? `${SCRAPER_API_TMDB_EMBED}/api/streams/series/${id}?s=${s}&e=${e}`
-        : `${SCRAPER_API_TMDB_EMBED}/api/streams/movie/${id}`;
-      tasks.push(fetchWithRetry(tmdbEmbedUrl, 25000, 1));
-    }
-
-    const results = await Promise.allSettled(tasks);
     let combined: any[] = [];
 
-    // CinePro streams
-    if (results[0].status === 'fulfilled' && results[0].value) {
-      combined = combined.concat(normalizeStreams(results[0].value, 'CinePro'));
-      if (Array.isArray(results[0].value.subtitles)) {
-        subtitleCache.set(`${type}-${id}-${s}-${e}`, results[0].value.subtitles);
-      }
-    }
-
-    // TMDB Embed Scraper streams
-    if (results[1] && results[1].status === 'fulfilled' && results[1].value) {
-      combined = combined.concat(normalizeStreams(results[1].value, 'TMDB Embed'));
-      if (Array.isArray(results[1].value.streams)) {
-        for (const sItem of results[1].value.streams) {
-          if (Array.isArray(sItem.subtitles) && sItem.subtitles.length > 0) {
-            const existing = subtitleCache.get(`${type}-${id}-${s}-${e}`) || [];
-            subtitleCache.set(`${type}-${id}-${s}-${e}`, [...existing, ...sItem.subtitles]);
-            break;
-          }
+    // Step 1: Query updated CinePro engine first (runs 27 providers in parallel)
+    // CinePro returns in 200ms - 4.5s. When CinePro succeeds, RETURN IMMEDIATELY!
+    try {
+      const cineproData = await fetchWithTimeout(cineproUrl, 7500);
+      if (cineproData) {
+        combined = normalizeStreams(cineproData, 'CinePro');
+        if (Array.isArray(cineproData.subtitles)) {
+          subtitleCache.set(`${type}-${id}-${s}-${e}`, cineproData.subtitles);
         }
       }
+    } catch (err: any) {
+      console.warn('CinePro primary resolution error or timeout:', err?.message || err);
     }
 
-    // If scrapers returned 0 streams, check Coolify gateway mirror with retry
+    // Step 2: Fallback to TMDB Embed ONLY if CinePro returned 0 streams
+    // This removes the 25-second wait blocking viewers when CinePro already resolved!
     if (combined.length === 0) {
-      const query = isTV ? `?s=${s}&e=${e}` : '';
-      const gatewayData = await fetchWithRetry(
-        `http://kufenvi0cy9unwwgipjiluoh.62.171.179.144.sslip.io/api/streams/${type}/${id}${query}`,
-        15000,
-        1
-      );
-      if (gatewayData && Array.isArray(gatewayData.streams) && gatewayData.streams.length > 0) {
-        combined = gatewayData.streams;
+      let tmdbEmbedUrl = '';
+      if (SCRAPER_API_TMDB_EMBED && SCRAPER_API_TMDB_EMBED !== SCRAPER_API_CINEPRO) {
+        tmdbEmbedUrl = isTV
+          ? `${SCRAPER_API_TMDB_EMBED}/api/streams/series/${id}?s=${s}&e=${e}`
+          : `${SCRAPER_API_TMDB_EMBED}/api/streams/movie/${id}`;
+        try {
+          const tmdbData = await fetchWithTimeout(tmdbEmbedUrl, 4000);
+          if (tmdbData) {
+            combined = normalizeStreams(tmdbData, 'TMDB Embed');
+            if (Array.isArray(tmdbData.streams)) {
+              for (const sItem of tmdbData.streams) {
+                if (Array.isArray(sItem.subtitles) && sItem.subtitles.length > 0) {
+                  subtitleCache.set(`${type}-${id}-${s}-${e}`, sItem.subtitles);
+                  break;
+                }
+              }
+            }
+          }
+        } catch {}
+      }
+
+      // Step 3: Coolify gateway mirror fallback if still 0
+      if (combined.length === 0) {
+        const query = isTV ? `?s=${s}&e=${e}` : '';
+        try {
+          const gatewayData = await fetchWithTimeout(
+            `http://kufenvi0cy9unwwgipjiluoh.62.171.179.144.sslip.io/api/streams/${type}/${id}${query}`,
+            4000
+          );
+          if (gatewayData && Array.isArray(gatewayData.streams) && gatewayData.streams.length > 0) {
+            combined = gatewayData.streams;
+          }
+        } catch {}
       }
     }
 
-    // Rank all candidate streams with English language prioritized first
-    const sorted = rankStreams(combined, isTV);
+    // Rank candidate streams without server prioritizing, deduplicated, fast-verified and capped
+    const sorted = await rankStreams(combined, isTV);
 
     const responseData = {
       success: true,
@@ -933,23 +1039,8 @@ app.get('/api/proxy/stream', async (req: Request, res: Response) => {
 
     let targetUrl = decodeURIComponent(rawUrl);
 
-    // Unpack CinePro /v1/proxy?data= to bypass CinePro remote proxy's binary mangling
-    if (targetUrl.includes('/v1/proxy') && targetUrl.includes('data=')) {
-      try {
-        const dummy = targetUrl.startsWith('http') ? targetUrl : `http://127.0.0.1${targetUrl}`;
-        const parsed = new URL(dummy);
-        const dataStr = parsed.searchParams.get('data');
-        if (dataStr) {
-          const payload = JSON.parse(dataStr);
-          if (payload.url) {
-            targetUrl = payload.url;
-            if (payload.headers && typeof payload.headers === 'object') {
-              customHeaders = { ...payload.headers, ...customHeaders };
-            }
-          }
-        }
-      } catch (e) {}
-    } else if (targetUrl.startsWith('/v1/proxy')) {
+    // Forward CinePro proxy URLs directly to CinePro remote proxy with original queryString
+    if (targetUrl.includes('/v1/proxy')) {
       const queryString = targetUrl.includes('?') ? targetUrl.slice(targetUrl.indexOf('?')) : '';
       targetUrl = `${SCRAPER_API_CINEPRO}/v1/proxy${queryString}`;
     } else if (targetUrl.startsWith('/')) {
@@ -1035,9 +1126,9 @@ app.get('/api/proxy/stream', async (req: Request, res: Response) => {
         buffer.length < 50;
 
       if (isErrorPayload) {
-        console.warn(`[Stream Proxy] Upstream returned non-playable error payload: "${textPreview.slice(0, 50)}..."`);
+        console.debug('[Stream Proxy] Discarding invalid/unverified upstream playlist payload');
         res.setHeader('Content-Type', 'text/plain');
-        return res.status(502).send(`Upstream returned non-playable payload: ${textPreview.slice(0, 60)}`);
+        return res.status(502).send('Upstream stream is unavailable');
       }
     }
 
@@ -1191,50 +1282,37 @@ app.get('/api/proxy/stream', async (req: Request, res: Response) => {
 });
 
 // CinePro Proxy Relay (Eliminates Mixed Content HTTP/HTTPS blocks & direct binary unpacking)
-app.get('/v1/proxy', async (req: Request, res: Response) => {
+app.all(['/v1/proxy', '/v1/proxy/*'], async (req: Request, res: Response) => {
+  if (req.method === 'OPTIONS') {
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Headers', '*');
+    res.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    return res.sendStatus(204);
+  }
+
   try {
-    let targetUrl = '';
-    let customHeaders: Record<string, string> = {};
-
-    // Unpack CinePro data payload directly if present
-    if (req.query.data) {
-      try {
-        const payload = JSON.parse(req.query.data as string);
-        if (payload.url) {
-          targetUrl = payload.url;
-          if (payload.headers && typeof payload.headers === 'object') {
-            customHeaders = payload.headers;
-          }
-        }
-      } catch (e) {}
-    }
-
-    if (!targetUrl) {
-      const queryString = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-      targetUrl = `${SCRAPER_API_CINEPRO}/v1/proxy${queryString}`;
-    }
+    const queryString = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+    const targetUrl = `${SCRAPER_API_CINEPRO}/v1/proxy${queryString}`;
 
     const forwardHeaders: Record<string, string> = {
       'User-Agent':
-        customHeaders['User-Agent'] ||
         (req.headers['user-agent'] as string) ||
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
       Accept: '*/*',
     };
-    if (customHeaders['Referer']) forwardHeaders['Referer'] = customHeaders['Referer'];
-    if (customHeaders['Origin']) forwardHeaders['Origin'] = customHeaders['Origin'];
     if (req.headers.range) {
       forwardHeaders['Range'] = req.headers.range as string;
     }
 
     const abortController = new AbortController();
-    const abortTimeout = setTimeout(() => abortController.abort(), 20000);
+    const abortTimeout = setTimeout(() => abortController.abort(), 15000);
 
     let upstream: globalThis.Response;
     try {
       upstream = await fetch(targetUrl, {
         headers: forwardHeaders,
         signal: abortController.signal,
+        redirect: 'follow',
       });
     } finally {
       clearTimeout(abortTimeout);
@@ -1277,9 +1355,9 @@ app.get('/v1/proxy', async (req: Request, res: Response) => {
         buffer.length < 50;
 
       if (isErrorPayload) {
-        console.warn(`[CinePro Relay] Upstream returned non-playable error payload: "${textPreview.slice(0, 50)}..."`);
+        console.debug('[CinePro Relay] Discarding invalid/unverified upstream playlist payload');
         res.setHeader('Content-Type', 'text/plain');
-        return res.status(502).send(`Upstream returned non-playable payload: ${textPreview.slice(0, 60)}`);
+        return res.status(502).send('Upstream stream is unavailable');
       }
     }
 
@@ -1300,7 +1378,7 @@ app.get('/v1/proxy', async (req: Request, res: Response) => {
                     full = new URL(uri, baseUrl).toString();
                   } catch (e) {}
                   return `URI="/api/proxy/stream?url=${encodeURIComponent(full)}&headers=${encodeURIComponent(
-                    JSON.stringify(customHeaders)
+                    JSON.stringify(forwardHeaders)
                   )}"`;
                 });
               }
@@ -1327,7 +1405,7 @@ app.get('/v1/proxy', async (req: Request, res: Response) => {
             }
 
             return `/api/proxy/stream?url=${encodeURIComponent(fullUrl)}&headers=${encodeURIComponent(
-              JSON.stringify(customHeaders)
+              JSON.stringify(forwardHeaders)
             )}`;
           })
           .join('\n');

@@ -3,11 +3,32 @@
   "favorites": [],
   "history": [
     {
+      "id": 84958,
+      "title": "Loki",
+      "name": "Loki",
+      "year": "2021",
+      "rating": "8.2",
+      "vote_average": 8.179,
+      "type": "tv",
+      "media_type": "tv",
+      "poster": "https://image.tmdb.org/t/p/w342/kEl2t3OhXc3Zb9FBh1AuYzRTgZp.jpg",
+      "poster_path": "/kEl2t3OhXc3Zb9FBh1AuYzRTgZp.jpg",
+      "backdrop": "https://image.tmdb.org/t/p/w1280/q3jHCb4dMfYF6ojikKuHd6LscxC.jpg",
+      "backdrop_path": "/q3jHCb4dMfYF6ojikKuHd6LscxC.jpg",
+      "overview": "After stealing the Tesseract during the events of “Avengers: Endgame,” an alternate version of Loki is brought to the mysterious Time Variance Authority, a bureaucratic organization that exists outside of time and space and monitors the timeline. They give Loki a choice: face being erased from existence due to being a “time variant” or help fix the timeline and stop a greater threat.",
+      "genre_ids": [
+        18,
+        10765
+      ],
+      "adult": false,
+      "watchedAt": "10:10 PM"
+    },
+    {
       "id": 969681,
       "title": "Spider-Man: Brand New Day",
       "year": "2026",
-      "rating": "8.3",
-      "vote_average": 8.3,
+      "rating": "8.4",
+      "vote_average": 8.4,
       "type": "movie",
       "media_type": "movie",
       "poster": "https://image.tmdb.org/t/p/w342/bjiS5ipwxb9JFy3XRRN4OAilSeX.jpg",
@@ -15,9 +36,13 @@
       "backdrop": "https://image.tmdb.org/t/p/w1280/subj7knTn4DeS6KS7qI66EQKe9i.jpg",
       "backdrop_path": "/subj7knTn4DeS6KS7qI66EQKe9i.jpg",
       "overview": "Fighting crime full-time as Spider-Man in a world that doesn't remember him—and the pressure of seeing his old friends move on without him—sparks a change in Peter Parker he may not have the power to control. But that transformation might also be the only thing that can stop a shocking new threat to the city and those he loves - a powerful villain no one can even see.",
-      "genre_ids": [],
+      "genre_ids": [
+        878,
+        28,
+        12
+      ],
       "adult": false,
-      "watchedAt": "08:35 PM"
+      "watchedAt": "10:09 PM"
     },
     {
       "id": 285322,

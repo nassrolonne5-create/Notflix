@@ -2,47 +2,60 @@ import { MediaItem, Season, Episode, StreamSource, SubtitleTrack, UserData, Cast
 
 export const TMDB_IMG = 'https://image.tmdb.org/t/p/';
 
-// Explicit adult, romance, and sexually suggestive content classifications
-// Blocks pornography, erotic movies/shows, romance, and suggestive themes WITHOUT blocking violent/bloody action movies
+// Explicit adult and sexually suggestive content classifications
+// Blocks pornography, erotic movies/shows, and suggestive themes WITHOUT blocking violent/bloody action movies, mainstream animation, or family romance subplots
 const ADULT_BLOCKLIST = [
-  'romance', 'romantic', 'rom-com', 'erotic', 'sexy', 'sensual', 'love story', 'erotica', 'nsfw',
-  'porn', 'pornography', 'xxx', 'sensuality', 'softcore', 'hardcore porn', 'adult content',
-  'strip club', 'striptease', 'sexuality', 'fifty shades', 'nude', 'nudity', 'lust', 'seduction',
-  'intimate', 'intimacy', 'kama sutra', 'playboy', 'penthouse', 'brazzers', 'bangbros',
-  'busty', 'milf', 'stepmom', 'stepmommy', 'stepdad', 'stepsister', 'stepbrother', 'incest',
-  'taboo sex', 'fetish', 'bdsm', 'bondage', 'gay', 'lesbian', 'homosexual', 'queer', 'lgbt',
-  'bisexual', 'transgender', 'orgasm', 'menage a trois', 'threesome', 'infidelity',
-  'love triangle', 'passionate affair', '365 days', '365 dni', 'voyeur', 'erotic thriller',
-  'passion', 'passionate', 'affair', 'affaire', 'dating'
+  'erotic', 'erotica', 'nsfw', 'porn', 'pornography', 'xxx', 'sensuality', 'softcore', 'hardcore porn',
+  'adult content', 'strip club', 'striptease', 'sexuality', 'fifty shades', 'nude', 'nudity', 'lust',
+  'seduction', 'kama sutra', 'playboy', 'penthouse', 'brazzers', 'bangbros', 'busty', 'milf',
+  'stepmom', 'stepmommy', 'stepdad', 'stepsister', 'stepbrother', 'incest', 'taboo sex', 'fetish',
+  'bdsm', 'bondage', 'gay', 'lesbian', 'homosexual', 'queer', 'lgbt', 'bisexual', 'transgender',
+  'orgasm', 'menage a trois', 'threesome', 'infidelity', 'passionate affair', '365 days', '365 dni',
+  'voyeur', 'erotic thriller', 'hentai', 'ecchi'
 ];
 
-// Regex matching adult/romance terms or sexual terms (excluding violent crime phrases like 'sex trafficking')
+// Regex matching adult/pornographic terms or sexual terms (excluding violent crime phrases like 'sex trafficking')
 const pattern = new RegExp(
   `\\b(${ADULT_BLOCKLIST.join('|')})\\b|\\bsex(?!\\s*(trafficking|crime|worker|trade|slave))\\b`,
   'i'
 );
 
-// Adult/Romance/Erotic keywords for TMDB deep metadata check
-// Excludes crime/action keywords like "prostitute", "call girl", "sex trafficking", "blood", "gore", "assassin", "gangster"
+// Adult/Erotic keywords for TMDB deep metadata check
 const ADULT_KEYWORDS = [
-  'romance', 'romantic', 'erotic', 'erotica', 'pornography', 'porn', 'softcore', 'hardcore porn',
+  'erotic', 'erotica', 'pornography', 'porn', 'softcore', 'hardcore porn',
   'explicit sex', 'unsimulated sex', 'sexual content', 'bdsm', 'erotic thriller',
   'fetish', 'kama sutra', 'masturbation', 'orgasm', 'hentai', 'ecchi', 'nude', 'nudity',
-  'penetration', 'seduction', 'menage a trois', 'threesome', 'infidelity', 'love triangle',
-  'gay', 'lesbian', 'lgbt', 'gay theme', 'sexuality', 'sensuality', 'lust', 'sexy', 'love story',
-  'striptease', 'voyeur', 'intimacy', 'adultery', 'affair', 'erotic drama', 'erotic comedy'
+  'penetration', 'seduction', 'menage a trois', 'threesome', 'infidelity',
+  'gay', 'lesbian', 'lgbt', 'gay theme', 'sexuality', 'sensuality', 'lust', 'sexy',
+  'striptease', 'voyeur', 'adultery', 'erotic drama', 'erotic comedy'
 ];
 
 const ADULT_KW_PATTERN = new RegExp(`\\b(${ADULT_KEYWORDS.join('|')})\\b`, 'i');
+
+// Explicit adult keywords strictly for animation/anime checks (avoids blocking family animation on benign tags)
+const EXPLICIT_ADULT_KEYWORDS = [
+  'erotic', 'erotica', 'pornography', 'porn', 'softcore', 'hardcore porn',
+  'explicit sex', 'unsimulated sex', 'sexual content', 'bdsm', 'fetish',
+  'kama sutra', 'masturbation', 'orgasm', 'hentai', 'ecchi', 'nude', 'nudity',
+  'penetration', 'menage a trois', 'threesome'
+];
+
+const EXPLICIT_ADULT_KW_PATTERN = new RegExp(`\\b(${EXPLICIT_ADULT_KEYWORDS.join('|')})\\b`, 'i');
 
 export function isSafe(item: any): boolean {
   if (!item) return false;
   if (item.error) return false;
   if (item.adult === true || item.adult === 'true') return false;
 
-  // Romance genre 10749 filter
-  if (item.genre_ids && Array.isArray(item.genre_ids) && item.genre_ids.includes(10749)) return false;
-  if (item.genres && Array.isArray(item.genres) && item.genres.some((g: any) => g.id === 10749 || (g.name && g.name.toLowerCase() === 'romance'))) return false;
+  const isAnimation =
+    (item.genre_ids && Array.isArray(item.genre_ids) && (item.genre_ids.includes(16) || item.genre_ids.includes(10751))) ||
+    (item.genres && Array.isArray(item.genres) && item.genres.some((g: any) => g.id === 16 || g.id === 10751 || (g.name && (g.name.toLowerCase() === 'animation' || g.name.toLowerCase() === 'family'))));
+
+  // Romance genre 10749 filter: Animation & Family titles are exempt from genre 10749 blocking
+  if (!isAnimation) {
+    if (item.genre_ids && Array.isArray(item.genre_ids) && item.genre_ids.includes(10749)) return false;
+    if (item.genres && Array.isArray(item.genres) && item.genres.some((g: any) => g.id === 10749 || (g.name && g.name.toLowerCase() === 'romance'))) return false;
+  }
 
   const title = (item.title || item.name || '').toLowerCase();
   const desc = (item.overview || item.desc || '').toLowerCase();
@@ -63,7 +76,8 @@ export function isSafe(item: any): boolean {
   if (item.keywords) {
     kwds = item.keywords.results || item.keywords.keywords || [];
   }
-  if (kwds.some((k: any) => ADULT_KW_PATTERN.test(k.name))) return false;
+  const kwTester = isAnimation ? EXPLICIT_ADULT_KW_PATTERN : ADULT_KW_PATTERN;
+  if (kwds.some((k: any) => kwTester.test(k.name))) return false;
 
   return true;
 }
@@ -75,8 +89,12 @@ export async function checkDeepSafety(type: 'movie' | 'tv', id: number): Promise
     });
     if (!fullData || fullData.error || !fullData.id || fullData.adult) return false;
 
-    // Check romance genre
-    if (fullData.genres && fullData.genres.some((g: any) => g.id === 10749 || (g.name && g.name.toLowerCase() === 'romance'))) {
+    const isAnimation =
+      (fullData.genre_ids && Array.isArray(fullData.genre_ids) && (fullData.genre_ids.includes(16) || fullData.genre_ids.includes(10751))) ||
+      (fullData.genres && Array.isArray(fullData.genres) && fullData.genres.some((g: any) => g.id === 16 || g.id === 10751 || (g.name && (g.name.toLowerCase() === 'animation' || g.name.toLowerCase() === 'family'))));
+
+    // Check romance genre only for non-animation
+    if (!isAnimation && fullData.genres && fullData.genres.some((g: any) => g.id === 10749 || (g.name && g.name.toLowerCase() === 'romance'))) {
       return false;
     }
 
@@ -87,8 +105,9 @@ export async function checkDeepSafety(type: 'movie' | 'tv', id: number): Promise
       kwds = fullData.keywords.results || fullData.keywords.keywords || [];
     }
 
-    // Check keywords specifically against genuine adult entertainment/pornographic terms, NOT crime/violence terms
-    if (kwds.some((k: any) => ADULT_KW_PATTERN.test(k.name))) {
+    // For animation/family, check against explicit pornographic/hentai terms
+    const kwTester = isAnimation ? EXPLICIT_ADULT_KW_PATTERN : ADULT_KW_PATTERN;
+    if (kwds.some((k: any) => kwTester.test(k.name))) {
       return false;
     }
 
@@ -156,7 +175,18 @@ export async function tmdbFetch(endpoint: string, params: Record<string, string>
   const cleanEndpoint = endpoint.startsWith('/') ? endpoint.slice(1) : endpoint;
   const searchParams = new URLSearchParams(params);
   if (!searchParams.has('include_adult')) searchParams.set('include_adult', 'false');
-  if (!searchParams.has('without_genres')) searchParams.set('without_genres', '10749');
+
+  const isAnimationOrTitleQuery =
+    searchParams.get('with_genres')?.includes('16') ||
+    searchParams.get('with_genres')?.includes('10751') ||
+    searchParams.get('with_keywords')?.includes('210024') ||
+    cleanEndpoint.includes('search') ||
+    cleanEndpoint.startsWith('movie/') ||
+    cleanEndpoint.startsWith('tv/');
+
+  if (!isAnimationOrTitleQuery && !searchParams.has('without_genres')) {
+    searchParams.set('without_genres', '10749');
+  }
 
   // Try backend proxy first (/api/tmdb/...)
   try {
@@ -428,12 +458,16 @@ function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
     const provLower = String(providerName).toLowerCase();
     const headers = s?.headers && typeof s.headers === 'object' ? s.headers : null;
 
-    // Filter out permanently broken scrapers that cannot be resolved client-side:
-    // (finepulfe returns 404/403 expired links, streamflixserver has no DNS)
-    // VidRock (Nova/Atlas/Orion), Icefy, and LMScript are prioritized and supported via local proxy relays
+    // Filter out permanently broken scrapers that cannot be resolved:
+    // (trendimovies, valhallastream/mirage 403s, finepulfe 404s, streamflixserver no DNS)
     if (
+      urlLower.includes('trendimovies.com') ||
+      urlLower.includes('valhallastream.com') ||
       urlLower.includes('finepulfe.xyz') ||
-      urlLower.includes('streamflixserver.site')
+      urlLower.includes('streamflixserver.site') ||
+      urlLower.includes('/tgstream/stream/') ||
+      provLower.includes('trendimovies') ||
+      provLower.includes('valhallastream')
     ) {
       continue;
     }
@@ -636,91 +670,76 @@ export async function fetchStreams(
   }
   const queryString = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
 
-  // 1. Try Backend Server Proxy first with increased timeout (28s) and automatic retry
-  for (let backendAttempt = 1; backendAttempt <= 2; backendAttempt++) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 28000);
-      const res = await fetch(`/api/streams/${type}/${id}${queryString}`, {
-        signal: controller.signal,
-        headers: streamToken ? { 'X-Stream-Token': streamToken } : {},
-        cache: forceRefresh || backendAttempt > 1 ? 'no-cache' : 'default',
-      });
-      clearTimeout(timer);
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.streams) && data.streams.length > 0) {
-          streamClientCache.set(cacheKey, { streams: data.streams, timestamp: Date.now() });
-          return data.streams;
-        }
-      }
-    } catch {
-      // If attempt 1 timed out or failed, brief backoff then retry backend before falling back to direct scrapers
-      if (backendAttempt < 2) {
-        await new Promise((r) => setTimeout(r, 600));
+  // 1. Try Backend Server Proxy first with fast timeout (9s) and instant return
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 9000);
+    const res = await fetch(`/api/streams/${type}/${id}${queryString}`, {
+      signal: controller.signal,
+      headers: streamToken ? { 'X-Stream-Token': streamToken } : {},
+      cache: forceRefresh ? 'no-cache' : 'default',
+    });
+    clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.streams) && data.streams.length > 0) {
+        streamClientCache.set(cacheKey, { streams: data.streams, timestamp: Date.now() });
+        return data.streams;
       }
     }
+  } catch (err) {
+    console.warn('[Stream Fetch] Backend resolution issue or timeout, proceeding to direct scrapers:', err);
   }
 
-  // 2. Direct Scraper Fallback with 25s timeout and auto-retry
-  for (let directAttempt = 1; directAttempt <= 2; directAttempt++) {
-    try {
-      const isTV = type === 'tv';
-      const cineproUrl = isTV
-        ? `${SCRAPER_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}`
-        : `${SCRAPER_CINEPRO}/v1/movies/${id}`;
+  // 2. Direct Scraper Fallback with 6.5s timeout
+  try {
+    const isTV = type === 'tv';
+    const cineproUrl = isTV
+      ? `${SCRAPER_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}`
+      : `${SCRAPER_CINEPRO}/v1/movies/${id}`;
 
-      const fetchDirect = (url: string) => {
-        const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), 25000);
-        return fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } })
-          .then((r) => {
-            clearTimeout(t);
-            return r.ok ? r.json() : null;
-          })
-          .catch(() => {
-            clearTimeout(t);
-            return null;
-          });
-      };
+    const fetchDirect = (url: string) => {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 6500);
+      return fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } })
+        .then((r) => {
+          clearTimeout(t);
+          return r.ok ? r.json() : null;
+        })
+        .catch(() => {
+          clearTimeout(t);
+          return null;
+        });
+    };
 
-      const tasks: Promise<any>[] = [fetchDirect(cineproUrl)];
+    const tasks: Promise<any>[] = [fetchDirect(cineproUrl)];
 
-      if (SCRAPER_TMDB_EMBED && SCRAPER_TMDB_EMBED !== SCRAPER_CINEPRO) {
-        const tmdbEmbedUrl = isTV
-          ? `${SCRAPER_TMDB_EMBED}/api/streams/series/${id}?s=${s}&e=${e}`
-          : `${SCRAPER_TMDB_EMBED}/api/streams/movie/${id}`;
-        tasks.push(fetchDirect(tmdbEmbedUrl));
-      }
-
-      const results = await Promise.allSettled(tasks);
-      let combined: StreamSource[] = [];
-
-      // CinePro streams
-      if (results[0].status === 'fulfilled' && results[0].value) {
-        combined = combined.concat(normalizeClientStreams(results[0].value, 'CinePro'));
-      }
-
-      // TMDB Embed Scraper streams
-      if (results[1] && results[1].status === 'fulfilled' && results[1].value) {
-        combined = combined.concat(normalizeClientStreams(results[1].value, 'TMDB Embed'));
-      }
-
-      if (combined.length > 0) {
-        const sorted = rankClientStreams(combined, isTV);
-        streamClientCache.set(cacheKey, { streams: sorted, timestamp: Date.now() });
-        return sorted;
-      }
-
-      if (directAttempt < 2) {
-        await new Promise((r) => setTimeout(r, 600));
-      }
-    } catch {
-      if (directAttempt < 2) {
-        await new Promise((r) => setTimeout(r, 600));
-      }
+    if (SCRAPER_TMDB_EMBED && SCRAPER_TMDB_EMBED !== SCRAPER_CINEPRO) {
+      const tmdbEmbedUrl = isTV
+        ? `${SCRAPER_TMDB_EMBED}/api/streams/series/${id}?s=${s}&e=${e}`
+        : `${SCRAPER_TMDB_EMBED}/api/streams/movie/${id}`;
+      tasks.push(fetchDirect(tmdbEmbedUrl));
     }
-  }
+
+    const results = await Promise.allSettled(tasks);
+    let combined: StreamSource[] = [];
+
+    // CinePro streams
+    if (results[0].status === 'fulfilled' && results[0].value) {
+      combined = combined.concat(normalizeClientStreams(results[0].value, 'CinePro'));
+    }
+
+    // TMDB Embed Scraper streams
+    if (results[1] && results[1].status === 'fulfilled' && results[1].value) {
+      combined = combined.concat(normalizeClientStreams(results[1].value, 'TMDB Embed'));
+    }
+
+    if (combined.length > 0) {
+      const sorted = rankClientStreams(combined, isTV);
+      streamClientCache.set(cacheKey, { streams: sorted, timestamp: Date.now() });
+      return sorted;
+    }
+  } catch {}
 
   // Return empty list if no valid media streams found (iframe fallbacks completely removed)
   return [];

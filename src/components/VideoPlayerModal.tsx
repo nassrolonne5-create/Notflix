@@ -237,7 +237,7 @@ export const VideoPlayerModal: React.FC = () => {
       setStreams([]);
       setActiveStreamIndex(0);
 
-      const maxAttempts = 3;
+      const maxAttempts = 2;
       let loaded: StreamSource[] = [];
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -262,7 +262,7 @@ export const VideoPlayerModal: React.FC = () => {
 
         // Brief delay between attempts to allow backend and scrapers to complete
         if (attempt < maxAttempts) {
-          await new Promise((r) => setTimeout(r, 1200));
+          await new Promise((r) => setTimeout(r, 600));
         }
       }
 
@@ -403,13 +403,13 @@ export const VideoPlayerModal: React.FC = () => {
       }
     };
 
-    // 6.5-second connection watchdog: detects unplayable / dead CDN hosts quickly and auto-switches
+    // 3.2-second connection watchdog: detects unplayable / dead CDN hosts quickly and auto-switches
     watchdogTimerRef.current = window.setTimeout(() => {
       if (video.readyState === 0) {
-        console.warn(`Server ${activeStreamIndex + 1} did not respond within 6.5s. Auto-switching to next server.`);
-        handleStreamFailureRef.current(activeStreamIndex, 'Connection timed out after 6.5s');
+        console.warn(`Server ${activeStreamIndex + 1} did not respond within 3.2s. Auto-switching to next server.`);
+        handleStreamFailureRef.current(activeStreamIndex, 'Connection timed out after 3.2s');
       }
-    }, 6500);
+    }, 3200);
 
     const onMediaActive = () => {
       clearWatchdog();
@@ -608,10 +608,22 @@ export const VideoPlayerModal: React.FC = () => {
           }
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
             networkErrorCount++;
-            if (networkErrorCount > 1 || data.response?.code === 502 || data.response?.code === 404) {
+            const statusCode = data.response?.code;
+            const isFatalHttp =
+              statusCode === 403 ||
+              statusCode === 401 ||
+              statusCode === 404 ||
+              statusCode === 500 ||
+              statusCode === 502 ||
+              statusCode === 503 ||
+              data.details === 'manifestLoadError' ||
+              data.details === 'manifestLoadTimeOut' ||
+              data.details === 'manifestParsingError';
+
+            if (isFatalHttp || networkErrorCount > 1) {
               clearWatchdog();
-              console.warn('Network / 502 / 404 error on HLS server, switching to next server...');
-              handleStreamFailureRef.current(activeStreamIndex, 'HLS network/403/502 error');
+              console.warn(`HLS network error (${statusCode || data.details}) on Server ${activeStreamIndex + 1}, switching immediately...`);
+              handleStreamFailureRef.current(activeStreamIndex, `HLS network error ${statusCode || data.details}`);
               return;
             }
             if (!hasRetriedProxy && stream.proxyUrl && initialUrl !== stream.proxyUrl) {
