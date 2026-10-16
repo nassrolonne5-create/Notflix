@@ -13,6 +13,7 @@ import { VideoPlayerModal } from './components/VideoPlayerModal';
 import { SettingsModal } from './components/SettingsModal';
 import { Toast } from './components/Toast';
 import { ResumeBanner } from './components/ResumeBanner';
+import { AdBlockerBanner } from './components/AdBlockerBanner';
 import { telemetry } from './services/telemetry';
 
 const checkIsAdmin = (): boolean => {
@@ -152,6 +153,9 @@ const AppContent: React.FC = () => {
 
       {/* Browser Resume Banner */}
       <ResumeBanner />
+
+      {/* Non-intrusive Ad-Blocker Support Banner */}
+      <AdBlockerBanner />
     </div>
   );
 };

@@ -1,0 +1,6 @@
+{
+  "summary": "Implementation plan for safely re-integrating custom monetization ad scripts into the website. Ensures ads run seamlessly in production on custom domains while safeguarding the sandboxed preview environment from iframe errors and popup blocking issues.",
+  "updatedAt": "2026-10-16T19:47:29.127628755Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

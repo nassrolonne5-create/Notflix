@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#131a2b" />
+      <stop offset="100%" stop-color="#080c14" />
+    </linearGradient>
+    <linearGradient id="leftPillar" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#e50914" />
+      <stop offset="100%" stop-color="#b20710" />
+    </linearGradient>
+    <linearGradient id="rightPillar" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#e50914" />
+      <stop offset="100%" stop-color="#b20710" />
+    </linearGradient>
+    <linearGradient id="diagonal" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff202b" />
+      <stop offset="100%" stop-color="#e50914" />
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="-4" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.6"/>
+    </filter>
+  </defs>
+  
+  <!-- Rounded Square App Icon Base -->
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect width="500" height="500" x="6" y="6" rx="106" fill="none" stroke="#e50914" stroke-width="6" stroke-opacity="0.3"/>
+  
+  <!-- Left Pillar -->
+  <path d="M112,88 L188,88 L188,424 L112,424 Z" fill="url(#leftPillar)"/>
+  
+  <!-- Right Pillar -->
+  <path d="M324,88 L400,88 L400,424 L324,424 Z" fill="url(#rightPillar)"/>
+  
+  <!-- Diagonal Ribbon with Shadow -->
+  <path d="M112,88 L196,88 L400,424 L316,424 Z" fill="url(#diagonal)" filter="url(#shadow)"/>
+</svg>

@@ -223,7 +223,7 @@ export const VideoPlayerModal: React.FC = () => {
     }, 1000);
   }, []);
 
-  // Load Streams with increased timeout & automatic multi-attempt retry
+  // Load Streams with robust fallback
   const loadStreamsWithRetry = useCallback(
     async (force = false) => {
       if (!activeModalItem) return;
@@ -237,52 +237,45 @@ export const VideoPlayerModal: React.FC = () => {
       setStreams([]);
       setActiveStreamIndex(0);
 
-      const maxAttempts = 2;
-      let loaded: StreamSource[] = [];
+      try {
+        let fetchedStreams = await fetchStreams(
+          activeModalItem.type,
+          activeModalItem.id,
+          currentSeason,
+          currentEpisode,
+          force
+        );
 
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        setStreamLoadAttempt(attempt);
-
-        try {
-          const fetchedStreams = await fetchStreams(
+        // If initial cache miss returned 0 streams, immediately try force refresh once before showing error
+        if ((!fetchedStreams || fetchedStreams.length === 0) && !force) {
+          fetchedStreams = await fetchStreams(
             activeModalItem.type,
             activeModalItem.id,
             currentSeason,
             currentEpisode,
-            force || attempt > 1
+            true
           );
-
-          if (fetchedStreams && fetchedStreams.length > 0) {
-            loaded = fetchedStreams;
-            break;
-          }
-        } catch (err) {
-          console.warn(`Stream scraper attempt ${attempt} failed:`, err);
         }
 
-        // Brief delay between attempts to allow backend and scrapers to complete
-        if (attempt < maxAttempts) {
-          await new Promise((r) => setTimeout(r, 600));
+        if (fetchedStreams && fetchedStreams.length > 0) {
+          attemptedIndicesRef.current.clear();
+          manuallySelectedServerRef.current = null;
+          attemptedIndicesRef.current.add(0);
+          setStreams(fetchedStreams);
+          setActiveStreamIndex(0);
+          setIsLoadingStreams(false);
+          setStreamLoadAttempt(1);
+          return;
         }
+      } catch (err) {
+        console.warn('Stream scraper request failed:', err);
       }
 
-      if (!loaded || loaded.length === 0) {
-        setStreamError('Streaming APIs took longer than expected to respond. Auto-retrying shortly...');
-        setIsLoadingStreams(false);
-        setStreamLoadAttempt(1);
-        startAutoRetryCountdown();
-        return;
-      }
-
-      attemptedIndicesRef.current.clear();
-      manuallySelectedServerRef.current = null;
-      attemptedIndicesRef.current.add(0);
-      setStreams(loaded);
-      setActiveStreamIndex(0);
+      setStreamError('Streaming servers are temporarily busy or resolving. Click Retry to search again.');
       setIsLoadingStreams(false);
       setStreamLoadAttempt(1);
     },
-    [activeModalItem, currentSeason, currentEpisode, startAutoRetryCountdown]
+    [activeModalItem, currentSeason, currentEpisode]
   );
 
   // Load Streams trigger
@@ -327,13 +320,12 @@ export const VideoPlayerModal: React.FC = () => {
         // Switch immediately without lag!
         setActiveStreamIndex(nextIndex);
       } else {
-        console.warn('All available servers have been tried and failed.');
+        console.warn('All available servers have been tried.');
         setIsLoadingStreams(false);
-        setStreamError('All available servers timed out or were unable to play this title. Auto-retrying shortly...');
-        startAutoRetryCountdown();
+        setStreamError('All tested servers were unable to stream this title right now. Please try another title or retry.');
       }
     },
-    [streams, showToast, startAutoRetryCountdown]
+    [streams, showToast]
   );
 
   const handleStreamFailureRef = useRef(handleStreamFailure);
@@ -403,13 +395,13 @@ export const VideoPlayerModal: React.FC = () => {
       }
     };
 
-    // 3.2-second connection watchdog: detects unplayable / dead CDN hosts quickly and auto-switches
+    // 8.5-second connection watchdog: detects unplayable / dead CDN hosts and auto-switches
     watchdogTimerRef.current = window.setTimeout(() => {
       if (video.readyState === 0) {
-        console.warn(`Server ${activeStreamIndex + 1} did not respond within 3.2s. Auto-switching to next server.`);
-        handleStreamFailureRef.current(activeStreamIndex, 'Connection timed out after 3.2s');
+        console.warn(`Server ${activeStreamIndex + 1} did not respond within 8.5s. Auto-switching to next server.`);
+        handleStreamFailureRef.current(activeStreamIndex, 'Connection timed out after 8.5s');
       }
-    }, 3200);
+    }, 8500);
 
     const onMediaActive = () => {
       clearWatchdog();
@@ -494,12 +486,12 @@ export const VideoPlayerModal: React.FC = () => {
         maxBufferLength: 30,
         maxMaxBufferLength: 600,
         enableWorker: true,
-        manifestLoadingTimeOut: 3500,
-        manifestLoadingMaxRetry: 0,
-        levelLoadingTimeOut: 4000,
-        levelLoadingMaxRetry: 1,
-        fragLoadingTimeOut: 4000,
-        fragLoadingMaxRetry: 1,
+        manifestLoadingTimeOut: 8000,
+        manifestLoadingMaxRetry: 2,
+        levelLoadingTimeOut: 8000,
+        levelLoadingMaxRetry: 2,
+        fragLoadingTimeOut: 8000,
+        fragLoadingMaxRetry: 2,
         xhrSetup: (xhr) => {
           if (stream.headers) {
             for (const [key, val] of Object.entries(stream.headers)) {

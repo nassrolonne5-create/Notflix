@@ -459,11 +459,10 @@ function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
     const headers = s?.headers && typeof s.headers === 'object' ? s.headers : null;
 
     // Filter out permanently broken scrapers that cannot be resolved:
-    // (trendimovies, valhallastream/mirage 403s, finepulfe 404s, streamflixserver no DNS)
+    // (trendimovies, valhallastream/mirage 403s, streamflixserver no DNS)
     if (
       urlLower.includes('trendimovies.com') ||
       urlLower.includes('valhallastream.com') ||
-      urlLower.includes('finepulfe.xyz') ||
       urlLower.includes('streamflixserver.site') ||
       urlLower.includes('/tgstream/stream/') ||
       provLower.includes('trendimovies') ||
@@ -620,15 +619,25 @@ export function rankClientStreams(streams: StreamSource[], _isTV?: boolean): Str
   });
 }
 
+// Ephemeral token cache (valid 60 seconds) to avoid redundant network round-trips
+let cachedStreamToken: { token: string; expiresAt: number } | null = null;
+
 // Obtains ephemeral HMAC stream authorization token to prevent scraper hotlinking
 async function getStreamToken(type: string, id: number): Promise<string | null> {
+  const now = Date.now();
+  if (cachedStreamToken && cachedStreamToken.expiresAt > now + 15000) {
+    return cachedStreamToken.token;
+  }
   try {
     const res = await fetch(`/api/security/stream-token?type=${type}&id=${id}`, {
       headers: { Accept: 'application/json' },
     });
     if (res.ok) {
       const data = await res.json();
-      return data.token || null;
+      if (data.token) {
+        cachedStreamToken = { token: data.token, expiresAt: data.expiresAt || (now + 75000) };
+        return data.token;
+      }
     }
   } catch {}
   return null;
@@ -655,7 +664,7 @@ export async function fetchStreams(
     streamClientCache.delete(cacheKey);
   }
 
-  // Obtain short-lived stream authorization token
+  // Obtain short-lived stream authorization token (cached or fast fetch)
   const streamToken = await getStreamToken(type, id);
 
   const queryParts = [];
@@ -670,10 +679,10 @@ export async function fetchStreams(
   }
   const queryString = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
 
-  // 1. Try Backend Server Proxy first with fast timeout (9s) and instant return
+  // 1. Try Backend Server Proxy first with 14s timeout (sufficient for backend parallel scraping)
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 9000);
+    const timer = setTimeout(() => controller.abort(), 14000);
     const res = await fetch(`/api/streams/${type}/${id}${queryString}`, {
       signal: controller.signal,
       headers: streamToken ? { 'X-Stream-Token': streamToken } : {},
@@ -682,16 +691,31 @@ export async function fetchStreams(
     clearTimeout(timer);
     if (res.ok) {
       const data = await res.json();
-      if (Array.isArray(data.streams) && data.streams.length > 0) {
-        streamClientCache.set(cacheKey, { streams: data.streams, timestamp: Date.now() });
-        return data.streams;
+      const streams = Array.isArray(data.streams) ? data.streams : [];
+      if (streams.length > 0) {
+        streamClientCache.set(cacheKey, { streams, timestamp: Date.now() });
       }
+      // If backend responded with valid status (even if 0 streams), trust the backend response immediately!
+      // This eliminates the 6.5s mixed-content fallback loop that caused 30+ second delays.
+      return streams;
     }
-  } catch (err) {
-    console.warn('[Stream Fetch] Backend resolution issue or timeout, proceeding to direct scrapers:', err);
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      console.warn('[Stream Fetch] Backend resolution reached 14s timeout');
+    } else {
+      console.warn('[Stream Fetch] Backend unreachable, checking direct fallback:', err?.message || err);
+    }
   }
 
-  // 2. Direct Scraper Fallback with 6.5s timeout
+  // 2. Direct Scraper Fallback (ONLY used if backend is completely offline and not blocked by Mixed Content)
+  const isHttpsOrigin = typeof window !== 'undefined' && window.location.protocol === 'https:';
+  const scraperIsHttp = SCRAPER_CINEPRO.startsWith('http://');
+
+  // Browsers unconditionally block HTTP scraper fetch from HTTPS page with Mixed Content Error
+  if (isHttpsOrigin && scraperIsHttp) {
+    return [];
+  }
+
   try {
     const isTV = type === 'tv';
     const cineproUrl = isTV
@@ -700,7 +724,7 @@ export async function fetchStreams(
 
     const fetchDirect = (url: string) => {
       const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 6500);
+      const t = setTimeout(() => ctrl.abort(), 4500);
       return fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } })
         .then((r) => {
           clearTimeout(t);
@@ -712,36 +736,17 @@ export async function fetchStreams(
         });
     };
 
-    const tasks: Promise<any>[] = [fetchDirect(cineproUrl)];
-
-    if (SCRAPER_TMDB_EMBED && SCRAPER_TMDB_EMBED !== SCRAPER_CINEPRO) {
-      const tmdbEmbedUrl = isTV
-        ? `${SCRAPER_TMDB_EMBED}/api/streams/series/${id}?s=${s}&e=${e}`
-        : `${SCRAPER_TMDB_EMBED}/api/streams/movie/${id}`;
-      tasks.push(fetchDirect(tmdbEmbedUrl));
-    }
-
-    const results = await Promise.allSettled(tasks);
-    let combined: StreamSource[] = [];
-
-    // CinePro streams
-    if (results[0].status === 'fulfilled' && results[0].value) {
-      combined = combined.concat(normalizeClientStreams(results[0].value, 'CinePro'));
-    }
-
-    // TMDB Embed Scraper streams
-    if (results[1] && results[1].status === 'fulfilled' && results[1].value) {
-      combined = combined.concat(normalizeClientStreams(results[1].value, 'TMDB Embed'));
-    }
-
-    if (combined.length > 0) {
-      const sorted = rankClientStreams(combined, isTV);
-      streamClientCache.set(cacheKey, { streams: sorted, timestamp: Date.now() });
-      return sorted;
+    const directData = await fetchDirect(cineproUrl);
+    if (directData) {
+      const combined = normalizeClientStreams(directData, 'CinePro');
+      if (combined.length > 0) {
+        const sorted = rankClientStreams(combined, isTV);
+        streamClientCache.set(cacheKey, { streams: sorted, timestamp: Date.now() });
+        return sorted;
+      }
     }
   } catch {}
 
-  // Return empty list if no valid media streams found (iframe fallbacks completely removed)
   return [];
 }
 

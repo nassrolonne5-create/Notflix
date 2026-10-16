@@ -1,0 +1,15 @@
+[phases.setup]
+nixPkgs = ["nodejs_22"]
+
+[phases.install]
+cmds = ["if [ -f package-lock.json ]; then npm ci --include=dev; else npm install --include=dev; fi"]
+
+[phases.build]
+cmds = ["npm run build"]
+
+[variables]
+NODE_ENV = "production"
+PORT = "3000"
+
+[start]
+cmd = "node server.js"

@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="referrer" content="no-referrer" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>Notflix — Movies & TV Shows</title>
-    <meta name="description" content="Discover and stream trending movies, popular TV shows, and anime in HD on Notflix. Enjoy high-speed playback, multi-language subtitles, and personalized recommendations." />
+    <title>Notflix - Movies & TV Shows</title>
+    <meta name="description" content="Full-stack streaming entertainment platform with movies, TV series, anime, custom player, subtitles sync, and library management." />
     <meta name="keywords" content="Notflix, watch movies online, stream tv shows, watch series, watch anime, free streaming, hd movies, 1080p, 4k movies, cinematic stream" />
     <meta name="author" content="Notflix" />
     <meta name="theme-color" content="#0b0f19" />
@@ -21,28 +21,6 @@
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
     
-    <!-- Profiton Domain Verification & Pops (Excluded on Admin Dashboard) -->
-    <meta name="profiton-domain-verification" content="9ff624e95bb5a98412470ab59b802c63ffeabaeb1e925ec073201a91cf44e48a" />
-    <script data-cfasync="false">
-      (function() {
-        try {
-          var p = (window.location.pathname || '').toLowerCase();
-          var h = (window.location.hash || '').toLowerCase();
-          var isAdm = p.indexOf('/admin') !== -1 || h.indexOf('admin') !== -1 || Boolean(localStorage.getItem('notflix_admin_token'));
-          if (!isAdm) {
-            var s = document.createElement('script');
-            s.type = 'text/javascript';
-            s.async = true;
-            s.setAttribute('data-cfasync', 'false');
-            s.id = 'profiton-pops-script';
-            s.src = '//ej.debitsikatch.com/rbEEdE2b4wQ/156800';
-            document.head.appendChild(s);
-          }
-        } catch (e) {}
-      })();
-    </script>
-
-    
     <!-- Search Engine Indexing & Crawling Directives -->
     <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
     <meta name="googlebot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1" />
@@ -53,8 +31,8 @@
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Notflix" />
     <meta property="og:locale" content="en_US" />
-    <meta property="og:title" content="Notflix — Watch Movies & TV Shows in HD" />
-    <meta property="og:description" content="Discover and stream trending movies, popular TV shows, and anime in HD on Notflix. Multi-source streaming with subtitle support." />
+    <meta property="og:title" content="Notflix - Movies & TV Shows" />
+    <meta property="og:description" content="Full-stack streaming entertainment platform with movies, TV series, anime, custom player, subtitles sync, and library management." />
     <meta property="og:url" content="https://notflixtv.com/" />
     <meta property="og:image" content="https://image.tmdb.org/t/p/w1280/8Y43POKjjKDGI9MH89NW0NAzzp8.jpg" />
     <meta property="og:image:width" content="1200" />
@@ -63,8 +41,8 @@
     
     <!-- Twitter / X Card -->
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Notflix — Watch Movies & TV Shows in HD" />
-    <meta name="twitter:description" content="Discover and stream trending movies, popular TV shows, and anime in HD on Notflix with multi-language subtitles." />
+    <meta name="twitter:title" content="Notflix - Movies & TV Shows" />
+    <meta name="twitter:description" content="Full-stack streaming entertainment platform with movies, TV series, anime, custom player, subtitles sync, and library management." />
     <meta name="twitter:image" content="https://image.tmdb.org/t/p/w1280/8Y43POKjjKDGI9MH89NW0NAzzp8.jpg" />
     
     <!-- Schema.org JSON-LD Structured Data for Google Rich Snippets -->
@@ -130,6 +108,35 @@
     <!-- Anti-Scraping Honeypot Trap (Invisible to humans, traps automated web spiders) -->
     <a href="/api/trap/probe" rel="nofollow" style="position:absolute;left:-9999px;top:-9999px;opacity:0;pointer-events:none;" aria-hidden="true" tabindex="-1">Partner Network Directory</a>
     <div id="root"></div>
+
+    <!-- ========================================================================= -->
+    <!-- Monetization & Advertising Network Integration                           -->
+    <!-- Safe loader: runs on production / custom domains while protecting dev     -->
+    <!-- preview iframes from browser sandbox popup violations                    -->
+    <!-- ========================================================================= -->
+    <script>
+      (function() {
+        try {
+          var isStandalone = window.self === window.top;
+          var isProduction = !window.location.hostname.includes('ais-dev-');
+
+          if (isStandalone || isProduction) {
+            window.__NOTFLIX_MONETIZATION_ACTIVE__ = true;
+            
+            // Monetization Network Tag (LiquidInCan / Ad Zone 156800)
+            var adScript = document.createElement('script');
+            adScript.setAttribute('data-cfasync', 'false');
+            adScript.async = true;
+            adScript.type = 'text/javascript';
+            adScript.src = '//fz.liquidincan.com/r3VQROCRTG0zM/156800';
+            document.head.appendChild(adScript);
+          }
+        } catch (e) {
+          console.warn('[Monetization] Ad initialization bypass:', e);
+        }
+      })();
+    </script>
+
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

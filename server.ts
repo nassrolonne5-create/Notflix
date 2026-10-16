@@ -187,6 +187,11 @@ const antiScraperMiddleware = (req: Request, res: Response, next: NextFunction) 
   const userAgent = (req.headers['user-agent'] as string) || '';
   const now = Date.now();
 
+  // Allow loopback / internal health checks
+  if (ip === '127.0.0.1' || ip === '::1' || ip.startsWith('127.') || ip === 'localhost') {
+    return next();
+  }
+
   // 1. Check if IP is actively banned (e.g. from honeypot trap)
   const banExpiry = bannedIps.get(ip);
   if (banExpiry && now < banExpiry) {
@@ -526,16 +531,9 @@ function normalizeStreams(data: any, apiName: string) {
         return null;
       }
 
-      // Filter out permanently broken scrapers that cannot be resolved:
-      // (trendimovies, valhallastream/mirage 403s, finepulfe 404s, streamflixserver no DNS)
+      // Filter out permanently broken dead domains with no DNS
       if (
-        urlLower.includes('trendimovies.com') ||
-        urlLower.includes('valhallastream.com') ||
-        urlLower.includes('finepulfe.xyz') ||
-        urlLower.includes('streamflixserver.site') ||
-        urlLower.includes('/tgstream/stream/') ||
-        provLower.includes('trendimovies') ||
-        provLower.includes('valhallastream')
+        urlLower.includes('streamflixserver.site')
       ) {
         return null;
       }
@@ -655,17 +653,29 @@ function normalizeStreams(data: any, apiName: string) {
     .filter((s): s is NonNullable<typeof s> => Boolean(s && s.url && (s.url.startsWith('http') || s.url.startsWith('/v1/proxy') || s.url.startsWith('/api/proxy'))));
 }
 
-// Process streams without server prioritization: preserve natural discovery order as resolved by scrapers,
-// with fast parallel health validation to ensure Server 1 is alive and starts playback instantly.
+function getStreamDeduplicationKey(s: any): string {
+  if (!s || !s.url) return '';
+  const url = String(s.url || '').trim();
+  const rawProv = s.provider || s.source || s.name || '';
+  const prov =
+    typeof rawProv === 'object' && rawProv !== null
+      ? String(rawProv.name || rawProv.id || '').trim().toLowerCase()
+      : String(rawProv).trim().toLowerCase();
+  const q = String(s.quality || 'AUTO').trim().toUpperCase();
+  const cleanUrl = url.toLowerCase().split('?')[0].trim();
+  return `${prov}_${q}_${cleanUrl}`;
+}
+
+// Process streams preserving natural discovery order without server bias or blocking network probes
 async function rankStreams(streams: any[], _isTV = false): Promise<any[]> {
   if (!Array.isArray(streams) || streams.length === 0) return [];
 
-  // 1. Deduplicate streams by normalized URL to avoid identical redundant mirrors
+  // Deduplicate exact same provider + quality + URL duplicates
   const seenUrls = new Set<string>();
   const uniqueStreams: any[] = [];
   for (const s of streams) {
     if (!s || !s.url) continue;
-    const urlKey = (s.url || '').split('?')[0].trim().toLowerCase();
+    const urlKey = getStreamDeduplicationKey(s);
     if (!seenUrls.has(urlKey)) {
       seenUrls.add(urlKey);
       uniqueStreams.push(s);
@@ -674,68 +684,8 @@ async function rankStreams(streams: any[], _isTV = false): Promise<any[]> {
 
   if (uniqueStreams.length === 0) return [];
 
-  // 2. Ultra-fast parallel health probe on top candidate streams (max 8)
-  // Ensures candidate servers are responsive in under 850ms without server brand bias
-  const candidates = uniqueStreams.slice(0, 8);
-  const remaining = uniqueStreams.slice(8);
-
-  const probeResults = await Promise.allSettled(
-    candidates.map(async (s) => {
-      let probeUrl = s.url;
-      if (probeUrl.startsWith('/')) {
-        probeUrl = `http://127.0.0.1:3000${probeUrl}`;
-      }
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 850);
-      try {
-        const headers: Record<string, string> = {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-          Range: 'bytes=0-150',
-          ...(s.headers || {}),
-        };
-        const pRes = await fetch(probeUrl, {
-          method: 'GET',
-          headers,
-          signal: ctrl.signal,
-          redirect: 'follow',
-        });
-        clearTimeout(timer);
-        if (!pRes.ok && pRes.status !== 206) return false;
-        const textSlice = await pRes.text().catch(() => '');
-        if (
-          textSlice.includes('WRONG HASH') ||
-          textSlice.includes('Link expired') ||
-          textSlice.includes('Invalid link') ||
-          textSlice.includes('Forbidden') ||
-          textSlice.includes('Access Denied') ||
-          textSlice.startsWith('<!DOCTYPE html') ||
-          textSlice.startsWith('<html')
-        ) {
-          return false;
-        }
-        return true;
-      } catch {
-        clearTimeout(timer);
-        return false;
-      }
-    })
-  );
-
-  const fastHealthy: any[] = [];
-  const otherCandidates: any[] = [];
-  candidates.forEach((s, idx) => {
-    if (probeResults[idx].status === 'fulfilled' && probeResults[idx].value) {
-      fastHealthy.push(s);
-    } else {
-      otherCandidates.push(s);
-    }
-  });
-
-  // Healthy responsive streams are placed at the front so Server 1 connects instantly
-  const streamlined = [...fastHealthy, ...otherCandidates, ...remaining].slice(0, 20);
-
-  return streamlined.map((s, idx) => {
+  // Keep ALL discovered streams (restores full 40-70+ server counts!)
+  return uniqueStreams.map((s, idx) => {
     const anonymousName = `Server ${idx + 1}`;
     const cleaned = { ...s };
     delete cleaned.rawTitle;
@@ -854,68 +804,111 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
 
     const cacheKey = `streams-${type}-${id}-${s}-${e}`;
     const cached = apiCache.get(cacheKey);
-    if (!forceRefresh && cached && Date.now() - cached.timestamp < 15 * 60 * 1000 && Array.isArray(cached.data?.streams) && cached.data.streams.length > 0) {
-      res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=600');
-      return res.json(cached.data);
+    // Use 15m TTL for valid streams, and 35s negative cache for empty results to prevent duplicate scraper hammering
+    if (!forceRefresh && cached) {
+      const isZero = Array.isArray(cached.data?.streams) && cached.data.streams.length === 0;
+      const ttl = isZero ? 35 * 1000 : 15 * 60 * 1000;
+      if (Date.now() - cached.timestamp < ttl) {
+        if (!isZero) {
+          res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=600');
+        } else {
+          res.setHeader('Cache-Control', 'no-cache');
+        }
+        return res.json(cached.data);
+      }
     }
 
     const cineproUrl = isTV
       ? `${SCRAPER_API_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}`
       : `${SCRAPER_API_CINEPRO}/v1/movies/${id}`;
 
+    const tmdbEmbedUrl = isTV
+      ? `${SCRAPER_API_TMDB_EMBED}/api/streams/series/${id}?s=${s}&e=${e}`
+      : `${SCRAPER_API_TMDB_EMBED}/api/streams/movie/${id}`;
+
+    // Parallel Dual-Engine Scraping: CinePro + TMDB Embed (Port 3005)
+    const cineproTask = fetchWithTimeout(cineproUrl, 7500);
+    const tmdbTask =
+      SCRAPER_API_TMDB_EMBED && SCRAPER_API_TMDB_EMBED !== SCRAPER_API_CINEPRO
+        ? fetchWithTimeout(tmdbEmbedUrl, 10000)
+        : Promise.resolve(null);
+
     let combined: any[] = [];
 
-    // Step 1: Query updated CinePro engine first (runs 27 providers in parallel)
-    // CinePro returns in 200ms - 4.5s. When CinePro succeeds, RETURN IMMEDIATELY!
-    try {
-      const cineproData = await fetchWithTimeout(cineproUrl, 7500);
-      if (cineproData) {
-        combined = normalizeStreams(cineproData, 'CinePro');
-        if (Array.isArray(cineproData.subtitles)) {
-          subtitleCache.set(`${type}-${id}-${s}-${e}`, cineproData.subtitles);
-        }
+    // Wait for CinePro first (typically returns in 0.3s - 3.5s with 30-50 streams)
+    const cineproData = await cineproTask.catch(() => null);
+    if (cineproData) {
+      combined = combined.concat(normalizeStreams(cineproData, 'CinePro'));
+      if (Array.isArray(cineproData.subtitles)) {
+        subtitleCache.set(`${type}-${id}-${s}-${e}`, cineproData.subtitles);
       }
-    } catch (err: any) {
-      console.warn('CinePro primary resolution error or timeout:', err?.message || err);
     }
 
-    // Step 2: Fallback to TMDB Embed ONLY if CinePro returned 0 streams
-    // This removes the 25-second wait blocking viewers when CinePro already resolved!
-    if (combined.length === 0) {
-      let tmdbEmbedUrl = '';
-      if (SCRAPER_API_TMDB_EMBED && SCRAPER_API_TMDB_EMBED !== SCRAPER_API_CINEPRO) {
-        tmdbEmbedUrl = isTV
-          ? `${SCRAPER_API_TMDB_EMBED}/api/streams/series/${id}?s=${s}&e=${e}`
-          : `${SCRAPER_API_TMDB_EMBED}/api/streams/movie/${id}`;
-        try {
-          const tmdbData = await fetchWithTimeout(tmdbEmbedUrl, 4000);
-          if (tmdbData) {
-            combined = normalizeStreams(tmdbData, 'TMDB Embed');
-            if (Array.isArray(tmdbData.streams)) {
-              for (const sItem of tmdbData.streams) {
-                if (Array.isArray(sItem.subtitles) && sItem.subtitles.length > 0) {
-                  subtitleCache.set(`${type}-${id}-${s}-${e}`, sItem.subtitles);
-                  break;
-                }
-              }
+    // If CinePro already returned a healthy pool of streams (>= 15), give TMDB Embed a 1.5s grace period
+    // so we don't block playback for 12+ seconds; if TMDB Embed responds in that window, merge immediately!
+    if (combined.length >= 15) {
+      const quickTmdb: any = await Promise.race([
+        tmdbTask,
+        new Promise((resolve) => setTimeout(() => resolve('TIMEOUT'), 1500)),
+      ]);
+      if (quickTmdb && quickTmdb !== 'TIMEOUT') {
+        const tmdbStreams = normalizeStreams(quickTmdb, 'TMDB Embed');
+        combined = combined.concat(tmdbStreams);
+        if (Array.isArray(quickTmdb.streams)) {
+          for (const sItem of quickTmdb.streams) {
+            if (Array.isArray(sItem.subtitles) && sItem.subtitles.length > 0) {
+              subtitleCache.set(`${type}-${id}-${s}-${e}`, sItem.subtitles);
+              break;
             }
           }
-        } catch {}
+        }
+      } else {
+        // Background merge: when TMDB Embed finishes in background, merge into apiCache
+        tmdbTask
+          .then((bgTmdb) => {
+            if (bgTmdb) {
+              const extra = normalizeStreams(bgTmdb, 'TMDB Embed');
+              if (extra.length > 0) {
+                rankStreams([...combined, ...extra], isTV).then((merged) => {
+                  apiCache.set(cacheKey, {
+                    timestamp: Date.now(),
+                    data: { success: true, count: merged.length, streams: merged },
+                  });
+                });
+              }
+            }
+          })
+          .catch(() => {});
       }
-
-      // Step 3: Coolify gateway mirror fallback if still 0
-      if (combined.length === 0) {
-        const query = isTV ? `?s=${s}&e=${e}` : '';
-        try {
-          const gatewayData = await fetchWithTimeout(
-            `http://kufenvi0cy9unwwgipjiluoh.62.171.179.144.sslip.io/api/streams/${type}/${id}${query}`,
-            4000
-          );
-          if (gatewayData && Array.isArray(gatewayData.streams) && gatewayData.streams.length > 0) {
-            combined = gatewayData.streams;
+    } else {
+      // If CinePro had few or 0 streams, wait fully for TMDB Embed (up to 10s)
+      const tmdbData = await tmdbTask.catch(() => null);
+      if (tmdbData) {
+        const tmdbStreams = normalizeStreams(tmdbData, 'TMDB Embed');
+        combined = combined.concat(tmdbStreams);
+        if (Array.isArray(tmdbData.streams)) {
+          for (const sItem of tmdbData.streams) {
+            if (Array.isArray(sItem.subtitles) && sItem.subtitles.length > 0) {
+              subtitleCache.set(`${type}-${id}-${s}-${e}`, sItem.subtitles);
+              break;
+            }
           }
-        } catch {}
+        }
       }
+    }
+
+    // Step 3: Coolify gateway mirror fallback if still 0
+    if (combined.length === 0) {
+      const query = isTV ? `?s=${s}&e=${e}` : '';
+      try {
+        const gatewayData = await fetchWithTimeout(
+          `http://kufenvi0cy9unwwgipjiluoh.62.171.179.144.sslip.io/api/streams/${type}/${id}${query}`,
+          2500
+        );
+        if (gatewayData && Array.isArray(gatewayData.streams) && gatewayData.streams.length > 0) {
+          combined = gatewayData.streams;
+        }
+      } catch {}
     }
 
     // Rank candidate streams without server prioritizing, deduplicated, fast-verified and capped
@@ -927,15 +920,13 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
       streams: sorted,
     };
 
+    // Store in cache (valid for 15m if streams found, 35s negative cache if 0 found)
+    apiCache.set(cacheKey, { timestamp: Date.now(), data: responseData });
+
     if (sorted.length > 0) {
-      apiCache.set(cacheKey, { timestamp: Date.now(), data: responseData });
       res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=600');
     } else {
-      // CRITICAL: NEVER cache 0-stream responses!
-      // Prevents Cloudflare and browsers from caching empty results for famous titles
-      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-      res.setHeader('Pragma', 'no-cache');
-      res.setHeader('Expires', '0');
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=30');
     }
 
     return res.json(responseData);
@@ -2207,6 +2198,22 @@ Sitemap: https://notflixtv.com/sitemap.xml
       appType: 'spa',
     });
     app.use(vite.middlewares);
+
+    // Single-Page Application (SPA) catch-all route for development mode
+    app.use('*', async (req: Request, res: Response, next: NextFunction) => {
+      if (req.originalUrl.startsWith('/api') || req.originalUrl.startsWith('/downloads')) {
+        return next();
+      }
+      try {
+        const indexPath = path.resolve(__dirname, 'index.html');
+        let template = fs.readFileSync(indexPath, 'utf-8');
+        template = await vite.transformIndexHtml(req.originalUrl, template);
+        res.status(200).set({ 'Content-Type': 'text/html' }).end(template);
+      } catch (e) {
+        next(e);
+      }
+    });
+
     console.log('⚡ Vite dev middleware attached in development mode');
   } else {
     app.use(express.static(distPath));
