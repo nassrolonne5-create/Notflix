@@ -6,8 +6,9 @@ RUN apk add --no-cache libc6-compat
 
 # 2. Dependencies stage
 FROM base AS deps
-COPY package.json package-lock.json* ./
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --prefer-offline --no-audit
 
 # 3. Builder stage
 FROM base AS builder
@@ -15,7 +16,7 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NODE_ENV=production
 ENV NODE_OPTIONS="--max-old-space-size=2048"
-RUN npm run build
+RUN npm run build && npm prune --omit=dev --no-audit
 
 # 4. Production Runner stage
 FROM base AS runner

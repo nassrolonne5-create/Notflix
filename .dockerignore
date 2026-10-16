@@ -8,6 +8,10 @@ dist
 Notflix-main
 downloads
 .wrangler
+.aistudio
+*.md
+*.txt
+bun.lock
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

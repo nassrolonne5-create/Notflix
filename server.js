@@ -132,6 +132,9 @@ const antiScraperMiddleware = (req, res, next) => {
   const ip = getClientIp(req);
   const userAgent = req.headers["user-agent"] || "";
   const now = Date.now();
+  if (ip === "127.0.0.1" || ip === "::1" || ip.startsWith("127.") || ip === "localhost") {
+    return next();
+  }
   const banExpiry = bannedIps.get(ip);
   if (banExpiry && now < banExpiry) {
     securityMetrics.totalBlockedScrapers++;
@@ -214,13 +217,7 @@ function writeUserData(data) {
   }
 }
 const ADULT_BLOCKLIST = [
-  "romance",
-  "romantic",
-  "rom-com",
   "erotic",
-  "sexy",
-  "sensual",
-  "love story",
   "erotica",
   "nsfw",
   "porn",
@@ -238,8 +235,6 @@ const ADULT_BLOCKLIST = [
   "nudity",
   "lust",
   "seduction",
-  "intimate",
-  "intimacy",
   "kama sutra",
   "playboy",
   "penthouse",
@@ -268,25 +263,19 @@ const ADULT_BLOCKLIST = [
   "menage a trois",
   "threesome",
   "infidelity",
-  "love triangle",
   "passionate affair",
   "365 days",
   "365 dni",
   "voyeur",
   "erotic thriller",
-  "passion",
-  "passionate",
-  "affair",
-  "affaire",
-  "dating"
+  "hentai",
+  "ecchi"
 ];
 const safePattern = new RegExp(
   `\\b(${ADULT_BLOCKLIST.join("|")})\\b|\\bsex(?!\\s*(trafficking|crime|worker|trade|slave))\\b`,
   "i"
 );
 const ADULT_KEYWORDS = [
-  "romance",
-  "romantic",
   "erotic",
   "erotica",
   "pornography",
@@ -311,7 +300,6 @@ const ADULT_KEYWORDS = [
   "menage a trois",
   "threesome",
   "infidelity",
-  "love triangle",
   "gay",
   "lesbian",
   "lgbt",
@@ -320,22 +308,46 @@ const ADULT_KEYWORDS = [
   "sensuality",
   "lust",
   "sexy",
-  "love story",
   "striptease",
   "voyeur",
-  "intimacy",
   "adultery",
-  "affair",
   "erotic drama",
   "erotic comedy"
 ];
 const kwPattern = new RegExp(`\\b(${ADULT_KEYWORDS.join("|")})\\b`, "i");
+const EXPLICIT_ADULT_KEYWORDS = [
+  "erotic",
+  "erotica",
+  "pornography",
+  "porn",
+  "softcore",
+  "hardcore porn",
+  "explicit sex",
+  "unsimulated sex",
+  "sexual content",
+  "bdsm",
+  "fetish",
+  "kama sutra",
+  "masturbation",
+  "orgasm",
+  "hentai",
+  "ecchi",
+  "nude",
+  "nudity",
+  "penetration",
+  "menage a trois",
+  "threesome"
+];
+const explicitKwPattern = new RegExp(`\\b(${EXPLICIT_ADULT_KEYWORDS.join("|")})\\b`, "i");
 function isSafe(item) {
   if (!item) return false;
   if (item.error) return false;
   if (item.adult === true || item.adult === "true") return false;
-  if (item.genre_ids && Array.isArray(item.genre_ids) && item.genre_ids.includes(10749)) return false;
-  if (item.genres && Array.isArray(item.genres) && item.genres.some((g) => g.id === 10749 || g.name && g.name.toLowerCase() === "romance")) return false;
+  const isAnimation = item.genre_ids && Array.isArray(item.genre_ids) && (item.genre_ids.includes(16) || item.genre_ids.includes(10751)) || item.genres && Array.isArray(item.genres) && item.genres.some((g) => g.id === 16 || g.id === 10751 || g.name && (g.name.toLowerCase() === "animation" || g.name.toLowerCase() === "family"));
+  if (!isAnimation) {
+    if (item.genre_ids && Array.isArray(item.genre_ids) && item.genre_ids.includes(10749)) return false;
+    if (item.genres && Array.isArray(item.genres) && item.genres.some((g) => g.id === 10749 || g.name && g.name.toLowerCase() === "romance")) return false;
+  }
   const title = (item.title || item.name || "").toLowerCase();
   const desc = (item.overview || item.desc || "").toLowerCase();
   if (title.includes("passion of the christ")) return true;
@@ -347,7 +359,8 @@ function isSafe(item) {
   if (item.keywords) {
     kwds = item.keywords.results || item.keywords.keywords || [];
   }
-  if (kwds.some((k) => kwPattern.test(k.name))) return false;
+  const kwTester = isAnimation ? explicitKwPattern : kwPattern;
+  if (kwds.some((k) => kwTester.test(k.name))) return false;
   return true;
 }
 app.get(["/api/health", "/health", "/healthz"], (req, res) => {
@@ -365,7 +378,8 @@ app.get("/api/tmdb/*", async (req, res) => {
     queryParams.set("api_key", TMDB_API_KEY);
     queryParams.set("language", queryParams.get("language") || "en-US");
     queryParams.set("include_adult", "false");
-    if (!queryParams.has("without_genres")) {
+    const isAnimationOrTitleQuery = queryParams.get("with_genres")?.includes("16") || queryParams.get("with_genres")?.includes("10751") || queryParams.get("with_keywords")?.includes("210024") || tmdbPath.includes("search") || tmdbPath.startsWith("movie/") || tmdbPath.startsWith("tv/");
+    if (!isAnimationOrTitleQuery && !queryParams.has("without_genres")) {
       queryParams.set("without_genres", "10749");
     }
     const cacheKey = `${tmdbPath}?${queryParams.toString()}`;
@@ -449,7 +463,7 @@ function normalizeStreams(data, apiName) {
     if (titleLower.includes("rickroll") || titleLower.includes("rick astley") || urlLower.includes("rickroll")) {
       return null;
     }
-    if (urlLower.includes("finepulfe.xyz") || urlLower.includes("streamflixserver.site")) {
+    if (urlLower.includes("streamflixserver.site")) {
       return null;
     }
     if (Boolean(s?.isEmbed) || s?.type === "embed" || s?.type === "iframe" || urlLower.includes("/embed/") || urlLower.includes("/e/") || urlLower.includes("cloudorchestranova") || urlLower.includes("vidsrc") || urlLower.includes("autoembed") || urlLower.includes("2embed") || urlLower.includes("superembed") || urlLower.includes("multiembed") || urlLower.includes("embed.su") || urlLower.includes("player.") || urlLower.includes("vidlink")) {
@@ -470,7 +484,7 @@ function normalizeStreams(data, apiName) {
     const isM3U8 = !isDASH && (s?.type === "hls" || s?.type === "m3u8" || urlLower.includes(".m3u8") || !urlLower.match(/\.(mp4|webm|mkv|ogg|mov)$/i) && !urlLower.includes(".mpd"));
     const isPriorityProxyStream = urlLower.includes("crmseraph") || urlLower.includes("1x2.space") || urlLower.includes("mov3.4pa.top") || urlLower.includes("neward.cyou") || urlLower.includes("professionaladvisory.sbs") || urlLower.includes("boomchick") || urlLower.includes("sprintspeedlight") || provLower.includes("vidrock") || provLower.includes("icefy") || provLower.includes("orion") || provLower.includes("lmscript") || provLower.includes("lm script");
     let proxyUrl = "";
-    if (isPriorityProxyStream || !streamUrl.startsWith("/v1/proxy") && (headers || urlLower.includes("boomchick") || urlLower.includes("sprintspeedlight") || urlLower.includes("hakunaymatata") || urlLower.includes("flwuok") || urlLower.includes("flcwuk") || urlLower.includes("hbsxcn") || urlLower.includes("flowxn") || urlLower.includes("fsonxn") || urlLower.includes("111477.xyz") || urlLower.includes("devcorp.me"))) {
+    if (!streamUrl.startsWith("/v1/proxy") && (isPriorityProxyStream || headers || urlLower.includes("boomchick") || urlLower.includes("sprintspeedlight") || urlLower.includes("hakunaymatata") || urlLower.includes("flwuok") || urlLower.includes("flcwuk") || urlLower.includes("hbsxcn") || urlLower.includes("flowxn") || urlLower.includes("fsonxn") || urlLower.includes("111477.xyz") || urlLower.includes("devcorp.me"))) {
       proxyUrl = `/api/proxy/stream?url=${encodeURIComponent(streamUrl)}${headers ? `&headers=${encodeURIComponent(JSON.stringify(headers))}` : ""}`;
     }
     const quality = (s?.quality || s?.resolution || s?.label || "AUTO").toUpperCase();
@@ -495,9 +509,29 @@ function normalizeStreams(data, apiName) {
     };
   }).filter((s) => Boolean(s && s.url && (s.url.startsWith("http") || s.url.startsWith("/v1/proxy") || s.url.startsWith("/api/proxy"))));
 }
-function rankStreams(streams, _isTV = false) {
+function getStreamDeduplicationKey(s) {
+  if (!s || !s.url) return "";
+  const url = String(s.url || "").trim();
+  const rawProv = s.provider || s.source || s.name || "";
+  const prov = typeof rawProv === "object" && rawProv !== null ? String(rawProv.name || rawProv.id || "").trim().toLowerCase() : String(rawProv).trim().toLowerCase();
+  const q = String(s.quality || "AUTO").trim().toUpperCase();
+  const cleanUrl = url.toLowerCase().split("?")[0].trim();
+  return `${prov}_${q}_${cleanUrl}`;
+}
+async function rankStreams(streams, _isTV = false) {
   if (!Array.isArray(streams) || streams.length === 0) return [];
-  return streams.map((s, idx) => {
+  const seenUrls = /* @__PURE__ */ new Set();
+  const uniqueStreams = [];
+  for (const s of streams) {
+    if (!s || !s.url) continue;
+    const urlKey = getStreamDeduplicationKey(s);
+    if (!seenUrls.has(urlKey)) {
+      seenUrls.add(urlKey);
+      uniqueStreams.push(s);
+    }
+  }
+  if (uniqueStreams.length === 0) return [];
+  return uniqueStreams.map((s, idx) => {
     const anonymousName = `Server ${idx + 1}`;
     const cleaned = { ...s };
     delete cleaned.rawTitle;
@@ -585,61 +619,101 @@ app.get("/api/streams/:type/:id", async (req, res) => {
     const forceRefresh = req.query.refresh === "1" || req.query._t !== void 0;
     const cacheKey = `streams-${type}-${id}-${s}-${e}`;
     const cached = apiCache.get(cacheKey);
-    if (!forceRefresh && cached && Date.now() - cached.timestamp < 15 * 60 * 1e3 && Array.isArray(cached.data?.streams) && cached.data.streams.length > 0) {
-      res.setHeader("Cache-Control", "public, max-age=300, s-maxage=600");
-      return res.json(cached.data);
-    }
-    const cineproUrl = isTV ? `${SCRAPER_API_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}` : `${SCRAPER_API_CINEPRO}/v1/movies/${id}`;
-    const tasks = [fetchWithRetry(cineproUrl, 25e3, 1)];
-    let tmdbEmbedUrl = "";
-    if (SCRAPER_API_TMDB_EMBED && SCRAPER_API_TMDB_EMBED !== SCRAPER_API_CINEPRO) {
-      tmdbEmbedUrl = isTV ? `${SCRAPER_API_TMDB_EMBED}/api/streams/series/${id}?s=${s}&e=${e}` : `${SCRAPER_API_TMDB_EMBED}/api/streams/movie/${id}`;
-      tasks.push(fetchWithRetry(tmdbEmbedUrl, 25e3, 1));
-    }
-    const results = await Promise.allSettled(tasks);
-    let combined = [];
-    if (results[0].status === "fulfilled" && results[0].value) {
-      combined = combined.concat(normalizeStreams(results[0].value, "CinePro"));
-      if (Array.isArray(results[0].value.subtitles)) {
-        subtitleCache.set(`${type}-${id}-${s}-${e}`, results[0].value.subtitles);
+    if (!forceRefresh && cached) {
+      const isZero = Array.isArray(cached.data?.streams) && cached.data.streams.length === 0;
+      const ttl = isZero ? 35 * 1e3 : 15 * 60 * 1e3;
+      if (Date.now() - cached.timestamp < ttl) {
+        if (!isZero) {
+          res.setHeader("Cache-Control", "public, max-age=300, s-maxage=600");
+        } else {
+          res.setHeader("Cache-Control", "no-cache");
+        }
+        return res.json(cached.data);
       }
     }
-    if (results[1] && results[1].status === "fulfilled" && results[1].value) {
-      combined = combined.concat(normalizeStreams(results[1].value, "TMDB Embed"));
-      if (Array.isArray(results[1].value.streams)) {
-        for (const sItem of results[1].value.streams) {
-          if (Array.isArray(sItem.subtitles) && sItem.subtitles.length > 0) {
-            const existing = subtitleCache.get(`${type}-${id}-${s}-${e}`) || [];
-            subtitleCache.set(`${type}-${id}-${s}-${e}`, [...existing, ...sItem.subtitles]);
-            break;
+    const cineproUrl = isTV ? `${SCRAPER_API_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}` : `${SCRAPER_API_CINEPRO}/v1/movies/${id}`;
+    const tmdbEmbedUrl = isTV ? `${SCRAPER_API_TMDB_EMBED}/api/streams/series/${id}?s=${s}&e=${e}` : `${SCRAPER_API_TMDB_EMBED}/api/streams/movie/${id}`;
+    const cineproTask = fetchWithTimeout(cineproUrl, 7500);
+    const tmdbTask = SCRAPER_API_TMDB_EMBED && SCRAPER_API_TMDB_EMBED !== SCRAPER_API_CINEPRO ? fetchWithTimeout(tmdbEmbedUrl, 1e4) : Promise.resolve(null);
+    let combined = [];
+    const cineproData = await cineproTask.catch(() => null);
+    if (cineproData) {
+      combined = combined.concat(normalizeStreams(cineproData, "CinePro"));
+      if (Array.isArray(cineproData.subtitles)) {
+        subtitleCache.set(`${type}-${id}-${s}-${e}`, cineproData.subtitles);
+      }
+    }
+    if (combined.length >= 15) {
+      const quickTmdb = await Promise.race([
+        tmdbTask,
+        new Promise((resolve) => setTimeout(() => resolve("TIMEOUT"), 1500))
+      ]);
+      if (quickTmdb && quickTmdb !== "TIMEOUT") {
+        const tmdbStreams = normalizeStreams(quickTmdb, "TMDB Embed");
+        combined = combined.concat(tmdbStreams);
+        if (Array.isArray(quickTmdb.streams)) {
+          for (const sItem of quickTmdb.streams) {
+            if (Array.isArray(sItem.subtitles) && sItem.subtitles.length > 0) {
+              subtitleCache.set(`${type}-${id}-${s}-${e}`, sItem.subtitles);
+              break;
+            }
+          }
+        }
+      } else {
+        tmdbTask.then((bgTmdb) => {
+          if (bgTmdb) {
+            const extra = normalizeStreams(bgTmdb, "TMDB Embed");
+            if (extra.length > 0) {
+              rankStreams([...combined, ...extra], isTV).then((merged) => {
+                apiCache.set(cacheKey, {
+                  timestamp: Date.now(),
+                  data: { success: true, count: merged.length, streams: merged }
+                });
+              });
+            }
+          }
+        }).catch(() => {
+        });
+      }
+    } else {
+      const tmdbData = await tmdbTask.catch(() => null);
+      if (tmdbData) {
+        const tmdbStreams = normalizeStreams(tmdbData, "TMDB Embed");
+        combined = combined.concat(tmdbStreams);
+        if (Array.isArray(tmdbData.streams)) {
+          for (const sItem of tmdbData.streams) {
+            if (Array.isArray(sItem.subtitles) && sItem.subtitles.length > 0) {
+              subtitleCache.set(`${type}-${id}-${s}-${e}`, sItem.subtitles);
+              break;
+            }
           }
         }
       }
     }
     if (combined.length === 0) {
       const query = isTV ? `?s=${s}&e=${e}` : "";
-      const gatewayData = await fetchWithRetry(
-        `http://kufenvi0cy9unwwgipjiluoh.62.171.179.144.sslip.io/api/streams/${type}/${id}${query}`,
-        15e3,
-        1
-      );
-      if (gatewayData && Array.isArray(gatewayData.streams) && gatewayData.streams.length > 0) {
-        combined = gatewayData.streams;
+      try {
+        const gatewayData = await fetchWithTimeout(
+          `http://kufenvi0cy9unwwgipjiluoh.62.171.179.144.sslip.io/api/streams/${type}/${id}${query}`,
+          2500
+        );
+        if (gatewayData && Array.isArray(gatewayData.streams) && gatewayData.streams.length > 0) {
+          combined = gatewayData.streams;
+        }
+      } catch {
       }
     }
-    const sorted = rankStreams(combined, isTV);
+    const sorted = await rankStreams(combined, isTV);
     const responseData = {
       success: true,
       count: sorted.length,
       streams: sorted
     };
+    apiCache.set(cacheKey, { timestamp: Date.now(), data: responseData });
     if (sorted.length > 0) {
-      apiCache.set(cacheKey, { timestamp: Date.now(), data: responseData });
       res.setHeader("Cache-Control", "public, max-age=300, s-maxage=600");
     } else {
-      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-      res.setHeader("Pragma", "no-cache");
-      res.setHeader("Expires", "0");
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=30");
     }
     return res.json(responseData);
   } catch {
@@ -719,23 +793,7 @@ app.get("/api/proxy/stream", async (req, res) => {
       }
     }
     let targetUrl = decodeURIComponent(rawUrl);
-    if (targetUrl.includes("/v1/proxy") && targetUrl.includes("data=")) {
-      try {
-        const dummy = targetUrl.startsWith("http") ? targetUrl : `http://127.0.0.1${targetUrl}`;
-        const parsed = new URL(dummy);
-        const dataStr = parsed.searchParams.get("data");
-        if (dataStr) {
-          const payload = JSON.parse(dataStr);
-          if (payload.url) {
-            targetUrl = payload.url;
-            if (payload.headers && typeof payload.headers === "object") {
-              customHeaders = { ...payload.headers, ...customHeaders };
-            }
-          }
-        }
-      } catch (e) {
-      }
-    } else if (targetUrl.startsWith("/v1/proxy")) {
+    if (targetUrl.includes("/v1/proxy")) {
       const queryString = targetUrl.includes("?") ? targetUrl.slice(targetUrl.indexOf("?")) : "";
       targetUrl = `${SCRAPER_API_CINEPRO}/v1/proxy${queryString}`;
     } else if (targetUrl.startsWith("/")) {
@@ -785,9 +843,9 @@ app.get("/api/proxy/stream", async (req, res) => {
       const textPreview = buffer.subarray(0, 200).toString("utf8").trim();
       const isErrorPayload = textPreview.includes("WRONG HASH") || textPreview.includes("Link expired") || textPreview.includes("Invalid link") || textPreview.includes("Forbidden") || textPreview.includes("Access Denied") || textPreview.includes("Cloudflare") || textPreview.startsWith("<!DOCTYPE html") || textPreview.startsWith("<html") || buffer.length < 50;
       if (isErrorPayload) {
-        console.warn(`[Stream Proxy] Upstream returned non-playable error payload: "${textPreview.slice(0, 50)}..."`);
+        console.debug("[Stream Proxy] Discarding invalid/unverified upstream playlist payload");
         res.setHeader("Content-Type", "text/plain");
-        return res.status(502).send(`Upstream returned non-playable payload: ${textPreview.slice(0, 60)}`);
+        return res.status(502).send("Upstream stream is unavailable");
       }
     }
     if (isPlaylist && buffer.length > 0) {
@@ -904,42 +962,31 @@ app.get("/api/proxy/stream", async (req, res) => {
     }
   }
 });
-app.get("/v1/proxy", async (req, res) => {
+app.all(["/v1/proxy", "/v1/proxy/*"], async (req, res) => {
+  if (req.method === "OPTIONS") {
+    res.set("Access-Control-Allow-Origin", "*");
+    res.set("Access-Control-Allow-Headers", "*");
+    res.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+    return res.sendStatus(204);
+  }
   try {
-    let targetUrl = "";
-    let customHeaders = {};
-    if (req.query.data) {
-      try {
-        const payload = JSON.parse(req.query.data);
-        if (payload.url) {
-          targetUrl = payload.url;
-          if (payload.headers && typeof payload.headers === "object") {
-            customHeaders = payload.headers;
-          }
-        }
-      } catch (e) {
-      }
-    }
-    if (!targetUrl) {
-      const queryString = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
-      targetUrl = `${SCRAPER_API_CINEPRO}/v1/proxy${queryString}`;
-    }
+    const queryString = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
+    const targetUrl = `${SCRAPER_API_CINEPRO}/v1/proxy${queryString}`;
     const forwardHeaders = {
-      "User-Agent": customHeaders["User-Agent"] || req.headers["user-agent"] || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+      "User-Agent": req.headers["user-agent"] || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
       Accept: "*/*"
     };
-    if (customHeaders["Referer"]) forwardHeaders["Referer"] = customHeaders["Referer"];
-    if (customHeaders["Origin"]) forwardHeaders["Origin"] = customHeaders["Origin"];
     if (req.headers.range) {
       forwardHeaders["Range"] = req.headers.range;
     }
     const abortController = new AbortController();
-    const abortTimeout = setTimeout(() => abortController.abort(), 2e4);
+    const abortTimeout = setTimeout(() => abortController.abort(), 15e3);
     let upstream;
     try {
       upstream = await fetch(targetUrl, {
         headers: forwardHeaders,
-        signal: abortController.signal
+        signal: abortController.signal,
+        redirect: "follow"
       });
     } finally {
       clearTimeout(abortTimeout);
@@ -960,9 +1007,9 @@ app.get("/v1/proxy", async (req, res) => {
       const textPreview = buffer.subarray(0, 200).toString("utf8").trim();
       const isErrorPayload = textPreview.includes("WRONG HASH") || textPreview.includes("Link expired") || textPreview.includes("Invalid link") || textPreview.includes("Forbidden") || textPreview.includes("Access Denied") || textPreview.includes("Cloudflare") || textPreview.startsWith("<!DOCTYPE html") || textPreview.startsWith("<html") || buffer.length < 50;
       if (isErrorPayload) {
-        console.warn(`[CinePro Relay] Upstream returned non-playable error payload: "${textPreview.slice(0, 50)}..."`);
+        console.debug("[CinePro Relay] Discarding invalid/unverified upstream playlist payload");
         res.setHeader("Content-Type", "text/plain");
-        return res.status(502).send(`Upstream returned non-playable payload: ${textPreview.slice(0, 60)}`);
+        return res.status(502).send("Upstream stream is unavailable");
       }
     }
     if (isPlaylist && buffer.length > 0) {
@@ -982,7 +1029,7 @@ app.get("/v1/proxy", async (req, res) => {
                 } catch (e) {
                 }
                 return `URI="/api/proxy/stream?url=${encodeURIComponent(full)}&headers=${encodeURIComponent(
-                  JSON.stringify(customHeaders)
+                  JSON.stringify(forwardHeaders)
                 )}"`;
               });
             }
@@ -1009,7 +1056,7 @@ app.get("/v1/proxy", async (req, res) => {
             }
           }
           return `/api/proxy/stream?url=${encodeURIComponent(fullUrl)}&headers=${encodeURIComponent(
-            JSON.stringify(customHeaders)
+            JSON.stringify(forwardHeaders)
           )}`;
         }).join("\n");
         res.setHeader("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8");
@@ -1611,6 +1658,19 @@ Sitemap: https://notflixtv.com/sitemap.xml
       appType: "spa"
     });
     app.use(vite.middlewares);
+    app.use("*", async (req, res, next) => {
+      if (req.originalUrl.startsWith("/api") || req.originalUrl.startsWith("/downloads")) {
+        return next();
+      }
+      try {
+        const indexPath = path.resolve(__dirname, "index.html");
+        let template = fs.readFileSync(indexPath, "utf-8");
+        template = await vite.transformIndexHtml(req.originalUrl, template);
+        res.status(200).set({ "Content-Type": "text/html" }).end(template);
+      } catch (e) {
+        next(e);
+      }
+    });
     console.log("\u26A1 Vite dev middleware attached in development mode");
   } else {
     app.use(express.static(distPath));
