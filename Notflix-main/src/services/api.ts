@@ -366,10 +366,10 @@ export async function searchMedia(query: string, typeFilter = 'all', decadeFilte
 export async function fetchTvSeasons(tvId: number): Promise<Season[]> {
   try {
     const data = await tmdbFetch(`/tv/${tvId}`);
+    const validSeasons = (data.seasons || []).filter((s: any) => s.season_number > 0);
     const today = new Date().toISOString().split('T')[0];
-    return (data.seasons || []).filter(
-      (s: any) => s.season_number > 0 && (!s.air_date || s.air_date <= today)
-    );
+    const airedSeasons = validSeasons.filter((s: any) => !s.air_date || s.air_date <= today);
+    return airedSeasons.length > 0 ? airedSeasons : validSeasons;
   } catch (err) {
     console.warn('Failed to fetch TV seasons', err);
     return [];
@@ -380,8 +380,10 @@ export async function fetchTvSeasons(tvId: number): Promise<Season[]> {
 export async function fetchTvEpisodes(tvId: number, seasonNumber: number): Promise<Episode[]> {
   try {
     const data = await tmdbFetch(`/tv/${tvId}/season/${seasonNumber}`);
+    const allEpisodes = data.episodes || [];
     const today = new Date().toISOString().split('T')[0];
-    return (data.episodes || []).filter((ep: any) => !ep.air_date || ep.air_date <= today);
+    const airedEpisodes = allEpisodes.filter((ep: any) => !ep.air_date || ep.air_date <= today);
+    return airedEpisodes.length > 0 ? airedEpisodes : allEpisodes;
   } catch (err) {
     console.warn('Failed to fetch season episodes', err);
     return [];
@@ -409,10 +411,12 @@ export async function fetchMediaDetails(type: 'movie' | 'tv', id: number) {
       .slice(0, 12)
       .map((i: any) => formatMediaItem(i, type));
 
+    const rawImdb = extIds?.imdb_id ? String(extIds.imdb_id).trim() : '';
+
     return {
       cast,
       similar,
-      imdbId: extIds.imdb_id || extIds.tvdb_id,
+      imdbId: rawImdb.startsWith('tt') ? rawImdb : undefined,
     };
   } catch (e) {
     return { cast: [], similar: [], imdbId: undefined };
@@ -459,11 +463,10 @@ function normalizeClientStreams(data: any, apiName: string): StreamSource[] {
     const headers = s?.headers && typeof s.headers === 'object' ? s.headers : null;
 
     // Filter out permanently broken scrapers that cannot be resolved:
-    // (trendimovies, valhallastream/mirage 403s, finepulfe 404s, streamflixserver no DNS)
+    // (trendimovies, valhallastream/mirage 403s, streamflixserver no DNS)
     if (
       urlLower.includes('trendimovies.com') ||
       urlLower.includes('valhallastream.com') ||
-      urlLower.includes('finepulfe.xyz') ||
       urlLower.includes('streamflixserver.site') ||
       urlLower.includes('/tgstream/stream/') ||
       provLower.includes('trendimovies') ||
@@ -620,15 +623,25 @@ export function rankClientStreams(streams: StreamSource[], _isTV?: boolean): Str
   });
 }
 
+// Ephemeral token cache (valid 60 seconds) to avoid redundant network round-trips
+let cachedStreamToken: { token: string; expiresAt: number } | null = null;
+
 // Obtains ephemeral HMAC stream authorization token to prevent scraper hotlinking
 async function getStreamToken(type: string, id: number): Promise<string | null> {
+  const now = Date.now();
+  if (cachedStreamToken && cachedStreamToken.expiresAt > now + 15000) {
+    return cachedStreamToken.token;
+  }
   try {
     const res = await fetch(`/api/security/stream-token?type=${type}&id=${id}`, {
       headers: { Accept: 'application/json' },
     });
     if (res.ok) {
       const data = await res.json();
-      return data.token || null;
+      if (data.token) {
+        cachedStreamToken = { token: data.token, expiresAt: data.expiresAt || (now + 75000) };
+        return data.token;
+      }
     }
   } catch {}
   return null;
@@ -655,7 +668,7 @@ export async function fetchStreams(
     streamClientCache.delete(cacheKey);
   }
 
-  // Obtain short-lived stream authorization token
+  // Obtain short-lived stream authorization token (cached or fast fetch)
   const streamToken = await getStreamToken(type, id);
 
   const queryParts = [];
@@ -670,10 +683,10 @@ export async function fetchStreams(
   }
   const queryString = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
 
-  // 1. Try Backend Server Proxy first with fast timeout (9s) and instant return
+  // 1. Try Backend Server Proxy first with 14s timeout (sufficient for backend parallel scraping)
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 9000);
+    const timer = setTimeout(() => controller.abort(), 14000);
     const res = await fetch(`/api/streams/${type}/${id}${queryString}`, {
       signal: controller.signal,
       headers: streamToken ? { 'X-Stream-Token': streamToken } : {},
@@ -682,16 +695,31 @@ export async function fetchStreams(
     clearTimeout(timer);
     if (res.ok) {
       const data = await res.json();
-      if (Array.isArray(data.streams) && data.streams.length > 0) {
-        streamClientCache.set(cacheKey, { streams: data.streams, timestamp: Date.now() });
-        return data.streams;
+      const streams = Array.isArray(data.streams) ? data.streams : [];
+      if (streams.length > 0) {
+        streamClientCache.set(cacheKey, { streams, timestamp: Date.now() });
       }
+      // If backend responded with valid status (even if 0 streams), trust the backend response immediately!
+      // This eliminates the 6.5s mixed-content fallback loop that caused 30+ second delays.
+      return streams;
     }
-  } catch (err) {
-    console.warn('[Stream Fetch] Backend resolution issue or timeout, proceeding to direct scrapers:', err);
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      console.warn('[Stream Fetch] Backend resolution reached 14s timeout');
+    } else {
+      console.warn('[Stream Fetch] Backend unreachable, checking direct fallback:', err?.message || err);
+    }
   }
 
-  // 2. Direct Scraper Fallback with 6.5s timeout
+  // 2. Direct Scraper Fallback (ONLY used if backend is completely offline and not blocked by Mixed Content)
+  const isHttpsOrigin = typeof window !== 'undefined' && window.location.protocol === 'https:';
+  const scraperIsHttp = SCRAPER_CINEPRO.startsWith('http://');
+
+  // Browsers unconditionally block HTTP scraper fetch from HTTPS page with Mixed Content Error
+  if (isHttpsOrigin && scraperIsHttp) {
+    return [];
+  }
+
   try {
     const isTV = type === 'tv';
     const cineproUrl = isTV
@@ -700,7 +728,7 @@ export async function fetchStreams(
 
     const fetchDirect = (url: string) => {
       const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 6500);
+      const t = setTimeout(() => ctrl.abort(), 4500);
       return fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } })
         .then((r) => {
           clearTimeout(t);
@@ -712,115 +740,357 @@ export async function fetchStreams(
         });
     };
 
-    const tasks: Promise<any>[] = [fetchDirect(cineproUrl)];
-
-    if (SCRAPER_TMDB_EMBED && SCRAPER_TMDB_EMBED !== SCRAPER_CINEPRO) {
-      const tmdbEmbedUrl = isTV
-        ? `${SCRAPER_TMDB_EMBED}/api/streams/series/${id}?s=${s}&e=${e}`
-        : `${SCRAPER_TMDB_EMBED}/api/streams/movie/${id}`;
-      tasks.push(fetchDirect(tmdbEmbedUrl));
-    }
-
-    const results = await Promise.allSettled(tasks);
-    let combined: StreamSource[] = [];
-
-    // CinePro streams
-    if (results[0].status === 'fulfilled' && results[0].value) {
-      combined = combined.concat(normalizeClientStreams(results[0].value, 'CinePro'));
-    }
-
-    // TMDB Embed Scraper streams
-    if (results[1] && results[1].status === 'fulfilled' && results[1].value) {
-      combined = combined.concat(normalizeClientStreams(results[1].value, 'TMDB Embed'));
-    }
-
-    if (combined.length > 0) {
-      const sorted = rankClientStreams(combined, isTV);
-      streamClientCache.set(cacheKey, { streams: sorted, timestamp: Date.now() });
-      return sorted;
+    const directData = await fetchDirect(cineproUrl);
+    if (directData) {
+      const combined = normalizeClientStreams(directData, 'CinePro');
+      if (combined.length > 0) {
+        const sorted = rankClientStreams(combined, isTV);
+        streamClientCache.set(cacheKey, { streams: sorted, timestamp: Date.now() });
+        return sorted;
+      }
     }
   } catch {}
 
-  // Return empty list if no valid media streams found (iframe fallbacks completely removed)
   return [];
 }
 
-// Subtitles Finder with Direct Client Fallback (Drag & Drop Compatible)
+const CLIENT_SUB_LANG_MAP: Record<string, string> = {
+  en: 'English',
+  eng: 'English',
+  english: 'English',
+  ar: 'Arabic',
+  ara: 'Arabic',
+  arabic: 'Arabic',
+  'اَلْعَرَبِيَّةُ': 'Arabic',
+  'العربية': 'Arabic',
+  es: 'Spanish',
+  spa: 'Spanish',
+  spl: 'Spanish',
+  spn: 'Spanish',
+  spanish: 'Spanish',
+  espanol: 'Spanish',
+  'español': 'Spanish',
+  fr: 'French',
+  fre: 'French',
+  fra: 'French',
+  french: 'French',
+  francais: 'French',
+  'français': 'French',
+  de: 'German',
+  ger: 'German',
+  deu: 'German',
+  german: 'German',
+  deutsch: 'German',
+  it: 'Italian',
+  ita: 'Italian',
+  italian: 'Italian',
+  italiano: 'Italian',
+  pt: 'Portuguese',
+  por: 'Portuguese',
+  portuguese: 'Portuguese',
+  pb: 'Portuguese (Brazil)',
+  pob: 'Portuguese (Brazil)',
+  'pt-br': 'Portuguese (Brazil)',
+  'portuguese (br)': 'Portuguese (Brazil)',
+  ru: 'Russian',
+  rus: 'Russian',
+  russian: 'Russian',
+  tr: 'Turkish',
+  tur: 'Turkish',
+  turkish: 'Turkish',
+  hi: 'Hindi',
+  hin: 'Hindi',
+  hindi: 'Hindi',
+  id: 'Indonesian',
+  ind: 'Indonesian',
+  indonesian: 'Indonesian',
+  ms: 'Malay',
+  may: 'Malay',
+  msa: 'Malay',
+  malay: 'Malay',
+  vi: 'Vietnamese',
+  vie: 'Vietnamese',
+  vietnamese: 'Vietnamese',
+  th: 'Thai',
+  tha: 'Thai',
+  thai: 'Thai',
+  zh: 'Chinese',
+  zho: 'Chinese',
+  chi: 'Chinese',
+  chinese: 'Chinese',
+  zht: 'Chinese (Traditional)',
+  ja: 'Japanese',
+  jpn: 'Japanese',
+  japanese: 'Japanese',
+  ko: 'Korean',
+  kor: 'Korean',
+  korean: 'Korean',
+  nl: 'Dutch',
+  nld: 'Dutch',
+  dut: 'Dutch',
+  dutch: 'Dutch',
+  pl: 'Polish',
+  pol: 'Polish',
+  polish: 'Polish',
+  sv: 'Swedish',
+  swe: 'Swedish',
+  swedish: 'Swedish',
+  da: 'Danish',
+  dan: 'Danish',
+  danish: 'Danish',
+  fi: 'Finnish',
+  fin: 'Finnish',
+  finnish: 'Finnish',
+  no: 'Norwegian',
+  nor: 'Norwegian',
+  nb: 'Norwegian',
+  norwegian: 'Norwegian',
+  he: 'Hebrew',
+  heb: 'Hebrew',
+  hebrew: 'Hebrew',
+  el: 'Greek',
+  ell: 'Greek',
+  gre: 'Greek',
+  greek: 'Greek',
+  hu: 'Hungarian',
+  hun: 'Hungarian',
+  hungarian: 'Hungarian',
+  cs: 'Czech',
+  cze: 'Czech',
+  ces: 'Czech',
+  czech: 'Czech',
+  ro: 'Romanian',
+  ron: 'Romanian',
+  rum: 'Romanian',
+  romanian: 'Romanian',
+  bg: 'Bulgarian',
+  bul: 'Bulgarian',
+  bulgarian: 'Bulgarian',
+  uk: 'Ukrainian',
+  ukr: 'Ukrainian',
+  ukrainian: 'Ukrainian',
+  hr: 'Croatian',
+  hrv: 'Croatian',
+  croatian: 'Croatian',
+  sr: 'Serbian',
+  srp: 'Serbian',
+  serbian: 'Serbian',
+  sl: 'Slovenian',
+  slv: 'Slovenian',
+  slovenian: 'Slovenian',
+  sk: 'Slovak',
+  slo: 'Slovak',
+  slk: 'Slovak',
+  slovak: 'Slovak',
+  fa: 'Persian',
+  per: 'Persian',
+  fas: 'Persian',
+  persian: 'Persian',
+  bn: 'Bengali',
+  ben: 'Bengali',
+  bengali: 'Bengali',
+  ur: 'Urdu',
+  urd: 'Urdu',
+  urdu: 'Urdu',
+  ta: 'Tamil',
+  tam: 'Tamil',
+  tamil: 'Tamil',
+  te: 'Telugu',
+  tel: 'Telugu',
+  telugu: 'Telugu',
+  ml: 'Malayalam',
+  mal: 'Malayalam',
+  malayalam: 'Malayalam',
+  tl: 'Filipino',
+  tgl: 'Filipino',
+  fil: 'Filipino',
+  fl: 'Filipino',
+  filipino: 'Filipino',
+  et: 'Estonian',
+  est: 'Estonian',
+  estonian: 'Estonian',
+  mk: 'Macedonian',
+  mac: 'Macedonian',
+  mkd: 'Macedonian',
+  macedonian: 'Macedonian',
+  is: 'Icelandic',
+  ice: 'Icelandic',
+  isl: 'Icelandic',
+  icelandic: 'Icelandic',
+};
+
+const PRIORITY_SUB_LANGUAGES = [
+  'English',
+  'Arabic',
+  'Spanish',
+  'French',
+  'German',
+  'Portuguese (Brazil)',
+  'Portuguese',
+  'Italian',
+  'Russian',
+  'Turkish',
+  'Hindi',
+  'Indonesian',
+  'Malay',
+  'Dutch',
+  'Polish',
+  'Chinese',
+  'Japanese',
+  'Korean',
+];
+
+function normalizeClientSubtitleLang(raw: any): string {
+  const candidates = [raw?.lang, raw?.label, raw?.language, raw?.LanguageName, raw?.SubLanguageID];
+  for (const cand of candidates) {
+    if (!cand || typeof cand !== 'string') continue;
+    const cleaned = cand.trim();
+    if (!cleaned || cleaned.toLowerCase() === 'unknown') continue;
+    const lower = cleaned.toLowerCase();
+    if (CLIENT_SUB_LANG_MAP[lower]) return CLIENT_SUB_LANG_MAP[lower];
+    const base = lower.split(/[-_(\[]/)[0].trim();
+    if (base && CLIENT_SUB_LANG_MAP[base]) return CLIENT_SUB_LANG_MAP[base];
+    if (cleaned.length > 2) return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+  }
+  return 'English';
+}
+
+function sortSubtitleGroups(groups: Record<string, SubtitleTrack[]>): Record<string, SubtitleTrack[]> {
+  const sortedKeys = Object.keys(groups).sort((a, b) => {
+    const idxA = PRIORITY_SUB_LANGUAGES.indexOf(a);
+    const idxB = PRIORITY_SUB_LANGUAGES.indexOf(b);
+    if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+    if (idxA !== -1) return -1;
+    if (idxB !== -1) return 1;
+    return a.localeCompare(b);
+  });
+
+  const sorted: Record<string, SubtitleTrack[]> = {};
+  for (const k of sortedKeys) {
+    sorted[k] = groups[k];
+  }
+  return sorted;
+}
+
+// Subtitles Finder with Multi-Source Backend Aggregator + Direct Client Fallback
 export async function fetchSubtitles(
   imdbId: string | undefined,
   tmdbId: number,
   type: 'movie' | 'tv',
   s = 1,
-  e = 1
+  e = 1,
+  title = ''
 ): Promise<Record<string, SubtitleTrack[]>> {
-  if (!imdbId) return {};
-
   const params = new URLSearchParams({
     type,
     s: s.toString(),
     e: e.toString(),
     tmdbId: tmdbId.toString(),
-    imdbId,
   });
+  if (imdbId && String(imdbId).startsWith('tt')) {
+    params.set('imdbId', String(imdbId));
+  }
+  if (title) {
+    params.set('title', title);
+  }
 
-  // 1. Try Backend Proxy
+  const groups: Record<string, SubtitleTrack[]> = {};
+  const seenUrls = new Set<string>();
+
+  const appendSubTrack = (sub: any, useBackendProxy: boolean) => {
+    if (!sub || !sub.url) return;
+    const rawUrl = String(sub.url).trim();
+    if (!rawUrl || seenUrls.has(rawUrl)) return;
+    seenUrls.add(rawUrl);
+
+    const lang = normalizeClientSubtitleLang(sub);
+    if (!groups[lang]) groups[lang] = [];
+    groups[lang].push({
+      id: String(sub.id || `${lang}-${groups[lang].length + 1}`),
+      lang,
+      url:
+        rawUrl.startsWith('/api') || !useBackendProxy
+          ? rawUrl
+          : `/api/subtitles/proxy?url=${encodeURIComponent(rawUrl)}`,
+    });
+  };
+
+  let resolvedImdbId = imdbId && String(imdbId).startsWith('tt') ? String(imdbId) : '';
+
+  // 1. Try Backend Multi-Source Aggregator
   try {
     const res = await fetch(`/api/subtitles/search?${params.toString()}`);
     if (res.ok) {
       const data = await res.json();
-      const groups: Record<string, SubtitleTrack[]> = {};
-      if (Array.isArray(data.subtitles)) {
-        data.subtitles.forEach((sub: any) => {
-          const lang = sub.lang || 'Unknown';
-          if (!groups[lang]) groups[lang] = [];
-          groups[lang].push({
-            id: sub.id,
-            lang,
-            url: sub.url.startsWith('/api')
-              ? sub.url
-              : `/api/subtitles/proxy?url=${encodeURIComponent(sub.url)}`,
-          });
-        });
-        return groups;
+      if (data?.imdbId && String(data.imdbId).startsWith('tt')) {
+        resolvedImdbId = String(data.imdbId);
+      }
+      if (Array.isArray(data?.subtitles) && data.subtitles.length > 0) {
+        data.subtitles.forEach((sub: any) => appendSubTrack(sub, true));
       }
     }
   } catch {
-    // Backend unavailable, fallback to direct OpenSubtitles
+    // Backend unavailable, continue to direct client fallback
   }
 
-  // 2. Direct OpenSubtitles Fallback
-  try {
-    const subUrl =
-      type === 'tv'
-        ? `https://opensubtitles-v3.strem.io/subtitles/series/${imdbId}:${s}:${e}.json`
-        : `https://opensubtitles-v3.strem.io/subtitles/movie/${imdbId}.json`;
+  // 2. Direct Client-Side OpenSubtitles Fallback (also runs if backend returned 0 subtitles)
+  if (Object.keys(groups).length === 0) {
+    try {
+      if (!resolvedImdbId && tmdbId) {
+        const ext = await tmdbFetch(`/${type}/${tmdbId}/external_ids`).catch(() => null);
+        if (ext?.imdb_id && String(ext.imdb_id).startsWith('tt')) {
+          resolvedImdbId = String(ext.imdb_id).trim();
+        }
+      }
+      if (resolvedImdbId) {
+        const subUrl =
+          type === 'tv'
+            ? `https://opensubtitles-v3.strem.io/subtitles/series/${resolvedImdbId}:${s}:${e}.json`
+            : `https://opensubtitles-v3.strem.io/subtitles/movie/${resolvedImdbId}.json`;
 
-    const res = await fetch(subUrl);
-    if (!res.ok) return {};
-    const data = await res.json();
-    const groups: Record<string, SubtitleTrack[]> = {};
-    if (Array.isArray(data.subtitles)) {
-      data.subtitles.forEach((sub: any) => {
-        const lang = sub.lang || 'Unknown';
-        if (!groups[lang]) groups[lang] = [];
-        groups[lang].push({
-          id: sub.id,
-          lang,
-          url: sub.url,
-        });
-      });
+        const res = await fetch(subUrl);
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data?.subtitles)) {
+            data.subtitles.forEach((sub: any) => appendSubTrack(sub, true));
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to fetch subtitles directly:', err);
     }
-    return groups;
-  } catch (err) {
-    console.warn('Failed to fetch subtitles directly:', err);
-    return {};
+  }
+
+  return sortSubtitleGroups(groups);
+}
+
+// Unique Per-Device ID for isolated user playback/history/watchlist persistence
+export function getDeviceId(): string {
+  try {
+    let deviceId = localStorage.getItem('notflix_device_id');
+    if (!deviceId || deviceId.length < 8) {
+      const randomPart =
+        typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID().replace(/[^a-zA-Z0-9_-]/g, '')
+          : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}_${Math.random().toString(36).slice(2, 12)}`;
+      deviceId = `dev_${randomPart}`;
+      localStorage.setItem('notflix_device_id', deviceId);
+    }
+    return deviceId;
+  } catch {
+    return `dev_temp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
   }
 }
 
-// User Data Sync API
+// User Data Sync API (Strictly Per-Device Isolated)
 export async function fetchUserData(): Promise<UserData | null> {
   try {
-    const res = await fetch('/api/user/data');
+    const deviceId = getDeviceId();
+    const res = await fetch(`/api/user/data?deviceId=${encodeURIComponent(deviceId)}`, {
+      headers: {
+        'X-Device-Id': deviceId,
+      },
+    });
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -830,10 +1100,17 @@ export async function fetchUserData(): Promise<UserData | null> {
 
 export async function syncUserData(data: Partial<UserData>): Promise<boolean> {
   try {
+    const deviceId = getDeviceId();
     const res = await fetch('/api/user/sync', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Device-Id': deviceId,
+      },
+      body: JSON.stringify({
+        ...data,
+        deviceId,
+      }),
     });
     return res.ok;
   } catch {

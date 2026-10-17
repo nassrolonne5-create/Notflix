@@ -4,6 +4,8 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import zlib from 'zlib';
+import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
@@ -23,16 +25,80 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
+// Disable ETag to prevent browsers (especially Chrome) from serving stale 304 Not Modified HTML after deployments
+app.set('etag', false);
+
+const SERVER_BOOT_TIME = Date.now().toString();
+const DEPLOYMENT_VERSION =
+  process.env.COOLIFY_COMMIT_SHA ||
+  process.env.SOURCE_COMMIT ||
+  process.env.GIT_COMMIT_SHA ||
+  process.env.BUILD_ID ||
+  SERVER_BOOT_TIME;
+
+let isShuttingDown = false;
+let activeHttpServer: any = null;
+
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
+// Global Deployment Transition & Anti-Stale-Cache Guard
+app.use((req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('X-Deployment-Version', DEPLOYMENT_VERSION);
+
+  // When container is stopping during an update, force Chrome/proxies to drop Keep-Alive connections immediately
+  if (isShuttingDown) {
+    res.setHeader('Connection', 'close');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+  }
+
+  // Expire any stale proxy/sticky-session cookies on HTML navigation requests so Traefik never pins a browser to a dead container
+  const accept = (req.headers.accept || '').toLowerCase();
+  const isHtmlNav =
+    req.method === 'GET' &&
+    !req.path.startsWith('/api/') &&
+    !req.path.startsWith('/assets/') &&
+    !req.path.startsWith('/v1/') &&
+    (accept.includes('text/html') || req.path === '/' || req.path.startsWith('/admin'));
+
+  if (isHtmlNav && req.headers.cookie) {
+    try {
+      const cookiePairs = req.headers.cookie.split(';');
+      const clearHeaders: string[] = [];
+      for (const pair of cookiePairs) {
+        const eqIdx = pair.indexOf('=');
+        const name = (eqIdx > -1 ? pair.slice(0, eqIdx) : pair).trim();
+        if (name && /^[a-zA-Z0-9_.-]+$/.test(name)) {
+          clearHeaders.push(`${name}=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0`);
+        }
+      }
+      if (clearHeaders.length > 0) {
+        res.setHeader('Set-Cookie', clearHeaders);
+      }
+    } catch {}
+  }
+
+  next();
+});
 
 // TMDB Backend Configuration
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const DEFAULT_TMDB_KEY = '8265bd1679663a7ea12ac168da84d2e8';
 const TMDB_API_KEY = process.env.TMDB_API_KEY || DEFAULT_TMDB_KEY;
 
-const SCRAPER_API_CINEPRO = (process.env.SCRAPER_CINEPRO_URL || 'http://62.171.179.144:3001').replace(/^https:\/\//i, 'http://');
-const SCRAPER_API_TMDB_EMBED = (process.env.SCRAPER_TMDB_EMBED_URL || process.env.SCRAPER_PRIMARY_URL || 'http://62.171.179.144:3005').replace(/^https:\/\//i, 'http://');
+const DEFAULT_SCRAPER_CINEPRO_URL = (process.env.SCRAPER_CINEPRO_URL || 'http://62.171.179.144:3001')
+  .replace(/^https:\/\//i, 'http://')
+  .replace(/\/+$/, '');
+const DEFAULT_SCRAPER_TMDB_EMBED_URL = (
+  process.env.SCRAPER_TMDB_EMBED_URL ||
+  process.env.SCRAPER_PRIMARY_URL ||
+  'http://62.171.179.144:3005'
+)
+  .replace(/^https:\/\//i, 'http://')
+  .replace(/\/+$/, '');
+const DEFAULT_SCRAPER_GATEWAY_URL = (
+  process.env.SCRAPER_GATEWAY_URL || 'http://kufenvi0cy9unwwgipjiluoh.62.171.179.144.sslip.io'
+).replace(/\/+$/, '');
 
 // Allow connecting to upstream scrapers using HTTPS with self-signed / internal certificates
 if (!process.env.NODE_TLS_REJECT_UNAUTHORIZED) {
@@ -187,6 +253,20 @@ const antiScraperMiddleware = (req: Request, res: Response, next: NextFunction) 
   const userAgent = (req.headers['user-agent'] as string) || '';
   const now = Date.now();
 
+  // Allow loopback and internal Docker / Coolify / Traefik healthcheck probes
+  const cleanIp = ip.replace(/^::ffff:/i, '');
+  if (
+    cleanIp === '127.0.0.1' ||
+    cleanIp === '::1' ||
+    cleanIp === 'localhost' ||
+    cleanIp.startsWith('127.') ||
+    cleanIp.startsWith('10.') ||
+    cleanIp.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(cleanIp)
+  ) {
+    return next();
+  }
+
   // 1. Check if IP is actively banned (e.g. from honeypot trap)
   const banExpiry = bannedIps.get(ip);
   if (banExpiry && now < banExpiry) {
@@ -242,9 +322,10 @@ const antiScraperMiddleware = (req: Request, res: Response, next: NextFunction) 
 
 app.use('/api', antiScraperMiddleware);
 
-// Persistent User Data storage
+// Persistent Per-Device User Data storage (strictly isolated by deviceId)
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
-const USER_DATA_FILE = path.join(DATA_DIR, 'userdata.json');
+const USER_PROFILES_FILE = path.join(DATA_DIR, 'user_profiles.json');
+const LEGACY_GLOBAL_USER_DATA_FILE = path.join(DATA_DIR, 'userdata.json');
 
 if (!fs.existsSync(DATA_DIR)) {
   try {
@@ -252,6 +333,241 @@ if (!fs.existsSync(DATA_DIR)) {
   } catch (e) {
     console.error('Error creating data directory:', e);
   }
+}
+
+// Clean up any legacy global userdata.json so global watch positions never leak across users
+if (fs.existsSync(LEGACY_GLOBAL_USER_DATA_FILE)) {
+  try {
+    fs.unlinkSync(LEGACY_GLOBAL_USER_DATA_FILE);
+  } catch (e) {
+    console.warn('Could not remove legacy global userdata.json:', e);
+  }
+}
+
+// ============================================================================
+// Dynamic Scraper Server Configuration Subsystem (Admin Editable + Persistent)
+// ============================================================================
+export type ScraperServerId = 'cinepro' | 'tmdb_embed' | 'gateway_fallback';
+
+export interface ScraperEndpointConfig {
+  id: ScraperServerId;
+  name: string;
+  role: string;
+  protocol: 'http' | 'https';
+  host: string;
+  port: string;
+  url: string;
+  defaultUrl: string;
+}
+
+export interface ScraperConfigStore {
+  scrapers: Record<ScraperServerId, ScraperEndpointConfig>;
+  updatedAt: number;
+  isCustom: boolean;
+}
+
+const SCRAPERS_CONFIG_FILE = path.join(DATA_DIR, 'scrapers.json');
+const SCRAPERS_BACKUP_MIRROR_FILE = '/var/tmp/notflix_scrapers_backup.json';
+
+function parseUrlIntoEndpoint(
+  id: ScraperServerId,
+  name: string,
+  role: string,
+  rawInput: { url?: string; protocol?: string; host?: string; port?: string } | string,
+  defaultUrl: string
+): ScraperEndpointConfig {
+  let candidateUrl = '';
+  if (typeof rawInput === 'string') {
+    candidateUrl = rawInput.trim();
+  } else if (rawInput && typeof rawInput === 'object') {
+    if (rawInput.host && String(rawInput.host).trim()) {
+      const proto = String(rawInput.protocol || 'http')
+        .toLowerCase()
+        .replace(/[^a-z]/g, '') === 'https'
+        ? 'https'
+        : 'http';
+      let cleanHost = String(rawInput.host)
+        .trim()
+        .replace(/^https?:\/\//i, '')
+        .replace(/\/.*$/, '');
+      let cleanPort = rawInput.port !== undefined ? String(rawInput.port).trim().replace(/[^0-9]/g, '') : '';
+      if (cleanHost.includes(':')) {
+        const [hPart, pPart] = cleanHost.split(':');
+        cleanHost = hPart;
+        if (!cleanPort && pPart) cleanPort = pPart.replace(/[^0-9]/g, '');
+      }
+      candidateUrl = `${proto}://${cleanHost}${cleanPort ? ':' + cleanPort : ''}`;
+    } else if (rawInput.url && String(rawInput.url).trim()) {
+      candidateUrl = String(rawInput.url).trim();
+    }
+  }
+
+  if (!candidateUrl) {
+    candidateUrl = defaultUrl;
+  }
+  if (!/^https?:\/\//i.test(candidateUrl)) {
+    candidateUrl = `http://${candidateUrl}`;
+  }
+  candidateUrl = candidateUrl.replace(/\/+$/, '');
+
+  try {
+    const parsed = new URL(candidateUrl);
+    const protocol: 'http' | 'https' = parsed.protocol === 'https:' ? 'https' : 'http';
+    const host = parsed.hostname;
+    const port = parsed.port || '';
+    const pathname = parsed.pathname && parsed.pathname !== '/' ? parsed.pathname.replace(/\/+$/, '') : '';
+    const normalizedUrl = `${protocol}://${host}${port ? ':' + port : ''}${pathname}`;
+    return {
+      id,
+      name,
+      role,
+      protocol,
+      host,
+      port,
+      url: normalizedUrl,
+      defaultUrl,
+    };
+  } catch {
+    const fallbackParsed = new URL(defaultUrl);
+    return {
+      id,
+      name,
+      role,
+      protocol: fallbackParsed.protocol === 'https:' ? 'https' : 'http',
+      host: fallbackParsed.hostname,
+      port: fallbackParsed.port || '',
+      url: defaultUrl,
+      defaultUrl,
+    };
+  }
+}
+
+function getDefaultScraperConfigStore(): ScraperConfigStore {
+  return {
+    scrapers: {
+      cinepro: parseUrlIntoEndpoint(
+        'cinepro',
+        'CinePro Primary Scraper',
+        'Primary high-speed stream & subtitle extractor (/v1/movies & /v1/tv)',
+        DEFAULT_SCRAPER_CINEPRO_URL,
+        DEFAULT_SCRAPER_CINEPRO_URL
+      ),
+      tmdb_embed: parseUrlIntoEndpoint(
+        'tmdb_embed',
+        'TMDB Embed Scraper',
+        'Secondary multi-provider stream extractor (/api/streams/movie & /series)',
+        DEFAULT_SCRAPER_TMDB_EMBED_URL,
+        DEFAULT_SCRAPER_TMDB_EMBED_URL
+      ),
+      gateway_fallback: parseUrlIntoEndpoint(
+        'gateway_fallback',
+        'Coolify Gateway Fallback',
+        'Failover Coolify gateway mirror when primary scrapers return 0 streams',
+        DEFAULT_SCRAPER_GATEWAY_URL,
+        DEFAULT_SCRAPER_GATEWAY_URL
+      ),
+    },
+    updatedAt: 0,
+    isCustom: false,
+  };
+}
+
+function readScraperConfigFromDisk(): ScraperConfigStore {
+  const defaults = getDefaultScraperConfigStore();
+  const candidatePaths = [
+    SCRAPERS_CONFIG_FILE,
+    SCRAPERS_BACKUP_MIRROR_FILE,
+    '/data/scrapers.json',
+    '/app/data/scrapers.json',
+    path.join(process.cwd(), 'data', 'scrapers.json'),
+    path.join(__dirname, 'data', 'scrapers.json'),
+  ];
+
+  let newestStore: ScraperConfigStore | null = null;
+
+  for (const candidate of candidatePaths) {
+    try {
+      if (fs.existsSync(candidate)) {
+        const raw = fs.readFileSync(candidate, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.scrapers && typeof parsed.scrapers === 'object') {
+          const updatedAt = typeof parsed.updatedAt === 'number' ? parsed.updatedAt : Date.now();
+          if (!newestStore || updatedAt >= newestStore.updatedAt) {
+            const cinepro = parseUrlIntoEndpoint(
+              'cinepro',
+              defaults.scrapers.cinepro.name,
+              defaults.scrapers.cinepro.role,
+              parsed.scrapers.cinepro || DEFAULT_SCRAPER_CINEPRO_URL,
+              DEFAULT_SCRAPER_CINEPRO_URL
+            );
+            const tmdb_embed = parseUrlIntoEndpoint(
+              'tmdb_embed',
+              defaults.scrapers.tmdb_embed.name,
+              defaults.scrapers.tmdb_embed.role,
+              parsed.scrapers.tmdb_embed || DEFAULT_SCRAPER_TMDB_EMBED_URL,
+              DEFAULT_SCRAPER_TMDB_EMBED_URL
+            );
+            const gateway_fallback = parseUrlIntoEndpoint(
+              'gateway_fallback',
+              defaults.scrapers.gateway_fallback.name,
+              defaults.scrapers.gateway_fallback.role,
+              parsed.scrapers.gateway_fallback || DEFAULT_SCRAPER_GATEWAY_URL,
+              DEFAULT_SCRAPER_GATEWAY_URL
+            );
+
+            const isCustom =
+              cinepro.url !== DEFAULT_SCRAPER_CINEPRO_URL ||
+              tmdb_embed.url !== DEFAULT_SCRAPER_TMDB_EMBED_URL ||
+              gateway_fallback.url !== DEFAULT_SCRAPER_GATEWAY_URL ||
+              Boolean(parsed.isCustom);
+
+            newestStore = {
+              scrapers: { cinepro, tmdb_embed, gateway_fallback },
+              updatedAt,
+              isCustom,
+            };
+          }
+        }
+      }
+    } catch (e) {
+      console.warn(`Could not read scraper config candidate ${candidate}:`, e);
+    }
+  }
+
+  return newestStore || defaults;
+}
+
+let scraperConfigStore: ScraperConfigStore = readScraperConfigFromDisk();
+
+function saveScraperConfigToDiskSync(store: ScraperConfigStore) {
+  try {
+    const serialized = JSON.stringify(store, null, 2);
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(SCRAPERS_CONFIG_FILE, serialized, 'utf-8');
+    try {
+      fs.writeFileSync(SCRAPERS_BACKUP_MIRROR_FILE, serialized, 'utf-8');
+    } catch {}
+  } catch (err) {
+    console.error('Error saving scraper configuration to disk:', err);
+  }
+}
+
+if (scraperConfigStore.isCustom) {
+  saveScraperConfigToDiskSync(scraperConfigStore);
+}
+
+function getCineproUrl(): string {
+  return scraperConfigStore.scrapers.cinepro.url;
+}
+
+function getTmdbEmbedUrl(): string {
+  return scraperConfigStore.scrapers.tmdb_embed.url;
+}
+
+function getGatewayFallbackUrl(): string {
+  return scraperConfigStore.scrapers.gateway_fallback.url;
 }
 
 interface UserData {
@@ -276,31 +592,68 @@ const defaultUserData: UserData = {
   },
 };
 
-function readUserData(): UserData {
-  try {
-    if (fs.existsSync(USER_DATA_FILE)) {
-      const content = fs.readFileSync(USER_DATA_FILE, 'utf-8');
-      const parsed = JSON.parse(content);
-      return {
-        ...defaultUserData,
-        ...parsed,
-        settings: {
-          ...defaultUserData.settings,
-          ...(parsed.settings || {}),
-        },
-      };
-    }
-  } catch (err) {
-    console.warn('Could not read user data file, returning defaults', err);
-  }
-  return defaultUserData;
+function sanitizeDeviceId(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (trimmed.length < 8 || trimmed.length > 128) return null;
+  if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) return null;
+  return trimmed;
 }
 
-function writeUserData(data: UserData) {
+function readAllUserProfiles(): Record<string, UserData & { updatedAt?: number }> {
   try {
-    fs.writeFileSync(USER_DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
+    if (fs.existsSync(USER_PROFILES_FILE)) {
+      const content = fs.readFileSync(USER_PROFILES_FILE, 'utf-8');
+      const parsed = JSON.parse(content);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    }
   } catch (err) {
-    console.error('Failed to write user data file:', err);
+    console.warn('Could not read user profiles file, returning empty map', err);
+  }
+  return {};
+}
+
+function readUserData(deviceId: string | null): UserData {
+  if (!deviceId) return defaultUserData;
+  const profiles = readAllUserProfiles();
+  const parsed = profiles[deviceId];
+  if (!parsed) return defaultUserData;
+  return {
+    watchlist: Array.isArray(parsed.watchlist) ? parsed.watchlist : [],
+    favorites: Array.isArray(parsed.favorites) ? parsed.favorites : [],
+    history: Array.isArray(parsed.history) ? parsed.history : [],
+    playbackPosition:
+      parsed.playbackPosition && typeof parsed.playbackPosition === 'object'
+        ? parsed.playbackPosition
+        : {},
+    settings: {
+      ...defaultUserData.settings,
+      ...(parsed.settings || {}),
+    },
+  };
+}
+
+function writeUserData(deviceId: string | null, data: UserData) {
+  if (!deviceId) return;
+  try {
+    const profiles = readAllUserProfiles();
+    profiles[deviceId] = {
+      ...data,
+      updatedAt: Date.now(),
+    };
+    // Cap stored device profiles to 2000 most recently active devices
+    const keys = Object.keys(profiles);
+    if (keys.length > 2000) {
+      keys
+        .sort((a, b) => (profiles[a].updatedAt || 0) - (profiles[b].updatedAt || 0))
+        .slice(0, keys.length - 2000)
+        .forEach((k) => delete profiles[k]);
+    }
+    fs.writeFileSync(USER_PROFILES_FILE, JSON.stringify(profiles), 'utf-8');
+  } catch (err) {
+    console.error('Failed to write user profiles file:', err);
   }
 }
 
@@ -379,8 +732,8 @@ function isSafe(item: any): boolean {
 // ==========================================
 // 1. HEALTH CHECK
 // ==========================================
-app.get(['/api/health', '/health', '/healthz'], (req: Request, res: Response) => {
-  res.json({
+app.all(['/api/health', '/health', '/healthz'], (req: Request, res: Response) => {
+  res.status(200).json({
     status: 'ok',
     service: 'Notflix Backend',
     timestamp: new Date().toISOString(),
@@ -481,8 +834,338 @@ async function fetchWithRetry(url: string, ms = 25000, maxRetries = 1): Promise<
   return null;
 }
 
-// In-memory cache for cinepro subtitles
+// In-memory cache for aggregated subtitles per title/episode
 const subtitleCache = new Map<string, any[]>();
+
+const LANGUAGE_NAME_MAP: Record<string, string> = {
+  en: 'English',
+  eng: 'English',
+  english: 'English',
+  ar: 'Arabic',
+  ara: 'Arabic',
+  arabic: 'Arabic',
+  'اَلْعَرَبِيَّةُ': 'Arabic',
+  'العربية': 'Arabic',
+  es: 'Spanish',
+  spa: 'Spanish',
+  spl: 'Spanish',
+  spn: 'Spanish',
+  spanish: 'Spanish',
+  espanol: 'Spanish',
+  'español': 'Spanish',
+  castilian: 'Spanish',
+  castellano: 'Spanish',
+  fr: 'French',
+  fre: 'French',
+  fra: 'French',
+  french: 'French',
+  francais: 'French',
+  'français': 'French',
+  de: 'German',
+  ger: 'German',
+  deu: 'German',
+  german: 'German',
+  deutsch: 'German',
+  it: 'Italian',
+  ita: 'Italian',
+  italian: 'Italian',
+  italiano: 'Italian',
+  pt: 'Portuguese',
+  por: 'Portuguese',
+  portuguese: 'Portuguese',
+  'português': 'Portuguese',
+  portugues: 'Portuguese',
+  pb: 'Portuguese (Brazil)',
+  pob: 'Portuguese (Brazil)',
+  'pt-br': 'Portuguese (Brazil)',
+  'portuguese (br)': 'Portuguese (Brazil)',
+  'portuguese-br': 'Portuguese (Brazil)',
+  'brazilian portuguese': 'Portuguese (Brazil)',
+  ru: 'Russian',
+  rus: 'Russian',
+  russian: 'Russian',
+  'русский': 'Russian',
+  tr: 'Turkish',
+  tur: 'Turkish',
+  turkish: 'Turkish',
+  'türkçe': 'Turkish',
+  turkce: 'Turkish',
+  hi: 'Hindi',
+  hin: 'Hindi',
+  hindi: 'Hindi',
+  'हिन्दी': 'Hindi',
+  id: 'Indonesian',
+  ind: 'Indonesian',
+  indonesian: 'Indonesian',
+  'bahasa indonesia': 'Indonesian',
+  ms: 'Malay',
+  may: 'Malay',
+  msa: 'Malay',
+  malay: 'Malay',
+  melayu: 'Malay',
+  vi: 'Vietnamese',
+  vie: 'Vietnamese',
+  vietnamese: 'Vietnamese',
+  'tiếng việt': 'Vietnamese',
+  th: 'Thai',
+  tha: 'Thai',
+  thai: 'Thai',
+  'ภาษาไทย': 'Thai',
+  zh: 'Chinese',
+  zho: 'Chinese',
+  chi: 'Chinese',
+  zhc: 'Chinese',
+  chinese: 'Chinese',
+  '中文': 'Chinese',
+  '简体中文': 'Chinese',
+  zht: 'Chinese (Traditional)',
+  'zh-tw': 'Chinese (Traditional)',
+  '繁體中文': 'Chinese (Traditional)',
+  ja: 'Japanese',
+  jpn: 'Japanese',
+  japanese: 'Japanese',
+  '日本語': 'Japanese',
+  ko: 'Korean',
+  kor: 'Korean',
+  korean: 'Korean',
+  '한국어': 'Korean',
+  nl: 'Dutch',
+  nld: 'Dutch',
+  dut: 'Dutch',
+  dutch: 'Dutch',
+  nederlands: 'Dutch',
+  pl: 'Polish',
+  pol: 'Polish',
+  polish: 'Polish',
+  polski: 'Polish',
+  sv: 'Swedish',
+  swe: 'Swedish',
+  swedish: 'Swedish',
+  svenska: 'Swedish',
+  da: 'Danish',
+  dan: 'Danish',
+  danish: 'Danish',
+  dansk: 'Danish',
+  fi: 'Finnish',
+  fin: 'Finnish',
+  finnish: 'Finnish',
+  suomi: 'Finnish',
+  no: 'Norwegian',
+  nor: 'Norwegian',
+  nb: 'Norwegian',
+  nob: 'Norwegian',
+  nn: 'Norwegian',
+  norwegian: 'Norwegian',
+  norsk: 'Norwegian',
+  he: 'Hebrew',
+  heb: 'Hebrew',
+  hebrew: 'Hebrew',
+  'עברית': 'Hebrew',
+  el: 'Greek',
+  ell: 'Greek',
+  gre: 'Greek',
+  greek: 'Greek',
+  'ελληνικά': 'Greek',
+  hu: 'Hungarian',
+  hun: 'Hungarian',
+  hungarian: 'Hungarian',
+  magyar: 'Hungarian',
+  cs: 'Czech',
+  cze: 'Czech',
+  ces: 'Czech',
+  czech: 'Czech',
+  'čeština': 'Czech',
+  ro: 'Romanian',
+  ron: 'Romanian',
+  rum: 'Romanian',
+  romanian: 'Romanian',
+  'română': 'Romanian',
+  bg: 'Bulgarian',
+  bul: 'Bulgarian',
+  bulgarian: 'Bulgarian',
+  uk: 'Ukrainian',
+  ukr: 'Ukrainian',
+  ukrainian: 'Ukrainian',
+  hr: 'Croatian',
+  hrv: 'Croatian',
+  croatian: 'Croatian',
+  hrvatski: 'Croatian',
+  sr: 'Serbian',
+  srp: 'Serbian',
+  scc: 'Serbian',
+  serbian: 'Serbian',
+  sl: 'Slovenian',
+  slv: 'Slovenian',
+  slovenian: 'Slovenian',
+  sk: 'Slovak',
+  slo: 'Slovak',
+  slk: 'Slovak',
+  slovak: 'Slovak',
+  fa: 'Persian',
+  per: 'Persian',
+  fas: 'Persian',
+  persian: 'Persian',
+  farsi: 'Persian',
+  'فارسی': 'Persian',
+  bn: 'Bengali',
+  ben: 'Bengali',
+  bengali: 'Bengali',
+  'বাংলা': 'Bengali',
+  ur: 'Urdu',
+  urd: 'Urdu',
+  urdu: 'Urdu',
+  ta: 'Tamil',
+  tam: 'Tamil',
+  tamil: 'Tamil',
+  te: 'Telugu',
+  tel: 'Telugu',
+  telugu: 'Telugu',
+  ml: 'Malayalam',
+  mal: 'Malayalam',
+  malayalam: 'Malayalam',
+  pa: 'Punjabi',
+  pan: 'Punjabi',
+  panjabi: 'Punjabi',
+  punjabi: 'Punjabi',
+  tl: 'Filipino',
+  tgl: 'Filipino',
+  fil: 'Filipino',
+  fl: 'Filipino',
+  tagalog: 'Filipino',
+  filipino: 'Filipino',
+  et: 'Estonian',
+  est: 'Estonian',
+  estonian: 'Estonian',
+  lv: 'Latvian',
+  lav: 'Latvian',
+  latvian: 'Latvian',
+  lt: 'Lithuanian',
+  lit: 'Lithuanian',
+  lithuanian: 'Lithuanian',
+  mk: 'Macedonian',
+  mac: 'Macedonian',
+  mkd: 'Macedonian',
+  macedonian: 'Macedonian',
+  sq: 'Albanian',
+  alb: 'Albanian',
+  sqi: 'Albanian',
+  albanian: 'Albanian',
+  bs: 'Bosnian',
+  bos: 'Bosnian',
+  bosnian: 'Bosnian',
+  is: 'Icelandic',
+  ice: 'Icelandic',
+  isl: 'Icelandic',
+  icelandic: 'Icelandic',
+  sw: 'Swahili',
+  swa: 'Swahili',
+  swahili: 'Swahili',
+  ha: 'Hausa',
+  hau: 'Hausa',
+  hausa: 'Hausa',
+};
+
+function normalizeSubtitleLanguage(raw: any): string {
+  const candidates = [
+    raw?.LanguageName,
+    raw?.label,
+    raw?.lang,
+    raw?.language,
+    raw?.SubLanguageID,
+    raw?.ISO639,
+    raw?.srclang,
+  ];
+
+  for (const cand of candidates) {
+    if (!cand || typeof cand !== 'string') continue;
+    const cleaned = cand.trim();
+    if (!cleaned || cleaned.toLowerCase() === 'unknown') continue;
+    const lower = cleaned.toLowerCase();
+    if (LANGUAGE_NAME_MAP[lower]) {
+      return LANGUAGE_NAME_MAP[lower];
+    }
+    // Strip region suffixes or parenthetical tags like "en-US" or "English [CC]"
+    const baseCode = lower.split(/[-_(\[]/)[0].trim();
+    if (baseCode && LANGUAGE_NAME_MAP[baseCode]) {
+      return LANGUAGE_NAME_MAP[baseCode];
+    }
+    if (cleaned.length > 2) {
+      return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+    }
+  }
+
+  // Fallback: inspect URL filename (e.g. .../English.vtt or .en.srt)
+  const urlStr = String(raw?.url || raw?.SubDownloadLink || '');
+  const fileMatch = urlStr.match(/\/([A-Za-z]+)\.(?:vtt|srt)(?:\?|$)/i);
+  if (fileMatch && fileMatch[1]) {
+    const lower = fileMatch[1].toLowerCase();
+    if (LANGUAGE_NAME_MAP[lower]) return LANGUAGE_NAME_MAP[lower];
+  }
+
+  return 'English';
+}
+
+function harvestScraperSubtitles(cacheKey: string, data: any, sourceName: string) {
+  if (!data) return;
+  const collected: Array<{ id: string; lang: string; url: string; source: string }> = [];
+
+  const pushSubItem = (sub: any, providerLabel: string) => {
+    if (!sub) return;
+    const subUrl = sub.url || sub.file || sub.src || sub.SubDownloadLink;
+    if (!subUrl || typeof subUrl !== 'string' || !subUrl.startsWith('http')) return;
+    const lang = normalizeSubtitleLanguage(sub);
+    collected.push({
+      id: sub.id || `${providerLabel}-${lang}-${subUrl.slice(-24)}`,
+      lang,
+      url: subUrl,
+      source: providerLabel,
+    });
+  };
+
+  if (Array.isArray(data.subtitles)) {
+    for (const sub of data.subtitles) {
+      pushSubItem(sub, sourceName);
+    }
+  }
+  if (Array.isArray(data.captions)) {
+    for (const sub of data.captions) {
+      pushSubItem(sub, sourceName);
+    }
+  }
+
+  const streamLists = [data.streams, data.sources, data.results, data.data];
+  for (const list of streamLists) {
+    if (!Array.isArray(list)) continue;
+    for (const sItem of list) {
+      if (!sItem) continue;
+      const prov =
+        (sItem.provider && typeof sItem.provider === 'object' ? sItem.provider.name : sItem.provider) ||
+        sItem.server ||
+        sourceName;
+      if (Array.isArray(sItem.subtitles)) {
+        for (const sub of sItem.subtitles) {
+          pushSubItem(sub, String(prov));
+        }
+      }
+      if (Array.isArray(sItem.captions)) {
+        for (const sub of sItem.captions) {
+          pushSubItem(sub, String(prov));
+        }
+      }
+    }
+  }
+
+  if (collected.length === 0) return;
+
+  const existing = subtitleCache.get(cacheKey) || [];
+  const mergedMap = new Map<string, any>();
+  for (const item of [...existing, ...collected]) {
+    if (item && item.url && !mergedMap.has(item.url)) {
+      mergedMap.set(item.url, item);
+    }
+  }
+  subtitleCache.set(cacheKey, Array.from(mergedMap.values()));
+}
 
 function normalizeStreams(data: any, apiName: string) {
   let list: any[] = [];
@@ -501,14 +1184,16 @@ function normalizeStreams(data: any, apiName: string) {
           ? rawProvider.name || rawProvider.id || apiName
           : rawProvider || s.source || s.name || apiName;
 
+      const activeCineproUrl = getCineproUrl();
+      const activeTmdbEmbedUrl = getTmdbEmbedUrl();
       let streamUrl = s?.url || s?.stream_url || s?.link || s?.playlist || '';
-      streamUrl = streamUrl.replace(/http:\/\/localhost:(3000|10000)/g, SCRAPER_API_CINEPRO);
-      streamUrl = streamUrl.replace(/http:\/\/localhost:3005/g, SCRAPER_API_TMDB_EMBED);
+      streamUrl = streamUrl.replace(/http:\/\/localhost:(3000|10000)/g, activeCineproUrl);
+      streamUrl = streamUrl.replace(/http:\/\/localhost:3005/g, activeTmdbEmbedUrl);
       streamUrl = streamUrl.replace(/&amp;/g, '&');
 
       // Relay CinePro proxy through our local HTTPS server to prevent Mixed Content blocking (HTTP or HTTPS)
       streamUrl = streamUrl.replace(/^https?:\/\/62\.171\.179\.144(?::\d+)?\/v1\/proxy/i, '/v1/proxy');
-      const cineproOrigin = SCRAPER_API_CINEPRO.replace(/\/+$/, '');
+      const cineproOrigin = activeCineproUrl.replace(/\/+$/, '');
       if (streamUrl.startsWith(`${cineproOrigin}/v1/proxy`)) {
         streamUrl = streamUrl.slice(cineproOrigin.length);
       }
@@ -526,16 +1211,9 @@ function normalizeStreams(data: any, apiName: string) {
         return null;
       }
 
-      // Filter out permanently broken scrapers that cannot be resolved:
-      // (trendimovies, valhallastream/mirage 403s, finepulfe 404s, streamflixserver no DNS)
+      // Filter out permanently broken dead domains with no DNS
       if (
-        urlLower.includes('trendimovies.com') ||
-        urlLower.includes('valhallastream.com') ||
-        urlLower.includes('finepulfe.xyz') ||
-        urlLower.includes('streamflixserver.site') ||
-        urlLower.includes('/tgstream/stream/') ||
-        provLower.includes('trendimovies') ||
-        provLower.includes('valhallastream')
+        urlLower.includes('streamflixserver.site')
       ) {
         return null;
       }
@@ -655,17 +1333,29 @@ function normalizeStreams(data: any, apiName: string) {
     .filter((s): s is NonNullable<typeof s> => Boolean(s && s.url && (s.url.startsWith('http') || s.url.startsWith('/v1/proxy') || s.url.startsWith('/api/proxy'))));
 }
 
-// Process streams without server prioritization: preserve natural discovery order as resolved by scrapers,
-// with fast parallel health validation to ensure Server 1 is alive and starts playback instantly.
+function getStreamDeduplicationKey(s: any): string {
+  if (!s || !s.url) return '';
+  const url = String(s.url || '').trim();
+  const rawProv = s.provider || s.source || s.name || '';
+  const prov =
+    typeof rawProv === 'object' && rawProv !== null
+      ? String(rawProv.name || rawProv.id || '').trim().toLowerCase()
+      : String(rawProv).trim().toLowerCase();
+  const q = String(s.quality || 'AUTO').trim().toUpperCase();
+  const cleanUrl = url.toLowerCase().split('?')[0].trim();
+  return `${prov}_${q}_${cleanUrl}`;
+}
+
+// Process streams preserving natural discovery order without server bias or blocking network probes
 async function rankStreams(streams: any[], _isTV = false): Promise<any[]> {
   if (!Array.isArray(streams) || streams.length === 0) return [];
 
-  // 1. Deduplicate streams by normalized URL to avoid identical redundant mirrors
+  // Deduplicate exact same provider + quality + URL duplicates
   const seenUrls = new Set<string>();
   const uniqueStreams: any[] = [];
   for (const s of streams) {
     if (!s || !s.url) continue;
-    const urlKey = (s.url || '').split('?')[0].trim().toLowerCase();
+    const urlKey = getStreamDeduplicationKey(s);
     if (!seenUrls.has(urlKey)) {
       seenUrls.add(urlKey);
       uniqueStreams.push(s);
@@ -674,68 +1364,8 @@ async function rankStreams(streams: any[], _isTV = false): Promise<any[]> {
 
   if (uniqueStreams.length === 0) return [];
 
-  // 2. Ultra-fast parallel health probe on top candidate streams (max 8)
-  // Ensures candidate servers are responsive in under 850ms without server brand bias
-  const candidates = uniqueStreams.slice(0, 8);
-  const remaining = uniqueStreams.slice(8);
-
-  const probeResults = await Promise.allSettled(
-    candidates.map(async (s) => {
-      let probeUrl = s.url;
-      if (probeUrl.startsWith('/')) {
-        probeUrl = `http://127.0.0.1:3000${probeUrl}`;
-      }
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 850);
-      try {
-        const headers: Record<string, string> = {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-          Range: 'bytes=0-150',
-          ...(s.headers || {}),
-        };
-        const pRes = await fetch(probeUrl, {
-          method: 'GET',
-          headers,
-          signal: ctrl.signal,
-          redirect: 'follow',
-        });
-        clearTimeout(timer);
-        if (!pRes.ok && pRes.status !== 206) return false;
-        const textSlice = await pRes.text().catch(() => '');
-        if (
-          textSlice.includes('WRONG HASH') ||
-          textSlice.includes('Link expired') ||
-          textSlice.includes('Invalid link') ||
-          textSlice.includes('Forbidden') ||
-          textSlice.includes('Access Denied') ||
-          textSlice.startsWith('<!DOCTYPE html') ||
-          textSlice.startsWith('<html')
-        ) {
-          return false;
-        }
-        return true;
-      } catch {
-        clearTimeout(timer);
-        return false;
-      }
-    })
-  );
-
-  const fastHealthy: any[] = [];
-  const otherCandidates: any[] = [];
-  candidates.forEach((s, idx) => {
-    if (probeResults[idx].status === 'fulfilled' && probeResults[idx].value) {
-      fastHealthy.push(s);
-    } else {
-      otherCandidates.push(s);
-    }
-  });
-
-  // Healthy responsive streams are placed at the front so Server 1 connects instantly
-  const streamlined = [...fastHealthy, ...otherCandidates, ...remaining].slice(0, 20);
-
-  return streamlined.map((s, idx) => {
+  // Keep ALL discovered streams (restores full 40-70+ server counts!)
+  return uniqueStreams.map((s, idx) => {
     const anonymousName = `Server ${idx + 1}`;
     const cleaned = { ...s };
     delete cleaned.rawTitle;
@@ -854,68 +1484,101 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
 
     const cacheKey = `streams-${type}-${id}-${s}-${e}`;
     const cached = apiCache.get(cacheKey);
-    if (!forceRefresh && cached && Date.now() - cached.timestamp < 15 * 60 * 1000 && Array.isArray(cached.data?.streams) && cached.data.streams.length > 0) {
-      res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=600');
-      return res.json(cached.data);
+    // Use 15m TTL for valid streams, and 35s negative cache for empty results to prevent duplicate scraper hammering
+    if (!forceRefresh && cached) {
+      const isZero = Array.isArray(cached.data?.streams) && cached.data.streams.length === 0;
+      const ttl = isZero ? 35 * 1000 : 15 * 60 * 1000;
+      if (Date.now() - cached.timestamp < ttl) {
+        if (!isZero) {
+          res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=600');
+        } else {
+          res.setHeader('Cache-Control', 'no-cache');
+        }
+        return res.json(cached.data);
+      }
     }
 
+    const activeCineproBase = getCineproUrl();
+    const activeTmdbEmbedBase = getTmdbEmbedUrl();
+    const activeGatewayBase = getGatewayFallbackUrl();
+
     const cineproUrl = isTV
-      ? `${SCRAPER_API_CINEPRO}/v1/tv/${id}/seasons/${s}/episodes/${e}`
-      : `${SCRAPER_API_CINEPRO}/v1/movies/${id}`;
+      ? `${activeCineproBase}/v1/tv/${id}/seasons/${s}/episodes/${e}`
+      : `${activeCineproBase}/v1/movies/${id}`;
+
+    const tmdbEmbedUrl = isTV
+      ? `${activeTmdbEmbedBase}/api/streams/series/${id}?s=${s}&e=${e}`
+      : `${activeTmdbEmbedBase}/api/streams/movie/${id}`;
+
+    // Parallel Dual-Engine Scraping: CinePro + TMDB Embed
+    const cineproTask = fetchWithTimeout(cineproUrl, 7500);
+    const tmdbTask =
+      activeTmdbEmbedBase && activeTmdbEmbedBase !== activeCineproBase
+        ? fetchWithTimeout(tmdbEmbedUrl, 10000)
+        : Promise.resolve(null);
 
     let combined: any[] = [];
 
-    // Step 1: Query updated CinePro engine first (runs 27 providers in parallel)
-    // CinePro returns in 200ms - 4.5s. When CinePro succeeds, RETURN IMMEDIATELY!
-    try {
-      const cineproData = await fetchWithTimeout(cineproUrl, 7500);
-      if (cineproData) {
-        combined = normalizeStreams(cineproData, 'CinePro');
-        if (Array.isArray(cineproData.subtitles)) {
-          subtitleCache.set(`${type}-${id}-${s}-${e}`, cineproData.subtitles);
-        }
-      }
-    } catch (err: any) {
-      console.warn('CinePro primary resolution error or timeout:', err?.message || err);
+    // Wait for CinePro first (typically returns in 0.3s - 3.5s with 30-50 streams)
+    const subKey = `${type}-${id}-${s}-${e}`;
+    const cineproData = await cineproTask.catch(() => null);
+    if (cineproData) {
+      combined = combined.concat(normalizeStreams(cineproData, 'CinePro'));
+      harvestScraperSubtitles(subKey, cineproData, 'CinePro');
     }
 
-    // Step 2: Fallback to TMDB Embed ONLY if CinePro returned 0 streams
-    // This removes the 25-second wait blocking viewers when CinePro already resolved!
-    if (combined.length === 0) {
-      let tmdbEmbedUrl = '';
-      if (SCRAPER_API_TMDB_EMBED && SCRAPER_API_TMDB_EMBED !== SCRAPER_API_CINEPRO) {
-        tmdbEmbedUrl = isTV
-          ? `${SCRAPER_API_TMDB_EMBED}/api/streams/series/${id}?s=${s}&e=${e}`
-          : `${SCRAPER_API_TMDB_EMBED}/api/streams/movie/${id}`;
-        try {
-          const tmdbData = await fetchWithTimeout(tmdbEmbedUrl, 4000);
-          if (tmdbData) {
-            combined = normalizeStreams(tmdbData, 'TMDB Embed');
-            if (Array.isArray(tmdbData.streams)) {
-              for (const sItem of tmdbData.streams) {
-                if (Array.isArray(sItem.subtitles) && sItem.subtitles.length > 0) {
-                  subtitleCache.set(`${type}-${id}-${s}-${e}`, sItem.subtitles);
-                  break;
-                }
+    // If CinePro already returned a healthy pool of streams (>= 15), give TMDB Embed a 1.5s grace period
+    // so we don't block playback for 12+ seconds; if TMDB Embed responds in that window, merge immediately!
+    if (combined.length >= 15) {
+      const quickTmdb: any = await Promise.race([
+        tmdbTask,
+        new Promise((resolve) => setTimeout(() => resolve('TIMEOUT'), 1500)),
+      ]);
+      if (quickTmdb && quickTmdb !== 'TIMEOUT') {
+        const tmdbStreams = normalizeStreams(quickTmdb, 'TMDB Embed');
+        combined = combined.concat(tmdbStreams);
+        harvestScraperSubtitles(subKey, quickTmdb, 'TMDB Embed');
+      } else {
+        // Background merge: when TMDB Embed finishes in background, merge streams AND subtitles into cache
+        tmdbTask
+          .then((bgTmdb) => {
+            if (bgTmdb) {
+              harvestScraperSubtitles(subKey, bgTmdb, 'TMDB Embed');
+              const extra = normalizeStreams(bgTmdb, 'TMDB Embed');
+              if (extra.length > 0) {
+                rankStreams([...combined, ...extra], isTV).then((merged) => {
+                  apiCache.set(cacheKey, {
+                    timestamp: Date.now(),
+                    data: { success: true, count: merged.length, streams: merged },
+                  });
+                });
               }
             }
-          }
-        } catch {}
+          })
+          .catch(() => {});
       }
+    } else {
+      // If CinePro had few or 0 streams, wait fully for TMDB Embed (up to 10s)
+      const tmdbData = await tmdbTask.catch(() => null);
+      if (tmdbData) {
+        const tmdbStreams = normalizeStreams(tmdbData, 'TMDB Embed');
+        combined = combined.concat(tmdbStreams);
+        harvestScraperSubtitles(subKey, tmdbData, 'TMDB Embed');
+      }
+    }
 
-      // Step 3: Coolify gateway mirror fallback if still 0
-      if (combined.length === 0) {
-        const query = isTV ? `?s=${s}&e=${e}` : '';
-        try {
-          const gatewayData = await fetchWithTimeout(
-            `http://kufenvi0cy9unwwgipjiluoh.62.171.179.144.sslip.io/api/streams/${type}/${id}${query}`,
-            4000
-          );
-          if (gatewayData && Array.isArray(gatewayData.streams) && gatewayData.streams.length > 0) {
-            combined = gatewayData.streams;
-          }
-        } catch {}
-      }
+    // Step 3: Coolify gateway mirror fallback if still 0
+    if (combined.length === 0 && activeGatewayBase) {
+      const query = isTV ? `?s=${s}&e=${e}` : '';
+      try {
+        const gatewayData = await fetchWithTimeout(
+          `${activeGatewayBase}/api/streams/${type}/${id}${query}`,
+          2500
+        );
+        if (gatewayData && Array.isArray(gatewayData.streams) && gatewayData.streams.length > 0) {
+          combined = gatewayData.streams;
+        }
+      } catch {}
     }
 
     // Rank candidate streams without server prioritizing, deduplicated, fast-verified and capped
@@ -927,15 +1590,13 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
       streams: sorted,
     };
 
+    // Store in cache (valid for 15m if streams found, 35s negative cache if 0 found)
+    apiCache.set(cacheKey, { timestamp: Date.now(), data: responseData });
+
     if (sorted.length > 0) {
-      apiCache.set(cacheKey, { timestamp: Date.now(), data: responseData });
       res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=600');
     } else {
-      // CRITICAL: NEVER cache 0-stream responses!
-      // Prevents Cloudflare and browsers from caching empty results for famous titles
-      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-      res.setHeader('Pragma', 'no-cache');
-      res.setHeader('Expires', '0');
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=30');
     }
 
     return res.json(responseData);
@@ -946,44 +1607,204 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
 });
 
 // ==========================================
-// 4. SUBTITLES SEARCH & PROXY CONVERTER
+// 4. MULTI-SOURCE SUBTITLES AGGREGATOR & PROXY CONVERTER
 // ==========================================
+async function fetchJsonWithHeaders(
+  url: string,
+  headers: Record<string, string>,
+  timeoutMs = 6000
+): Promise<any> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+        ...headers,
+      },
+    });
+    clearTimeout(timer);
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    clearTimeout(timer);
+    return null;
+  }
+}
+
 app.get('/api/subtitles/search', async (req: Request, res: Response) => {
   try {
-    const imdbId = req.query.imdbId as string;
-    const tmdbId = req.query.tmdbId as string;
-    const type = (req.query.type as string) || 'movie';
-    const s = req.query.s || '1';
-    const e = req.query.e || '1';
+    let imdbId = String(req.query.imdbId || '').trim();
+    const tmdbId = String(req.query.tmdbId || '').trim();
+    const rawTitle = String(req.query.title || '').trim();
+    const type = (req.query.type as string) === 'tv' ? 'tv' : 'movie';
+    const s = String(req.query.s || '1');
+    const e = String(req.query.e || '1');
+    const subKey = `${type}-${tmdbId}-${s}-${e}`;
 
-    let cachedList: any[] = [];
-    if (tmdbId && subtitleCache.has(`${type}-${tmdbId}-${s}-${e}`)) {
-      cachedList = subtitleCache.get(`${type}-${tmdbId}-${s}-${e}`) || [];
+    const browserHeaders = {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    };
+
+    // 1. If imdbId is missing or not a valid tt* IMDb ID, resolve external_ids & title from TMDB automatically
+    let resolvedTitle = rawTitle;
+    if (tmdbId && (!imdbId || !imdbId.startsWith('tt') || !resolvedTitle)) {
+      try {
+        const [extData, detailsData] = await Promise.all([
+          !imdbId || !imdbId.startsWith('tt')
+            ? fetchJsonWithHeaders(
+                `${TMDB_BASE}/${type}/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`,
+                browserHeaders,
+                3500
+              )
+            : Promise.resolve(null),
+          !resolvedTitle
+            ? fetchJsonWithHeaders(
+                `${TMDB_BASE}/${type}/${tmdbId}?api_key=${TMDB_API_KEY}&language=en-US`,
+                browserHeaders,
+                3500
+              )
+            : Promise.resolve(null),
+        ]);
+        if (extData?.imdb_id && String(extData.imdb_id).startsWith('tt')) {
+          imdbId = String(extData.imdb_id).trim();
+        }
+        if (detailsData) {
+          resolvedTitle = String(detailsData.title || detailsData.name || detailsData.original_title || detailsData.original_name || '').trim();
+        }
+      } catch {}
     }
 
-    if (cachedList.length > 0) {
-      return res.json({
-        subtitles: cachedList.map((c: any) => ({
-          id: c.label || c.url,
-          lang: c.label || 'Unknown',
-          url: c.url,
-        })),
+    const cleanImdbId = imdbId.startsWith('tt') ? imdbId : '';
+    const cleanImdbDigits = cleanImdbId.replace(/^tt/i, '');
+
+    // 2. Query OpenSubtitles v3 (Stremio) + OpenSubtitles Official REST API in parallel
+    const stremioUrl = cleanImdbId
+      ? type === 'tv'
+        ? `https://opensubtitles-v3.strem.io/subtitles/series/${cleanImdbId}:${s}:${e}.json`
+        : `https://opensubtitles-v3.strem.io/subtitles/movie/${cleanImdbId}.json`
+      : '';
+
+    const osRestImdbUrl = cleanImdbDigits
+      ? type === 'tv'
+        ? `https://rest.opensubtitles.org/search/episode-${e}/imdbid-${cleanImdbDigits}/season-${s}`
+        : `https://rest.opensubtitles.org/search/imdbid-${cleanImdbDigits}`
+      : '';
+
+    // Also probe CinePro if subtitleCache doesn't have entries for this title yet
+    const cineproSubProbePromise =
+      tmdbId && !subtitleCache.has(subKey)
+        ? fetchJsonWithHeaders(
+            type === 'tv'
+              ? `${getCineproUrl()}/v1/tv/${tmdbId}/seasons/${s}/episodes/${e}`
+              : `${getCineproUrl()}/v1/movies/${tmdbId}`,
+            browserHeaders,
+            4500
+          ).then((cpData) => {
+            if (cpData) harvestScraperSubtitles(subKey, cpData, 'CinePro');
+            return null;
+          })
+        : Promise.resolve(null);
+
+    const [stremioData, osRestData] = await Promise.all([
+      stremioUrl ? fetchJsonWithHeaders(stremioUrl, browserHeaders, 5500) : Promise.resolve(null),
+      osRestImdbUrl
+        ? fetchJsonWithHeaders(osRestImdbUrl, { 'User-Agent': 'TemporaryUserAgent' }, 5500)
+        : Promise.resolve(null),
+      cineproSubProbePromise,
+    ]);
+
+    // 3. Fallback to Title Query search on OpenSubtitles REST API if IMDb ID search returned 0 results
+    let osRestTitleData: any = null;
+    const hasStremioSubs = Array.isArray(stremioData?.subtitles) && stremioData.subtitles.length > 0;
+    const hasOsRestSubs = Array.isArray(osRestData) && osRestData.length > 0;
+
+    if (!hasStremioSubs && !hasOsRestSubs && resolvedTitle) {
+      const encodedQuery = encodeURIComponent(resolvedTitle.toLowerCase());
+      const osQueryUrl =
+        type === 'tv'
+          ? `https://rest.opensubtitles.org/search/episode-${e}/query-${encodedQuery}/season-${s}`
+          : `https://rest.opensubtitles.org/search/query-${encodedQuery}`;
+      osRestTitleData = await fetchJsonWithHeaders(
+        osQueryUrl,
+        { 'User-Agent': 'TemporaryUserAgent' },
+        5000
+      );
+    }
+
+    // 4. Aggregate & Normalize Subtitles from ALL Sources (Scraper Cache + OpenSubtitles v3 + OpenSubtitles REST)
+    const aggregated: Array<{
+      id: string;
+      lang: string;
+      url: string;
+      source?: string;
+    }> = [];
+    const seenUrls = new Set<string>();
+
+    const addSub = (id: string, rawLangObj: any, url: string, source: string) => {
+      if (!url || typeof url !== 'string' || !url.startsWith('http')) return;
+      // Deprioritize or skip known rate-limited NetMirror links if other sources exist
+      const normUrl = url.trim();
+      if (seenUrls.has(normUrl)) return;
+      seenUrls.add(normUrl);
+
+      const lang = normalizeSubtitleLanguage(rawLangObj);
+      aggregated.push({
+        id: id || `${source}-${lang}-${aggregated.length}`,
+        lang,
+        url: normUrl,
+        source,
       });
+    };
+
+    // Source A: Cached Scraper Subtitles (CinePro / Wyzie / OneTouchTV / CastleTV) - non-NetMirror first
+    const cachedScraperSubs = (tmdbId && subtitleCache.get(subKey)) || [];
+    for (const c of cachedScraperSubs) {
+      if (c?.url && !String(c.url).includes('net27.cc')) {
+        addSub(c.id || c.label || c.url, c, c.url, c.source || 'Scraper');
+      }
     }
 
-    if (!imdbId) {
-      return res.json({ subtitles: [] });
+    // Source B: OpenSubtitles Stremio v3 (UTF-8 direct SRTs)
+    if (Array.isArray(stremioData?.subtitles)) {
+      for (const sub of stremioData.subtitles) {
+        if (sub?.url) {
+          addSub(String(sub.id || sub.url), sub, sub.url, 'OpenSubtitles v3');
+        }
+      }
     }
 
-    let url = '';
-    if (type === 'tv') {
-      url = `https://opensubtitles-v3.strem.io/subtitles/series/${imdbId}:${s}:${e}.json`;
-    } else {
-      url = `https://opensubtitles-v3.strem.io/subtitles/movie/${imdbId}.json`;
+    // Source C: OpenSubtitles Official REST API (IMDb match + Title match)
+    const restCombined = [
+      ...(Array.isArray(osRestData) ? osRestData : []),
+      ...(Array.isArray(osRestTitleData) ? osRestTitleData : []),
+    ];
+    for (const item of restCombined) {
+      if (!item) continue;
+      // Prefer Stremio UTF-8 direct mirror via IDSubtitleFile if available, plus SubDownloadLink (.gz)
+      if (item.IDSubtitleFile) {
+        const directUtf8Url = `https://subs5.strem.io/en/download/subencoding-stremio-utf8/src-api/file/${item.IDSubtitleFile}`;
+        addSub(`os-file-${item.IDSubtitleFile}`, item, directUtf8Url, 'OpenSubtitles');
+      }
+      if (item.SubDownloadLink) {
+        addSub(`os-gz-${item.IDSubtitleFile || ''}`, item, item.SubDownloadLink, 'OpenSubtitles GZ');
+      }
     }
 
-    const data = await fetchWithTimeout(url, 6000).catch(() => ({ subtitles: [] }));
-    return res.json(data);
+    // Source D: Remaining cached scraper subtitles (e.g. NetMirror fallback)
+    for (const c of cachedScraperSubs) {
+      if (c?.url && String(c.url).includes('net27.cc')) {
+        addSub(c.id || c.label || c.url, c, c.url, c.source || 'NetMirror');
+      }
+    }
+
+    return res.json({
+      subtitles: aggregated,
+      imdbId: cleanImdbId || undefined,
+      count: aggregated.length,
+    });
   } catch (err: any) {
     console.warn('Subtitles search error:', err?.message || err);
     return res.json({ subtitles: [] });
@@ -997,21 +1818,83 @@ app.get('/api/subtitles/proxy', async (req: Request, res: Response) => {
       return res.status(400).send('url query param required');
     }
 
-    const response = await fetch(subUrl);
+    const isOpenSubDl = subUrl.includes('opensubtitles.org');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+
+    let response: globalThis.Response;
+    try {
+      response = await fetch(subUrl, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': isOpenSubDl
+            ? 'TemporaryUserAgent'
+            : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          Accept: '*/*',
+        },
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
     if (!response.ok) {
       return res.status(response.status).send('Failed to fetch subtitle from upstream');
     }
 
-    let text = await response.text();
-    // Convert SRT to WebVTT if needed
+    const arrayBuffer = await response.arrayBuffer();
+    let buffer = Buffer.from(arrayBuffer);
+
+    // Automatically gunzip if upstream returned a .gz compressed subtitle file (e.g. dl.opensubtitles.org)
+    if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
+      try {
+        buffer = zlib.gunzipSync(buffer);
+      } catch (gzErr) {
+        console.warn('Subtitle gunzip error:', gzErr);
+      }
+    }
+
+    // Decode text handling UTF-8 BOM, UTF-16 LE/BE, or custom senc encoding query parameter
+    let text = '';
+    const sencMatch = subUrl.match(/[?&]senc=([^&]+)/i);
+    if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+      text = new TextDecoder('utf-16le').decode(buffer.subarray(2));
+    } else if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+      text = new TextDecoder('utf-16be').decode(buffer.subarray(2));
+    } else if (sencMatch && sencMatch[1]) {
+      try {
+        text = new TextDecoder(sencMatch[1].toLowerCase()).decode(buffer);
+      } catch {
+        text = buffer.toString('utf8');
+      }
+    } else {
+      text = buffer.toString('utf8');
+    }
+
+    // Strip UTF-8 BOM if present and normalize CRLF line endings
+    text = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+    // Convert SRT to WebVTT and normalize short MM:SS.mmm timestamps to HH:MM:SS.mmm
     if (!text.trim().startsWith('WEBVTT')) {
       text =
         'WEBVTT\n\n' +
         text
           .replace(/\{\\([ibu])\}/g, '<$1>')
           .replace(/\{\\\/([ibu])\}/g, '</$1>')
+          .replace(/\{\\[^}]*\}/g, '')
           .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+    } else {
+      text = text
+        .replace(/\{\\([ibu])\}/g, '<$1>')
+        .replace(/\{\\\/([ibu])\}/g, '</$1>')
+        .replace(/\{\\[^}]*\}/g, '')
+        .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
     }
+
+    // Normalize short MM:SS.mmm cue timestamps (e.g. CastleTV 00:13.791 --> 00:16.041) to 00:MM:SS.mmm
+    text = text.replace(/(^|\s)(\d{2}:\d{2}\.\d{3})(?=\s*-->|\s*$)/gm, '$100:$2');
+
+    // Remove injected ad/watermark lines (e.g. sportdb.pro, osdb.link)
+    text = text.replace(/^.*(?:sportdb\.pro|osdb\.link|opensubtitles\.org).*$/gim, '');
 
     res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1042,7 +1925,7 @@ app.get('/api/proxy/stream', async (req: Request, res: Response) => {
     // Forward CinePro proxy URLs directly to CinePro remote proxy with original queryString
     if (targetUrl.includes('/v1/proxy')) {
       const queryString = targetUrl.includes('?') ? targetUrl.slice(targetUrl.indexOf('?')) : '';
-      targetUrl = `${SCRAPER_API_CINEPRO}/v1/proxy${queryString}`;
+      targetUrl = `${getCineproUrl()}/v1/proxy${queryString}`;
     } else if (targetUrl.startsWith('/')) {
       targetUrl = `http://127.0.0.1:3000${targetUrl}`;
     }
@@ -1292,7 +2175,7 @@ app.all(['/v1/proxy', '/v1/proxy/*'], async (req: Request, res: Response) => {
 
   try {
     const queryString = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-    const targetUrl = `${SCRAPER_API_CINEPRO}/v1/proxy${queryString}`;
+    const targetUrl = `${getCineproUrl()}/v1/proxy${queryString}`;
 
     const forwardHeaders: Record<string, string> = {
       'User-Agent':
@@ -1489,17 +2372,22 @@ app.options('/v1/proxy', (req: Request, res: Response) => {
 });
 
 // ==========================================
-// 5. USER DATA PERSISTENCE & SYNC
+// 5. USER DATA PERSISTENCE & SYNC (PER-DEVICE ISOLATED)
 // ==========================================
 app.get('/api/user/data', (req: Request, res: Response) => {
-  const data = readUserData();
+  const deviceId = sanitizeDeviceId(req.headers['x-device-id'] || req.query.deviceId);
+  const data = readUserData(deviceId);
   return res.json(data);
 });
 
 app.post('/api/user/sync', (req: Request, res: Response) => {
   try {
-    const incoming = req.body;
-    const current = readUserData();
+    const incoming = req.body || {};
+    const deviceId = sanitizeDeviceId(req.headers['x-device-id'] || incoming.deviceId || req.query.deviceId);
+    if (!deviceId) {
+      return res.json({ success: true, data: defaultUserData });
+    }
+    const current = readUserData(deviceId);
 
     const updated: UserData = {
       watchlist: Array.isArray(incoming.watchlist) ? incoming.watchlist : current.watchlist,
@@ -1515,7 +2403,7 @@ app.post('/api/user/sync', (req: Request, res: Response) => {
           : current.settings,
     };
 
-    writeUserData(updated);
+    writeUserData(deviceId, updated);
     return res.json({ success: true, data: updated });
   } catch (err) {
     console.error('Error syncing user data:', err);
@@ -1529,9 +2417,50 @@ app.post('/api/user/sync', (req: Request, res: Response) => {
 
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'Linotte17';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'LinotteM1704&@';
+const ADMIN_TOKEN_SECRET = crypto
+  .createHash('sha256')
+  .update(`notflix-admin-secret:${ADMIN_USERNAME}:${ADMIN_PASSWORD}`)
+  .digest('hex');
 
-// Admin active sessions: token -> { createdAt, expiresAt, username }
+// Admin active sessions & revoked tokens (supports stateless HMAC tokens that survive container restarts)
 const activeAdminTokens = new Map<string, { createdAt: number; expiresAt: number; username: string }>();
+const revokedAdminTokens = new Set<string>();
+
+function createStatelessAdminToken(username: string, expiresAt: number): string {
+  const payload = Buffer.from(JSON.stringify({ u: username, exp: expiresAt })).toString('base64url');
+  const sig = crypto.createHmac('sha256', ADMIN_TOKEN_SECRET).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function verifyAdminToken(token: string): { username: string; expiresAt: number } | null {
+  if (!token || revokedAdminTokens.has(token)) return null;
+
+  // 1. Check stateless HMAC token (survives container updates/restarts)
+  if (token.includes('.')) {
+    const [payload, sig] = token.split('.');
+    if (payload && sig) {
+      const expectedSig = crypto.createHmac('sha256', ADMIN_TOKEN_SECRET).update(payload).digest('base64url');
+      if (sig === expectedSig) {
+        try {
+          const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8'));
+          if (decoded && decoded.u === ADMIN_USERNAME && typeof decoded.exp === 'number' && Date.now() <= decoded.exp) {
+            return { username: decoded.u, expiresAt: decoded.exp };
+          }
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+
+  // 2. Fallback to legacy in-memory token map
+  const session = activeAdminTokens.get(token);
+  if (session && Date.now() <= session.expiresAt) {
+    return { username: session.username, expiresAt: session.expiresAt };
+  }
+  if (session) activeAdminTokens.delete(token);
+  return null;
+}
 
 function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
@@ -1539,16 +2468,16 @@ function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
     return res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
   }
   const token = authHeader.slice(7).trim();
-  const session = activeAdminTokens.get(token);
-  if (!session || Date.now() > session.expiresAt) {
-    if (session) activeAdminTokens.delete(token);
+  const verified = verifyAdminToken(token);
+  if (!verified) {
     return res.status(401).json({ error: 'Unauthorized: Session expired or invalid' });
   }
   next();
 }
 
-// Persistent Analytics storage
+// Persistent Analytics storage (multi-path merge + redundant mirror)
 const ANALYTICS_DATA_FILE = path.join(DATA_DIR, 'analytics.json');
+const ANALYTICS_BACKUP_MIRROR_FILE = '/var/tmp/notflix_analytics_backup.json';
 
 interface AnalyticsEvent {
   id: string;
@@ -1579,14 +2508,49 @@ let analyticsStore: AnalyticsData = {
   lastUpdated: Date.now(),
 };
 
+function sanitizeAnalyticsEvents(events: AnalyticsEvent[]): AnalyticsEvent[] {
+  return events.map((ev) => {
+    // If it's a known movie or explicitly marked movie
+    const isMovie =
+      ev.mediaType === 'movie' ||
+      (!ev.mediaType && !ev.season) ||
+      (ev.title && /spider-man|oppenheimer|avatar|batman|avengers|barbie|dune|gladiator|wicked|interstellar|inception|deadpool|joker/i.test(ev.title));
+
+    if (isMovie) {
+      return {
+        ...ev,
+        mediaType: 'movie',
+        season: undefined,
+        episode: undefined,
+      };
+    }
+
+    if (ev.mediaType === 'tv') {
+      return {
+        ...ev,
+        mediaType: 'tv',
+        season: ev.season || 1,
+        episode: ev.episode || 1,
+      };
+    }
+
+    return ev;
+  });
+}
+
 function readAnalyticsData(): AnalyticsData {
   const candidatePaths = [
     ANALYTICS_DATA_FILE,
+    ANALYTICS_BACKUP_MIRROR_FILE,
+    '/data/analytics.json',
+    '/app/data/analytics.json',
     path.join(process.cwd(), 'data', 'analytics.json'),
     path.join(__dirname, 'data', 'analytics.json'),
-    '/app/data/analytics.json',
-    '/data/analytics.json',
+    '/app/data_seed/analytics.json',
+    path.join(process.cwd(), 'data_seed', 'analytics.json'),
   ];
+
+  const mergedMap = new Map<string, AnalyticsEvent>();
 
   for (const candidate of candidatePaths) {
     try {
@@ -1594,8 +2558,17 @@ function readAnalyticsData(): AnalyticsData {
         const content = fs.readFileSync(candidate, 'utf-8');
         const parsed = JSON.parse(content);
         if (Array.isArray(parsed.events) && parsed.events.length > 0) {
-          console.log(`📊 Loaded analytics data from ${candidate} (${parsed.events.length} events)`);
-          return parsed;
+          const sanitized = sanitizeAnalyticsEvents(parsed.events);
+          let addedFromCandidate = 0;
+          for (const ev of sanitized) {
+            if (ev && ev.id && !mergedMap.has(ev.id)) {
+              mergedMap.set(ev.id, ev);
+              addedFromCandidate++;
+            }
+          }
+          if (addedFromCandidate > 0) {
+            console.log(`📊 Merged ${addedFromCandidate} analytics events from ${candidate} (total: ${mergedMap.size})`);
+          }
         }
       }
     } catch (e) {
@@ -1603,28 +2576,83 @@ function readAnalyticsData(): AnalyticsData {
     }
   }
 
-  return { events: [], lastUpdated: Date.now() };
+  const mergedEvents = Array.from(mergedMap.values()).sort((a, b) => a.ts - b.ts).slice(-20000);
+  return { events: mergedEvents, lastUpdated: Date.now() };
+}
+
+function flushAnalyticsToDiskSync() {
+  try {
+    analyticsStore.lastUpdated = Date.now();
+    if (analyticsStore.events.length > 20000) {
+      analyticsStore.events = analyticsStore.events.slice(-20000);
+    }
+    const serialized = JSON.stringify(analyticsStore);
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(ANALYTICS_DATA_FILE, serialized, 'utf-8');
+    try {
+      fs.writeFileSync(ANALYTICS_BACKUP_MIRROR_FILE, serialized, 'utf-8');
+    } catch {
+      // Ignore if /var/tmp is read-only
+    }
+  } catch (err) {
+    console.error('Error saving analytics data:', err);
+  }
 }
 
 analyticsStore = readAnalyticsData();
+if (analyticsStore.events.length > 0) {
+  flushAnalyticsToDiskSync();
+}
 
 let saveAnalyticsTimeout: NodeJS.Timeout | null = null;
 function scheduleSaveAnalytics() {
   if (saveAnalyticsTimeout) return;
   saveAnalyticsTimeout = setTimeout(() => {
     saveAnalyticsTimeout = null;
-    try {
-      analyticsStore.lastUpdated = Date.now();
-      // Cap at 20,000 events to prevent disk bloating while preserving rich real history
-      if (analyticsStore.events.length > 20000) {
-        analyticsStore.events = analyticsStore.events.slice(-20000);
-      }
-      fs.writeFileSync(ANALYTICS_DATA_FILE, JSON.stringify(analyticsStore), 'utf-8');
-    } catch (err) {
-      console.error('Error saving analytics data:', err);
-    }
-  }, 2000);
+    flushAnalyticsToDiskSync();
+  }, 1500);
 }
+
+// Flush pending analytics and immediately release HTTP Keep-Alive sockets + exit on container stop/redeploy
+function handleGracefulShutdown(signal: string) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`🛑 Received ${signal} — flushing analytics and draining browser connections for zero-downtime update...`);
+
+  if (saveAnalyticsTimeout) {
+    clearTimeout(saveAnalyticsTimeout);
+    saveAnalyticsTimeout = null;
+  }
+  flushAnalyticsToDiskSync();
+  if (scraperConfigStore.isCustom) {
+    saveScraperConfigToDiskSync(scraperConfigStore);
+  }
+
+  if (activeHttpServer) {
+    try {
+      if (typeof activeHttpServer.closeIdleConnections === 'function') {
+        activeHttpServer.closeIdleConnections();
+      }
+      if (typeof activeHttpServer.closeAllConnections === 'function') {
+        activeHttpServer.closeAllConnections();
+      }
+      activeHttpServer.close(() => {
+        process.exit(0);
+      });
+    } catch {
+      process.exit(0);
+    }
+    // Force exit within 200ms so Docker/Traefik never sees overlapping container routers
+    setTimeout(() => process.exit(0), 200).unref();
+  } else {
+    process.exit(0);
+  }
+}
+
+process.on('SIGTERM', () => handleGracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => handleGracefulShutdown('SIGINT'));
 
 // In-memory active live viewers tracker: sessionId -> { lastPing, title, device, mediaType, season, episode, poster }
 const activeLiveViewers = new Map<
@@ -1651,8 +2679,8 @@ app.post('/api/admin/login', (req: Request, res: Response) => {
     return res.status(401).json({ error: 'Invalid username or password' });
   }
 
-  const token = crypto.randomBytes(32).toString('hex');
-  const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days session
+  const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000; // 30 days session
+  const token = createStatelessAdminToken(ADMIN_USERNAME, expiresAt);
   activeAdminTokens.set(token, { createdAt: Date.now(), expiresAt, username: ADMIN_USERNAME });
 
   return res.json({
@@ -1670,12 +2698,11 @@ app.get('/api/admin/verify', (req: Request, res: Response) => {
     return res.status(401).json({ valid: false });
   }
   const token = authHeader.slice(7).trim();
-  const session = activeAdminTokens.get(token);
-  if (!session || Date.now() > session.expiresAt) {
-    if (session) activeAdminTokens.delete(token);
+  const verified = verifyAdminToken(token);
+  if (!verified) {
     return res.status(401).json({ valid: false });
   }
-  return res.json({ valid: true, username: session.username });
+  return res.json({ valid: true, username: verified.username });
 });
 
 // POST /api/admin/logout
@@ -1684,6 +2711,7 @@ app.post('/api/admin/logout', (req: Request, res: Response) => {
   if (authHeader?.startsWith('Bearer ')) {
     const token = authHeader.slice(7).trim();
     activeAdminTokens.delete(token);
+    revokedAdminTokens.add(token);
   }
   return res.json({ success: true });
 });
@@ -1715,15 +2743,25 @@ app.post('/api/analytics/ping', (req: Request, res: Response) => {
 
     const now = Date.now();
 
+    const isTv =
+      mediaType === 'tv' &&
+      !/spider-man|oppenheimer|avatar|batman|avengers|barbie|dune|gladiator|wicked|interstellar|inception|deadpool|joker/i.test(title || '');
+
+    const normalizedMediaType: 'movie' | 'tv' | undefined =
+      eventType === 'play' || eventType === 'heartbeat' ? (isTv ? 'tv' : 'movie') : undefined;
+
+    const normalizedSeason = isTv ? (season ? Number(season) : 1) : undefined;
+    const normalizedEpisode = isTv ? (episode ? Number(episode) : 1) : undefined;
+
     // Track active live stream state (viewer currently playing)
     if (eventType === 'heartbeat' || eventType === 'play') {
       activeLiveViewers.set(sessionId, {
         lastPing: now,
         title: title || 'Unknown Title',
         device: device || 'desktop',
-        mediaType,
-        season,
-        episode,
+        mediaType: normalizedMediaType || 'movie',
+        season: normalizedSeason,
+        episode: normalizedEpisode,
         poster,
       });
     }
@@ -1735,9 +2773,9 @@ app.post('/api/analytics/ping', (req: Request, res: Response) => {
       type: eventType,
       sessionId,
       title,
-      mediaType,
-      season,
-      episode,
+      mediaType: normalizedMediaType,
+      season: normalizedSeason,
+      episode: normalizedEpisode,
       poster,
       watchSeconds: Number(watchSeconds) || 0,
       device: device || 'desktop',
@@ -1880,11 +2918,12 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
         dayData.views++;
 
         if (e.title) {
-          const tKey = `${e.title}_${e.mediaType || 'movie'}`;
+          const effectiveMediaType: 'movie' | 'tv' = e.mediaType === 'tv' ? 'tv' : 'movie';
+          const tKey = `${e.title}_${effectiveMediaType}`;
           if (!titlesMap.has(tKey)) {
             titlesMap.set(tKey, {
               title: e.title,
-              mediaType: e.mediaType,
+              mediaType: effectiveMediaType,
               poster: e.poster,
               views: 0,
               watchSeconds: 0,
@@ -1898,11 +2937,12 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
         dayData.watchHours = Number((dayData.watchHours + secs / 3600).toFixed(2));
 
         if (e.title) {
-          const tKey = `${e.title}_${e.mediaType || 'movie'}`;
+          const effectiveMediaType: 'movie' | 'tv' = e.mediaType === 'tv' ? 'tv' : 'movie';
+          const tKey = `${e.title}_${effectiveMediaType}`;
           if (!titlesMap.has(tKey)) {
             titlesMap.set(tKey, {
               title: e.title,
-              mediaType: e.mediaType,
+              mediaType: effectiveMediaType,
               poster: e.poster,
               views: 0,
               watchSeconds: 0,
@@ -1958,20 +2998,24 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
     const recentEvents = [...filteredEvents]
       .reverse()
       .slice(0, 30)
-      .map((ev) => ({
-        id: ev.id,
-        ts: ev.ts,
-        type: ev.type,
-        title: ev.title,
-        mediaType: ev.mediaType,
-        season: ev.season,
-        episode: ev.episode,
-        poster: ev.poster,
-        device: ev.device,
-        browser: ev.browser,
-        watchMinutes: ev.watchSeconds ? Math.round(ev.watchSeconds / 60) : 0,
-        searchQuery: ev.searchQuery,
-      }));
+      .map((ev) => {
+        const effectiveMediaType: 'movie' | 'tv' | undefined =
+          ev.type === 'play' || ev.type === 'heartbeat' ? (ev.mediaType === 'tv' ? 'tv' : 'movie') : undefined;
+        return {
+          id: ev.id,
+          ts: ev.ts,
+          type: ev.type,
+          title: ev.title,
+          mediaType: effectiveMediaType,
+          season: effectiveMediaType === 'tv' ? ev.season : undefined,
+          episode: effectiveMediaType === 'tv' ? ev.episode : undefined,
+          poster: ev.poster,
+          device: ev.device,
+          browser: ev.browser,
+          watchMinutes: ev.watchSeconds ? Math.round(ev.watchSeconds / 60) : 0,
+          searchQuery: ev.searchQuery,
+        };
+      });
 
     // Server health summary
     const serverHealth = Object.entries(serverHealthMap).map(([server, stats]) => {
@@ -1989,6 +3033,7 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
     return res.json({
       success: true,
       range,
+      totalStoredEvents: analyticsStore.events.length,
       kpis: {
         liveViewers: liveViewersCount,
         totalViews,
@@ -2054,16 +3099,7 @@ app.post('/api/admin/analytics/import', requireAdminAuth, (req: Request, res: Re
     }
 
     analyticsStore.events.sort((a, b) => a.ts - b.ts);
-    analyticsStore.lastUpdated = Date.now();
-
-    try {
-      if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-      }
-      fs.writeFileSync(ANALYTICS_DATA_FILE, JSON.stringify(analyticsStore, null, 2), 'utf-8');
-    } catch (writeErr) {
-      console.error('Error persisting imported analytics:', writeErr);
-    }
+    flushAnalyticsToDiskSync();
 
     return res.json({
       success: true,
@@ -2077,17 +3113,192 @@ app.post('/api/admin/analytics/import', requireAdminAuth, (req: Request, res: Re
   }
 });
 
-// Deployment version & instant cache invalidation endpoint
-const SERVER_BOOT_TIME = Date.now().toString();
-const DEPLOYMENT_VERSION =
-  process.env.COOLIFY_COMMIT_SHA ||
-  process.env.SOURCE_COMMIT ||
-  process.env.GIT_COMMIT_SHA ||
-  process.env.BUILD_ID ||
-  SERVER_BOOT_TIME;
+// ============================================================================
+// ADMIN SCRAPER API SERVER CONFIGURATION & LIVE PING ENDPOINTS
+// ============================================================================
 
+// GET /api/admin/scrapers (Fetch active scraper server URLs, hosts, and ports)
+app.get('/api/admin/scrapers', requireAdminAuth, (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  return res.json({
+    success: true,
+    config: scraperConfigStore,
+  });
+});
+
+// POST /api/admin/scrapers (Update or reset scraper server URLs/ports & flush stream cache)
+app.post('/api/admin/scrapers', requireAdminAuth, (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    const defaults = getDefaultScraperConfigStore();
+
+    if (body.reset === true) {
+      scraperConfigStore = {
+        ...defaults,
+        updatedAt: Date.now(),
+        isCustom: false,
+      };
+      saveScraperConfigToDiskSync(scraperConfigStore);
+      apiCache.clear();
+      return res.json({
+        success: true,
+        config: scraperConfigStore,
+        message: 'Scraper servers restored to default Coolify endpoints and stream cache cleared.',
+      });
+    }
+
+    const incoming = body.scrapers || {};
+    const cinepro = parseUrlIntoEndpoint(
+      'cinepro',
+      defaults.scrapers.cinepro.name,
+      defaults.scrapers.cinepro.role,
+      incoming.cinepro || scraperConfigStore.scrapers.cinepro,
+      DEFAULT_SCRAPER_CINEPRO_URL
+    );
+    const tmdb_embed = parseUrlIntoEndpoint(
+      'tmdb_embed',
+      defaults.scrapers.tmdb_embed.name,
+      defaults.scrapers.tmdb_embed.role,
+      incoming.tmdb_embed || scraperConfigStore.scrapers.tmdb_embed,
+      DEFAULT_SCRAPER_TMDB_EMBED_URL
+    );
+    const gateway_fallback = parseUrlIntoEndpoint(
+      'gateway_fallback',
+      defaults.scrapers.gateway_fallback.name,
+      defaults.scrapers.gateway_fallback.role,
+      incoming.gateway_fallback || scraperConfigStore.scrapers.gateway_fallback,
+      DEFAULT_SCRAPER_GATEWAY_URL
+    );
+
+    const isCustom =
+      cinepro.url !== DEFAULT_SCRAPER_CINEPRO_URL ||
+      tmdb_embed.url !== DEFAULT_SCRAPER_TMDB_EMBED_URL ||
+      gateway_fallback.url !== DEFAULT_SCRAPER_GATEWAY_URL;
+
+    scraperConfigStore = {
+      scrapers: {
+        cinepro,
+        tmdb_embed,
+        gateway_fallback,
+      },
+      updatedAt: typeof body.updatedAt === 'number' && body.updatedAt > 0 ? body.updatedAt : Date.now(),
+      isCustom,
+    };
+
+    saveScraperConfigToDiskSync(scraperConfigStore);
+    // Clear cached stream responses so new playback requests immediately use the updated scraper servers
+    apiCache.clear();
+
+    return res.json({
+      success: true,
+      config: scraperConfigStore,
+      message: 'Scraper API servers updated and active stream cache cleared immediately.',
+    });
+  } catch (err: any) {
+    console.error('Error updating scraper servers:', err);
+    return res.status(500).json({ error: 'Failed to update scraper servers: ' + (err?.message || err) });
+  }
+});
+
+// POST /api/admin/scrapers/test (Live connection & stream probe from backend to target scraper server)
+app.post('/api/admin/scrapers/test', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    const id = (body.id as ScraperServerId) || 'cinepro';
+    const defaults = getDefaultScraperConfigStore();
+    const defaultForId = defaults.scrapers[id]?.defaultUrl || DEFAULT_SCRAPER_CINEPRO_URL;
+
+    const parsedEndpoint = parseUrlIntoEndpoint(
+      id,
+      defaults.scrapers[id]?.name || 'Scraper Server',
+      defaults.scrapers[id]?.role || '',
+      body,
+      defaultForId
+    );
+
+    const baseUrl = parsedEndpoint.url;
+    // Use TMDB ID 550 (Fight Club) as a fast, deterministic probe target
+    let probeUrl = `${baseUrl}/v1/movies/550`;
+    if (id === 'tmdb_embed') {
+      probeUrl = `${baseUrl}/api/streams/movie/550`;
+    } else if (id === 'gateway_fallback') {
+      probeUrl = `${baseUrl}/api/health`;
+    }
+
+    const startTs = Date.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 7000);
+
+    try {
+      const response = await fetch(probeUrl, {
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/json, text/plain, */*',
+          'User-Agent': 'Notflix-Admin-Diagnostic/2.5',
+        },
+      });
+      clearTimeout(timer);
+      const latencyMs = Date.now() - startTs;
+
+      let streamCount: number | null = null;
+      let statusNote = `HTTP ${response.status}`;
+
+      try {
+        const text = await response.text();
+        if (text && text.trim().startsWith('{')) {
+          const json = JSON.parse(text);
+          const list =
+            json.streams || json.sources || json.results || json.data || (Array.isArray(json) ? json : null);
+          if (Array.isArray(list)) {
+            streamCount = list.length;
+          } else if (json.status === 'ok') {
+            statusNote = 'Health OK';
+          }
+        }
+      } catch {}
+
+      const reachable = response.status >= 200 && response.status < 500;
+      return res.json({
+        success: true,
+        reachable,
+        status: response.status,
+        latencyMs,
+        streamCount,
+        testedUrl: probeUrl,
+        normalizedUrl: baseUrl,
+        message: reachable
+          ? streamCount !== null
+            ? `Online (${latencyMs} ms) · ${streamCount} streams verified`
+            : `Online (${latencyMs} ms) · ${statusNote}`
+          : `Server returned HTTP ${response.status} (${latencyMs} ms)`,
+      });
+    } catch (fetchErr: any) {
+      clearTimeout(timer);
+      const latencyMs = Date.now() - startTs;
+      const errCode = fetchErr?.cause?.code || fetchErr?.code || fetchErr?.name || 'UNREACHABLE';
+      return res.json({
+        success: true,
+        reachable: false,
+        status: 0,
+        latencyMs,
+        streamCount: null,
+        testedUrl: probeUrl,
+        normalizedUrl: baseUrl,
+        message: `Unreachable (${errCode}) after ${latencyMs} ms`,
+      });
+    }
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      reachable: false,
+      error: err?.message || 'Diagnostic test failed',
+    });
+  }
+});
+
+// Deployment version & instant cache invalidation endpoint
 app.get('/api/version', (_req: Request, res: Response) => {
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, proxy-revalidate, max-age=0');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
   res.setHeader('Surrogate-Control', 'no-store');
@@ -2099,13 +3310,53 @@ app.get('/api/version', (_req: Request, res: Response) => {
   });
 });
 
+// Self-unregistering Service Worker killer so no browser ever gets stuck on a cached SW
+const SW_KILLER_SCRIPT = `
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+      .then(() => self.registration.unregister())
+      .then(() => self.clients.matchAll({ type: 'window' }))
+      .then((clients) => clients.forEach((client) => client.navigate(client.url)))
+  );
+});
+`;
+
+app.get(['/sw.js', '/service-worker.js', '/workbox-*.js'], (_req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.send(SW_KILLER_SCRIPT);
+});
+
+function setNoStoreHtmlHeaders(res: Response) {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
+  res.setHeader('CDN-Cache-Control', 'no-store');
+  res.setHeader('Cloudflare-CDN-Cache-Control', 'no-store');
+}
+
 // ==========================================
 // 6. DEV & PROD VITE STATIC INTEGRATION
 // ==========================================
 async function startServer() {
   const distPath = path.join(__dirname, 'dist');
-  const hasDist = fs.existsSync(path.join(distPath, 'index.html'));
-  const isProd = process.env.NODE_ENV === 'production' || (hasDist && process.env.NODE_ENV !== 'development');
+  let hasDist = fs.existsSync(path.join(distPath, 'index.html'));
+
+  // Self-healing fallback: if a cached container build ever skipped dist/index.html, build it automatically
+  if (!hasDist && process.env.NODE_ENV === 'production') {
+    console.warn('⚠️ dist/index.html missing in production container — running self-healing vite build...');
+    try {
+      execSync('npx vite build', { stdio: 'inherit', cwd: __dirname });
+      hasDist = fs.existsSync(path.join(distPath, 'index.html'));
+    } catch (buildErr) {
+      console.error('⚠️ Self-healing vite build failed, falling back to Vite runtime middleware:', buildErr);
+    }
+  }
+
+  const isProd = hasDist && process.env.NODE_ENV !== 'development';
 
   // Persistent downloads folder (mount target for Coolify persistent storage)
   const downloadsPath = path.join(__dirname, 'downloads');
@@ -2198,7 +3449,16 @@ Sitemap: https://notflixtv.com/sitemap.xml
   });
 
   // Serve static assets from public directory (favicons, manifest, robots, etc.)
-  app.use(express.static(path.join(__dirname, 'public')));
+  app.use(
+    express.static(path.join(__dirname, 'public'), {
+      etag: false,
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.html') || filePath.endsWith('.webmanifest') || filePath.endsWith('.json')) {
+          setNoStoreHtmlHeaders(res);
+        }
+      },
+    })
+  );
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
@@ -2207,21 +3467,67 @@ Sitemap: https://notflixtv.com/sitemap.xml
       appType: 'spa',
     });
     app.use(vite.middlewares);
-    console.log('⚡ Vite dev middleware attached in development mode');
-  } else {
-    app.use(express.static(distPath));
 
-    // Single-Page Application (SPA) catch-all route
-    app.get('*', (_req: Request, res: Response) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+    // Single-Page Application (SPA) catch-all route for development mode
+    app.use('*', async (req: Request, res: Response, next: NextFunction) => {
+      if (req.originalUrl.startsWith('/api') || req.originalUrl.startsWith('/downloads')) {
+        return next();
+      }
+      try {
+        setNoStoreHtmlHeaders(res);
+        const indexPath = path.resolve(__dirname, 'index.html');
+        let template = fs.readFileSync(indexPath, 'utf-8');
+        template = await vite.transformIndexHtml(req.originalUrl, template);
+        res.status(200).set({ 'Content-Type': 'text/html' }).end(template);
+      } catch (e) {
+        next(e);
+      }
     });
 
-    console.log(`📦 Serving production build from ${distPath}`);
+    console.log('⚡ Vite dev middleware attached in development mode');
+  } else {
+    app.use(
+      express.static(distPath, {
+        index: false, // Handle index.html explicitly with strict no-store headers
+        etag: false,
+        lastModified: false,
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('.html')) {
+            setNoStoreHtmlHeaders(res);
+          } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          }
+        },
+      })
+    );
+
+    // If an open browser tab requests an old hashed JS/CSS chunk from before a deployment,
+    // return an uncached 404 (not index.html) so the client chunk-recovery script triggers an instant reload
+    app.get('/assets/*', (_req: Request, res: Response) => {
+      setNoStoreHtmlHeaders(res);
+      res.status(404).type('text/plain').send('Asset chunk superseded by new deployment');
+    });
+
+    // Single-Page Application (SPA) catch-all route for /, /admin, /movies, /series, /anime, etc.
+    app.get('*', (_req: Request, res: Response) => {
+      setNoStoreHtmlHeaders(res);
+      const prodIndex = path.join(distPath, 'index.html');
+      const rootIndex = path.join(__dirname, 'index.html');
+      const targetIndex = fs.existsSync(prodIndex) ? prodIndex : rootIndex;
+      res.sendFile(targetIndex, { etag: false, lastModified: false });
+    });
+
+    console.log(`📦 Serving production build from ${distPath} (version: ${DEPLOYMENT_VERSION})`);
   }
 
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Notflix Full-Stack Server running on http://0.0.0.0:${PORT}`);
   });
+
+  activeHttpServer = server;
+  // Keep keepAliveTimeout short enough for clean proxy handoffs
+  server.keepAliveTimeout = 65000;
+  server.headersTimeout = 66000;
 
   server.on('error', (err) => {
     console.error('❌ Server listen error:', err);

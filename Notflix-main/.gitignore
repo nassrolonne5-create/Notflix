@@ -1,5 +1,7 @@
 node_modules/
 build/
+dist/
+server.js
 coverage/
 .DS_Store
 *.log
@@ -9,3 +11,6 @@ coverage/
 bun.lock
 bun.lockb
 dist.zip
+data/analytics.json
+data/user_profiles.json
+data/userdata.json

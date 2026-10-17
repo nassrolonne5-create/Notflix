@@ -13,6 +13,7 @@ import { VideoPlayerModal } from './components/VideoPlayerModal';
 import { SettingsModal } from './components/SettingsModal';
 import { Toast } from './components/Toast';
 import { ResumeBanner } from './components/ResumeBanner';
+import { AdBlockerBanner } from './components/AdBlockerBanner';
 import { telemetry } from './services/telemetry';
 
 const checkIsAdmin = (): boolean => {
@@ -36,10 +37,29 @@ const AppContent: React.FC = () => {
   // Sync routing on popstate and hashchange
   useEffect(() => {
     const handleNavigation = () => {
-      setIsAdmin(checkIsAdmin());
+      const adminState = checkIsAdmin();
+      // Do not accidentally exit admin mode if an internal anchor hash is clicked while already in admin
+      setIsAdmin((prev) => {
+        const next = adminState || (prev && window.location.hash.startsWith('#scraper'));
+        if (typeof window !== 'undefined') {
+          (window as any).__NOTFLIX_IS_ADMIN__ = next;
+        }
+        return next;
+      });
     };
+    const initialAdmin = checkIsAdmin();
+    setIsAdmin(initialAdmin);
+    if (typeof window !== 'undefined') {
+      (window as any).__NOTFLIX_IS_ADMIN__ = initialAdmin;
+    }
+
     window.addEventListener('popstate', handleNavigation);
     window.addEventListener('hashchange', handleNavigation);
+    window.addEventListener('notflix:open-admin', () => {
+      window.history.pushState({}, '', '/admin');
+      (window as any).__NOTFLIX_IS_ADMIN__ = true;
+      setIsAdmin(true);
+    });
 
     // Track initial page view for analytics
     telemetry.trackPageView(window.location.pathname);
@@ -107,6 +127,7 @@ const AppContent: React.FC = () => {
         onExit={() => {
           window.history.pushState({}, '', '/');
           window.location.hash = '';
+          (window as any).__NOTFLIX_IS_ADMIN__ = false;
           setIsAdmin(false);
         }}
       />
@@ -136,6 +157,19 @@ const AppContent: React.FC = () => {
         <p className="text-xs text-slate-500 max-w-sm mx-auto">
           Powered by TMDB API · Safe Filter Shield Locked On
         </p>
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={() => {
+              window.history.pushState({}, '', '/admin');
+              (window as any).__NOTFLIX_IS_ADMIN__ = true;
+              setIsAdmin(true);
+            }}
+            className="text-[11px] text-slate-600 hover:text-slate-300 transition-colors cursor-pointer"
+          >
+            Admin Studio
+          </button>
+        </div>
       </footer>
 
       {/* Navigation Dock */}
@@ -152,6 +186,9 @@ const AppContent: React.FC = () => {
 
       {/* Browser Resume Banner */}
       <ResumeBanner />
+
+      {/* Non-intrusive Ad-Blocker Support Banner */}
+      <AdBlockerBanner />
     </div>
   );
 };

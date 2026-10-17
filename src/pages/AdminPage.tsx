@@ -212,6 +212,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
   const [loginError, setLoginError] = useState<string | null>(null);
 
   // Analytics Dashboard State
+  const [adminView, setAdminView] = useState<'all' | 'scrapers' | 'analytics'>('all');
   const [dateRange, setDateRange] = useState<'today' | '7d' | '30d' | 'all'>('7d');
   const [mediaFilter, setMediaFilter] = useState<'all' | 'movie' | 'tv'>('all');
   const [analytics, setAnalytics] = useState<AnalyticsResponse | null>(null);
@@ -563,6 +564,12 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
 
         if (needsVaultSync) {
           const restored = await syncWithBrowserVault(token);
+          if (deploymentJustFinished) {
+            const targetUrl = new URL(window.location.href);
+            targetUrl.searchParams.set('_cb', String(Date.now()));
+            window.location.replace(targetUrl.toString());
+            return;
+          }
           if (restored) {
             setBackupMessage('Auto-restored historical analytics after update');
             setTimeout(() => setBackupMessage(null), 4000);
@@ -580,6 +587,11 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
               }
             }
           }
+        } else if (deploymentJustFinished) {
+          const targetUrl = new URL(window.location.href);
+          targetUrl.searchParams.set('_cb', String(Date.now()));
+          window.location.replace(targetUrl.toString());
+          return;
         }
 
         setAnalytics(data);
@@ -1219,9 +1231,12 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
 
           {/* Manual Refresh Button */}
           <button
-            onClick={fetchAnalytics}
+            onClick={() => {
+              fetchAnalytics();
+              fetchAndSyncScrapers();
+            }}
             disabled={loadingData}
-            title="Refresh analytics data"
+            title="Refresh analytics and scraper server config"
             className="p-2 rounded-xl bg-white/5 hover:bg-white/10 active:scale-95 text-slate-300 hover:text-white border border-white/10 transition-all cursor-pointer"
           >
             <RefreshCw className={`w-4 h-4 ${loadingData ? 'animate-spin text-blue-400' : ''}`} />
@@ -1253,15 +1268,23 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
             />
           </label>
 
-
-          {/* Jump to Scraper API Servers Manager */}
-          <a
-            href="#scraper-servers-panel"
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600/15 hover:bg-blue-600/25 text-blue-300 hover:text-white border border-blue-500/30 text-xs font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0"
+          {/* Switch to Scraper API Servers Manager */}
+          <button
+            type="button"
+            onClick={() => {
+              setAdminView((prev) => (prev === 'scrapers' ? 'all' : 'scrapers'));
+              const el = document.getElementById('scraper-servers-panel');
+              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }}
+            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl border text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+              adminView === 'scrapers'
+                ? 'bg-blue-600 text-white border-blue-400 shadow-lg shadow-blue-900/40'
+                : 'bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 hover:text-white border-blue-500/40'
+            }`}
           >
-            <Server className="w-3.5 h-3.5 text-blue-400" />
-            <span>Scraper APIs</span>
-          </a>
+            <Server className="w-3.5 h-3.5 text-blue-300" />
+            <span>Edit Scraper APIs</span>
+          </button>
 
           {/* Back to Website */}
           <button
@@ -1287,6 +1310,55 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
           Main Dashboard Content
          ========================================================= */}
       <main className="flex-1 p-4 md:p-8 max-w-7xl w-full mx-auto flex flex-col gap-6">
+        {/* Top Admin Mode Switcher Bar */}
+        <div className="flex items-center justify-between flex-wrap gap-3 bg-[#0e1424] border border-white/10 rounded-2xl p-2.5">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <button
+              type="button"
+              onClick={() => setAdminView('all')}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+                adminView === 'all'
+                  ? 'bg-blue-600 text-white shadow-md shadow-blue-950/50'
+                  : 'text-slate-400 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <Compass className="w-3.5 h-3.5" />
+              <span>All Studio Controls (Scrapers + Analytics)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setAdminView('scrapers')}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+                adminView === 'scrapers'
+                  ? 'bg-blue-600 text-white shadow-md shadow-blue-950/50'
+                  : 'text-slate-400 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <Server className="w-3.5 h-3.5 text-amber-400" />
+              <span>Scraper API Servers (Edit IPs &amp; Ports)</span>
+              <span className="px-1.5 py-0.5 text-[10px] rounded bg-white/10 text-slate-200 font-mono">
+                3 Active
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setAdminView('analytics')}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+                adminView === 'analytics'
+                  ? 'bg-blue-600 text-white shadow-md shadow-blue-950/50'
+                  : 'text-slate-400 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <Activity className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Analytics &amp; Telemetry Only</span>
+            </button>
+          </div>
+
+          <div className="text-[11px] font-mono text-slate-400 px-2 hidden md:block">
+            {scraperIsCustom ? '● Custom Scraper IPs Active' : '● Default Coolify Scraper IPs'}
+          </div>
+        </div>
+
         {/* Backup Status Banner */}
         {backupMessage && (
           <div className="p-3 rounded-xl bg-blue-500/20 border border-blue-500/40 text-blue-200 text-xs font-semibold flex items-center justify-between">
@@ -1300,96 +1372,13 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
           </div>
         )}
 
-        {/* Top KPI Summary Cards (YouTube Studio Style) */}
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 md:gap-4">
-          {/* 1. Live Viewers */}
-          <div className="bg-[#0e1424] border border-white/10 rounded-2xl p-4 flex flex-col justify-between relative overflow-hidden group hover:border-emerald-500/40 transition-colors">
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                Live Viewers
-              </span>
-              <span className="flex h-2 w-2 relative">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
-              </span>
-            </div>
-            <div className="text-3xl md:text-4xl font-extrabold font-mono text-white tracking-tight">
-              {kpis.liveViewers}
-            </div>
-            <div className="text-[11px] text-emerald-400 mt-2 font-medium flex items-center gap-1">
-              <span>● Active streams right now</span>
-            </div>
-          </div>
-
-          {/* 2. Total Views */}
-          <div className="bg-[#0e1424] border border-white/10 rounded-2xl p-4 flex flex-col justify-between hover:border-blue-500/40 transition-colors">
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                Total Views
-              </span>
-              <Play className="w-4 h-4 text-blue-400" />
-            </div>
-            <div className="text-3xl md:text-4xl font-extrabold font-mono text-white tracking-tight">
-              {kpis.totalViews.toLocaleString()}
-            </div>
-            <div className="text-[11px] text-slate-400 mt-2 flex items-center gap-1">
-              <TrendingUp className="w-3 h-3 text-blue-400" />
-              <span>Real stream starts</span>
-            </div>
-          </div>
-
-          {/* 3. Watch Time */}
-          <div className="bg-[#0e1424] border border-white/10 rounded-2xl p-4 flex flex-col justify-between hover:border-amber-500/40 transition-colors">
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                Watch Time
-              </span>
-              <Clock className="w-4 h-4 text-amber-400" />
-            </div>
-            <div className="text-3xl md:text-4xl font-extrabold font-mono text-white tracking-tight">
-              {kpis.totalWatchHours}{' '}
-              <span className="text-base font-normal text-slate-400">hrs</span>
-            </div>
-            <div className="text-[11px] text-slate-400 mt-2">
-              {kpis.totalWatchMinutes.toLocaleString()} minutes streamed
-            </div>
-          </div>
-
-          {/* 4. Searches */}
-          <div className="bg-[#0e1424] border border-white/10 rounded-2xl p-4 flex flex-col justify-between hover:border-purple-500/40 transition-colors">
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                Searches
-              </span>
-              <Search className="w-4 h-4 text-purple-400" />
-            </div>
-            <div className="text-3xl md:text-4xl font-extrabold font-mono text-white tracking-tight">
-              {kpis.totalSearches.toLocaleString()}
-            </div>
-            <div className="text-[11px] text-slate-400 mt-2">Queries conducted</div>
-          </div>
-
-          {/* 5. Unique Visitors */}
-          <div className="bg-[#0e1424] border border-white/10 rounded-2xl p-4 flex flex-col justify-between col-span-2 md:col-span-1 hover:border-teal-500/40 transition-colors">
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                Unique Visitors
-              </span>
-              <Users className="w-4 h-4 text-teal-400" />
-            </div>
-            <div className="text-3xl md:text-4xl font-extrabold font-mono text-white tracking-tight">
-              {kpis.uniqueVisitors.toLocaleString()}
-            </div>
-            <div className="text-[11px] text-slate-400 mt-2">Audience sessions</div>
-          </div>
-        </div>
-
         {/* =========================================================
             Backend Scraper API & Server Configuration Manager
            ========================================================= */}
+        {adminView !== 'analytics' && (
         <section
           id="scraper-servers-panel"
-          className="bg-[#0e1424] border border-white/10 rounded-2xl p-5 md:p-6 flex flex-col gap-5 scroll-mt-20"
+          className="bg-[#0e1424] border border-blue-500/30 rounded-2xl p-5 md:p-6 flex flex-col gap-5 scroll-mt-20 shadow-xl shadow-blue-950/20"
         >
           <div className="flex items-start md:items-center justify-between flex-col md:flex-row gap-4 border-b border-white/10 pb-4">
             <div className="flex items-start gap-3.5">
@@ -1647,7 +1636,93 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
             })}
           </div>
         </section>
+        )}
 
+        {adminView !== 'scrapers' && (
+        <>
+        {/* Top KPI Summary Cards (YouTube Studio Style) */}
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 md:gap-4">
+          {/* 1. Live Viewers */}
+          <div className="bg-[#0e1424] border border-white/10 rounded-2xl p-4 flex flex-col justify-between relative overflow-hidden group hover:border-emerald-500/40 transition-colors">
+            <div className="flex items-center justify-between text-slate-400 mb-2">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Live Viewers
+              </span>
+              <span className="flex h-2 w-2 relative">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+              </span>
+            </div>
+            <div className="text-3xl md:text-4xl font-extrabold font-mono text-white tracking-tight">
+              {kpis.liveViewers}
+            </div>
+            <div className="text-[11px] text-emerald-400 mt-2 font-medium flex items-center gap-1">
+              <span>● Active streams right now</span>
+            </div>
+          </div>
+
+          {/* 2. Total Views */}
+          <div className="bg-[#0e1424] border border-white/10 rounded-2xl p-4 flex flex-col justify-between hover:border-blue-500/40 transition-colors">
+            <div className="flex items-center justify-between text-slate-400 mb-2">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Total Views
+              </span>
+              <Play className="w-4 h-4 text-blue-400" />
+            </div>
+            <div className="text-3xl md:text-4xl font-extrabold font-mono text-white tracking-tight">
+              {kpis.totalViews.toLocaleString()}
+            </div>
+            <div className="text-[11px] text-slate-400 mt-2 flex items-center gap-1">
+              <TrendingUp className="w-3 h-3 text-blue-400" />
+              <span>Real stream starts</span>
+            </div>
+          </div>
+
+          {/* 3. Watch Time */}
+          <div className="bg-[#0e1424] border border-white/10 rounded-2xl p-4 flex flex-col justify-between hover:border-amber-500/40 transition-colors">
+            <div className="flex items-center justify-between text-slate-400 mb-2">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Watch Time
+              </span>
+              <Clock className="w-4 h-4 text-amber-400" />
+            </div>
+            <div className="text-3xl md:text-4xl font-extrabold font-mono text-white tracking-tight">
+              {kpis.totalWatchHours}{' '}
+              <span className="text-base font-normal text-slate-400">hrs</span>
+            </div>
+            <div className="text-[11px] text-slate-400 mt-2">
+              {kpis.totalWatchMinutes.toLocaleString()} minutes streamed
+            </div>
+          </div>
+
+          {/* 4. Searches */}
+          <div className="bg-[#0e1424] border border-white/10 rounded-2xl p-4 flex flex-col justify-between hover:border-purple-500/40 transition-colors">
+            <div className="flex items-center justify-between text-slate-400 mb-2">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Searches
+              </span>
+              <Search className="w-4 h-4 text-purple-400" />
+            </div>
+            <div className="text-3xl md:text-4xl font-extrabold font-mono text-white tracking-tight">
+              {kpis.totalSearches.toLocaleString()}
+            </div>
+            <div className="text-[11px] text-slate-400 mt-2">Queries conducted</div>
+          </div>
+
+          {/* 5. Unique Visitors */}
+          <div className="bg-[#0e1424] border border-white/10 rounded-2xl p-4 flex flex-col justify-between col-span-2 md:col-span-1 hover:border-teal-500/40 transition-colors">
+            <div className="flex items-center justify-between text-slate-400 mb-2">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Unique Visitors
+              </span>
+              <Users className="w-4 h-4 text-teal-400" />
+            </div>
+            <div className="text-3xl md:text-4xl font-extrabold font-mono text-white tracking-tight">
+              {kpis.uniqueVisitors.toLocaleString()}
+            </div>
+            <div className="text-[11px] text-slate-400 mt-2">Audience sessions</div>
+          </div>
+        </div>
         {/* Live Streamers Monitor (Shows who is actively watching right now) */}
         {analytics?.liveStreams && analytics.liveStreams.length > 0 && (
           <div className="bg-[#0e1424] border border-emerald-500/30 rounded-2xl p-4 shadow-lg shadow-emerald-950/20">
@@ -2461,6 +2536,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
             </div>
           </div>
         </div>
+        </>
+        )}
       </main>
 
       {/* Footer */}

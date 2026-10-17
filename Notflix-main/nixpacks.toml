@@ -2,10 +2,11 @@
 nixPkgs = ["nodejs_22"]
 
 [phases.install]
-cmds = ["if [ -f package-lock.json ]; then npm ci --include=dev; else npm install --include=dev; fi"]
+cmds = ["npm ci --include=dev --prefer-offline --no-audit"]
+cacheDirectories = ["/root/.npm"]
 
 [phases.build]
-cmds = ["npm run build"]
+cmds = ["rm -rf dist server.js && npm run build && test -f dist/index.html && test -f server.js"]
 
 [variables]
 NODE_ENV = "production"

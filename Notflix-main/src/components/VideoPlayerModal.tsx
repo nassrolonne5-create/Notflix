@@ -40,6 +40,7 @@ import {
 import { StreamSource, SubtitleTrack, Season, Episode, CastMember, MediaItem } from '../types';
 import { MediaCard } from './MediaCard';
 import { triggerAd, initAdResumeListeners } from '../services/adService';
+import { smartAdController } from '../services/smartAdController';
 import { telemetry } from '../services/telemetry';
 
 const formatTime = (seconds: number) => {
@@ -87,8 +88,11 @@ export const VideoPlayerModal: React.FC = () => {
   // Subtitles
   const [subtitleGroups, setSubtitleGroups] = useState<Record<string, SubtitleTrack[]>>({});
   const [activeSubLabel, setActiveSubLabel] = useState<string>('Off');
+  const [activeSubTrackIndex, setActiveSubTrackIndex] = useState<number>(0);
   const [subOffset, setSubOffset] = useState<number>(0);
   const [rawSubText, setRawSubText] = useState<string>('');
+  const [isLoadingSubtitles, setIsLoadingSubtitles] = useState<boolean>(false);
+  const [subSearchQuery, setSubSearchQuery] = useState<string>('');
 
   // Audio & Quality tracks
   const [audioTracks, setAudioTracks] = useState<Array<{ id: number; name: string; lang: string }>>([]);
@@ -158,13 +162,22 @@ export const VideoPlayerModal: React.FC = () => {
   useEffect(() => {
     if (!activeModalItem) return;
     let isMounted = true;
+    const mediaType: 'movie' | 'tv' = isTV ? 'tv' : 'movie';
+
+    setImdbId(undefined);
+    setSubtitleGroups({});
+    setActiveSubLabel('Off');
+    setActiveSubTrackIndex(0);
+    setRawSubText('');
+    setSubOffset(0);
+
     if (isTV) {
       fetchTvSeasons(activeModalItem.id).then((sList) => {
         if (isMounted) setSeasons(sList);
       });
     }
 
-    fetchMediaDetails(activeModalItem.type, activeModalItem.id).then((details) => {
+    fetchMediaDetails(mediaType, activeModalItem.id).then((details) => {
       if (isMounted) {
         setCast(details.cast);
         setSimilar(details.similar);
@@ -223,7 +236,7 @@ export const VideoPlayerModal: React.FC = () => {
     }, 1000);
   }, []);
 
-  // Load Streams with increased timeout & automatic multi-attempt retry
+  // Load Streams with robust fallback
   const loadStreamsWithRetry = useCallback(
     async (force = false) => {
       if (!activeModalItem) return;
@@ -237,52 +250,45 @@ export const VideoPlayerModal: React.FC = () => {
       setStreams([]);
       setActiveStreamIndex(0);
 
-      const maxAttempts = 2;
-      let loaded: StreamSource[] = [];
+      try {
+        let fetchedStreams = await fetchStreams(
+          activeModalItem.type,
+          activeModalItem.id,
+          currentSeason,
+          currentEpisode,
+          force
+        );
 
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        setStreamLoadAttempt(attempt);
-
-        try {
-          const fetchedStreams = await fetchStreams(
+        // If initial cache miss returned 0 streams, immediately try force refresh once before showing error
+        if ((!fetchedStreams || fetchedStreams.length === 0) && !force) {
+          fetchedStreams = await fetchStreams(
             activeModalItem.type,
             activeModalItem.id,
             currentSeason,
             currentEpisode,
-            force || attempt > 1
+            true
           );
-
-          if (fetchedStreams && fetchedStreams.length > 0) {
-            loaded = fetchedStreams;
-            break;
-          }
-        } catch (err) {
-          console.warn(`Stream scraper attempt ${attempt} failed:`, err);
         }
 
-        // Brief delay between attempts to allow backend and scrapers to complete
-        if (attempt < maxAttempts) {
-          await new Promise((r) => setTimeout(r, 600));
+        if (fetchedStreams && fetchedStreams.length > 0) {
+          attemptedIndicesRef.current.clear();
+          manuallySelectedServerRef.current = null;
+          attemptedIndicesRef.current.add(0);
+          setStreams(fetchedStreams);
+          setActiveStreamIndex(0);
+          setIsLoadingStreams(false);
+          setStreamLoadAttempt(1);
+          return;
         }
+      } catch (err) {
+        console.warn('Stream scraper request failed:', err);
       }
 
-      if (!loaded || loaded.length === 0) {
-        setStreamError('Streaming APIs took longer than expected to respond. Auto-retrying shortly...');
-        setIsLoadingStreams(false);
-        setStreamLoadAttempt(1);
-        startAutoRetryCountdown();
-        return;
-      }
-
-      attemptedIndicesRef.current.clear();
-      manuallySelectedServerRef.current = null;
-      attemptedIndicesRef.current.add(0);
-      setStreams(loaded);
-      setActiveStreamIndex(0);
+      setStreamError('Streaming servers are temporarily busy or resolving. Click Retry to search again.');
       setIsLoadingStreams(false);
       setStreamLoadAttempt(1);
     },
-    [activeModalItem, currentSeason, currentEpisode, startAutoRetryCountdown]
+    [activeModalItem, currentSeason, currentEpisode]
   );
 
   // Load Streams trigger
@@ -327,13 +333,12 @@ export const VideoPlayerModal: React.FC = () => {
         // Switch immediately without lag!
         setActiveStreamIndex(nextIndex);
       } else {
-        console.warn('All available servers have been tried and failed.');
+        console.warn('All available servers have been tried.');
         setIsLoadingStreams(false);
-        setStreamError('All available servers timed out or were unable to play this title. Auto-retrying shortly...');
-        startAutoRetryCountdown();
+        setStreamError('All tested servers were unable to stream this title right now. Please try another title or retry.');
       }
     },
-    [streams, showToast, startAutoRetryCountdown]
+    [streams, showToast]
   );
 
   const handleStreamFailureRef = useRef(handleStreamFailure);
@@ -368,13 +373,50 @@ export const VideoPlayerModal: React.FC = () => {
   const checkAndSkipSampleShortRef = useRef(checkAndSkipSampleShort);
   checkAndSkipSampleShortRef.current = checkAndSkipSampleShort;
 
-  // Load Subtitles
+  // Load Subtitles (runs immediately via tmdbId + title, and re-merges when imdbId or scraper streams finish resolving)
   useEffect(() => {
-    if (!activeModalItem || !imdbId) return;
-    fetchSubtitles(imdbId, activeModalItem.id, activeModalItem.type, currentSeason, currentEpisode).then((groups) => {
-      setSubtitleGroups(groups);
-    });
-  }, [imdbId, activeModalItem?.id, activeModalItem?.type, currentSeason, currentEpisode]);
+    if (!activeModalItem) return;
+    let isMounted = true;
+    const mediaType: 'movie' | 'tv' = isTV ? 'tv' : 'movie';
+    const mediaTitle = activeModalItem.title || activeModalItem.name || '';
+
+    setIsLoadingSubtitles(true);
+    fetchSubtitles(
+      imdbId,
+      activeModalItem.id,
+      mediaType,
+      currentSeason,
+      currentEpisode,
+      mediaTitle
+    )
+      .then((groups) => {
+        if (isMounted) {
+          setSubtitleGroups((prev) => {
+            if (Object.keys(groups).length === 0 && Object.keys(prev).length > 0) {
+              return prev;
+            }
+            return groups;
+          });
+          setIsLoadingSubtitles(false);
+        }
+      })
+      .catch(() => {
+        if (isMounted) setIsLoadingSubtitles(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [
+    imdbId,
+    activeModalItem?.id,
+    activeModalItem?.title,
+    activeModalItem?.name,
+    isTV,
+    currentSeason,
+    currentEpisode,
+    streams.length > 0,
+  ]);
 
 
 
@@ -403,13 +445,13 @@ export const VideoPlayerModal: React.FC = () => {
       }
     };
 
-    // 3.2-second connection watchdog: detects unplayable / dead CDN hosts quickly and auto-switches
+    // 8.5-second connection watchdog: detects unplayable / dead CDN hosts and auto-switches
     watchdogTimerRef.current = window.setTimeout(() => {
       if (video.readyState === 0) {
-        console.warn(`Server ${activeStreamIndex + 1} did not respond within 3.2s. Auto-switching to next server.`);
-        handleStreamFailureRef.current(activeStreamIndex, 'Connection timed out after 3.2s');
+        console.warn(`Server ${activeStreamIndex + 1} did not respond within 8.5s. Auto-switching to next server.`);
+        handleStreamFailureRef.current(activeStreamIndex, 'Connection timed out after 8.5s');
       }
-    }, 3200);
+    }, 8500);
 
     const onMediaActive = () => {
       clearWatchdog();
@@ -494,12 +536,12 @@ export const VideoPlayerModal: React.FC = () => {
         maxBufferLength: 30,
         maxMaxBufferLength: 600,
         enableWorker: true,
-        manifestLoadingTimeOut: 3500,
-        manifestLoadingMaxRetry: 0,
-        levelLoadingTimeOut: 4000,
-        levelLoadingMaxRetry: 1,
-        fragLoadingTimeOut: 4000,
-        fragLoadingMaxRetry: 1,
+        manifestLoadingTimeOut: 8000,
+        manifestLoadingMaxRetry: 2,
+        levelLoadingTimeOut: 8000,
+        levelLoadingMaxRetry: 2,
+        fragLoadingTimeOut: 8000,
+        fragLoadingMaxRetry: 2,
         xhrSetup: (xhr) => {
           if (stream.headers) {
             for (const [key, val] of Object.entries(stream.headers)) {
@@ -1515,15 +1557,18 @@ export const VideoPlayerModal: React.FC = () => {
     showControlsTemporarily,
   ]);
 
-  // Subtitle Selection & Sync Engine
-  const handleSelectSubtitle = async (lang: string) => {
+  // Subtitle Selection & Sync Engine with Multi-Source Failover
+  const handleSelectSubtitle = async (lang: string, startTrackIdx = 0, keepPanelOpen = false) => {
     setActiveSubLabel(lang);
-    setSubOffset(0);
+    if (startTrackIdx === 0) {
+      setSubOffset(0);
+    }
 
     if (lang === 'Off') {
       setRawSubText('');
+      setActiveSubTrackIndex(0);
       removeSubTracks();
-      setActivePanel(null);
+      if (!keepPanelOpen) setActivePanel(null);
       showToast('Subtitles disabled', 'CC');
       return;
     }
@@ -1531,17 +1576,45 @@ export const VideoPlayerModal: React.FC = () => {
     const tracks = subtitleGroups[lang] || [];
     if (!tracks.length) return;
 
-    try {
-      const res = await fetch(tracks[0].url);
-      if (!res.ok) throw new Error('Failed to load subtitle');
-      let text = await res.text();
-      setRawSubText(text);
-      applyVttTrack(text, 0, lang);
-      showToast(`Subtitles: ${lang}`, 'CC');
-    } catch {
+    let loaded = false;
+    for (let offset = 0; offset < tracks.length; offset++) {
+      const candidateIdx = (startTrackIdx + offset) % tracks.length;
+      const candidate = tracks[candidateIdx];
+      if (!candidate?.url) continue;
+
+      try {
+        const res = await fetch(candidate.url);
+        if (!res.ok) continue;
+        const text = await res.text();
+        if (!text || text.length < 20 || !text.includes('-->')) continue;
+
+        const appliedOffset = startTrackIdx === 0 ? 0 : subOffset;
+        setActiveSubTrackIndex(candidateIdx);
+        setRawSubText(text);
+        applyVttTrack(text, appliedOffset, lang);
+        const sourceSuffix = tracks.length > 1 ? ` (Source ${candidateIdx + 1}/${tracks.length})` : '';
+        showToast(`Subtitles: ${lang}${sourceSuffix}`, 'CC');
+        loaded = true;
+        break;
+      } catch {
+        // Try next available subtitle track for this language
+      }
+    }
+
+    if (!loaded) {
       showToast(`Could not load ${lang} track.`, '❌');
     }
-    setActivePanel(null);
+    if (!keepPanelOpen) {
+      setActivePanel(null);
+    }
+  };
+
+  const handleCycleSubTrackSource = () => {
+    if (activeSubLabel === 'Off') return;
+    const tracks = subtitleGroups[activeSubLabel] || [];
+    if (tracks.length <= 1) return;
+    const nextIdx = (activeSubTrackIndex + 1) % tracks.length;
+    handleSelectSubtitle(activeSubLabel, nextIdx, true);
   };
 
   const adjustSubOffset = (delta: number) => {
@@ -1552,9 +1625,9 @@ export const VideoPlayerModal: React.FC = () => {
     }
   };
 
-  const applyVttTrack = (vttText: string, offsetSeconds: number, label: string) => {
+  const applyVttTrack = useCallback((vttText: string, offsetSeconds: number, label: string) => {
     const video = videoRef.current;
-    if (!video) return;
+    if (!video || !vttText) return;
 
     removeSubTracks();
 
@@ -1593,12 +1666,21 @@ export const VideoPlayerModal: React.FC = () => {
     setTimeout(() => {
       if (video.textTracks && video.textTracks.length > 0) {
         for (let i = 0; i < video.textTracks.length; i++) {
-          video.textTracks[i].mode =
-            userData.settings.globalSubtitles && video.textTracks[i].label === label ? 'showing' : 'hidden';
+          video.textTracks[i].mode = video.textTracks[i].label === label ? 'showing' : 'hidden';
         }
       }
     }, 50);
-  };
+  }, []);
+
+  // Re-attach active subtitle track when switching servers so captions never disappear
+  useEffect(() => {
+    if (activeSubLabel !== 'Off' && rawSubText) {
+      const timer = window.setTimeout(() => {
+        applyVttTrack(rawSubText, subOffset, activeSubLabel);
+      }, 250);
+      return () => window.clearTimeout(timer);
+    }
+  }, [activeStreamIndex, activeSubLabel, rawSubText, subOffset, applyVttTrack]);
 
   const removeSubTracks = () => {
     const video = videoRef.current;
@@ -1741,19 +1823,26 @@ export const VideoPlayerModal: React.FC = () => {
   const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
   const currentStream = streams[activeStreamIndex];
 
-  // Real Analytics Heartbeat (transmits anonymous watch seconds every 25s while playing)
+  // Real Analytics Heartbeat & Smart Ad Watch Time Tracker
   useEffect(() => {
+    smartAdController.setPlaybackActive(isPlaying);
     if (!isPlaying || !activeModalItem) return;
+
     const interval = setInterval(() => {
+      smartAdController.recordWatchTime(25);
       telemetry.trackHeartbeat(
         activeModalItem,
-        currentSeason,
-        currentEpisode,
+        isTV ? currentSeason : undefined,
+        isTV ? currentEpisode : undefined,
         25,
         `Server ${activeStreamIndex + 1}`
       );
     }, 25000);
-    return () => clearInterval(interval);
+
+    return () => {
+      clearInterval(interval);
+      smartAdController.setPlaybackActive(false);
+    };
   }, [isPlaying, activeModalItem, currentSeason, currentEpisode, activeStreamIndex]);
 
   // Lock document.body scrolling while VideoPlayerModal is mounted
@@ -1870,8 +1959,8 @@ export const VideoPlayerModal: React.FC = () => {
                 setIsPlaying(true);
                 telemetry.trackPlay(
                   activeModalItem,
-                  currentSeason,
-                  currentEpisode,
+                  isTV ? currentSeason : undefined,
+                  isTV ? currentEpisode : undefined,
                   `Server ${activeStreamIndex + 1}`
                 );
               }}
@@ -2315,31 +2404,58 @@ export const VideoPlayerModal: React.FC = () => {
                 {/* Subtitles Panel Content */}
                 {activePanel === 'subtitles' && (
                   <div className="flex flex-col gap-1.5">
-                    {/* Subtitle Offset Tool */}
+                    {/* Subtitle Offset & Multi-Source Switcher Tool */}
                     {activeSubLabel !== 'Off' && (
-                      <div className="bg-white/5 border border-white/10 rounded-lg px-2 py-1 flex items-center justify-between">
-                        <div>
-                          <div className="text-[9px] font-bold text-blue-400 uppercase leading-none">Sync Delay</div>
-                          <div className="text-[8px] text-slate-400 leading-none mt-0.5">Offset audio</div>
+                      <div className="bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 flex flex-col gap-1.5">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <div className="text-[9px] font-bold text-blue-400 uppercase leading-none">Sync Delay</div>
+                            <div className="text-[8px] text-slate-400 leading-none mt-0.5">Offset timing</div>
+                          </div>
+                          <div className="flex items-center gap-1 bg-black/40 px-1.5 py-0.5 rounded border border-white/10">
+                            <button
+                              onClick={() => adjustSubOffset(-0.5)}
+                              className="w-4 h-4 rounded bg-white/10 hover:bg-white/20 text-white font-bold text-[10px] flex items-center justify-center cursor-pointer"
+                            >
+                              <Minus className="w-2.5 h-2.5" />
+                            </button>
+                            <span className="text-[10px] font-mono font-bold w-9 text-center text-white">
+                              {subOffset > 0 ? `+${subOffset.toFixed(1)}s` : `${subOffset.toFixed(1)}s`}
+                            </span>
+                            <button
+                              onClick={() => adjustSubOffset(0.5)}
+                              className="w-4 h-4 rounded bg-white/10 hover:bg-white/20 text-white font-bold text-[10px] flex items-center justify-center cursor-pointer"
+                            >
+                              <Plus className="w-2.5 h-2.5" />
+                            </button>
+                          </div>
                         </div>
-                        <div className="flex items-center gap-1 bg-black/40 px-1.5 py-0.5 rounded border border-white/10">
-                          <button
-                            onClick={() => adjustSubOffset(-0.5)}
-                            className="w-4 h-4 rounded bg-white/10 hover:bg-white/20 text-white font-bold text-[10px] flex items-center justify-center cursor-pointer"
-                          >
-                            <Minus className="w-2.5 h-2.5" />
-                          </button>
-                          <span className="text-[10px] font-mono font-bold w-9 text-center text-white">
-                            {subOffset > 0 ? `+${subOffset.toFixed(1)}s` : `${subOffset.toFixed(1)}s`}
-                          </span>
-                          <button
-                            onClick={() => adjustSubOffset(0.5)}
-                            className="w-4 h-4 rounded bg-white/10 hover:bg-white/20 text-white font-bold text-[10px] flex items-center justify-center cursor-pointer"
-                          >
-                            <Plus className="w-2.5 h-2.5" />
-                          </button>
-                        </div>
+
+                        {(subtitleGroups[activeSubLabel]?.length || 0) > 1 && (
+                          <div className="flex items-center justify-between pt-1 border-t border-white/10">
+                            <span className="text-[9px] text-slate-300 font-medium">
+                              Source {activeSubTrackIndex + 1} of {subtitleGroups[activeSubLabel].length}
+                            </span>
+                            <button
+                              onClick={handleCycleSubTrackSource}
+                              className="px-2 py-0.5 rounded bg-blue-600/30 hover:bg-blue-600/50 border border-blue-400/40 text-[9px] font-bold text-blue-200 transition-colors cursor-pointer"
+                            >
+                              Switch Source ↻
+                            </button>
+                          </div>
+                        )}
                       </div>
+                    )}
+
+                    {/* Quick Language Filter when many languages exist */}
+                    {Object.keys(subtitleGroups).length > 6 && (
+                      <input
+                        type="text"
+                        value={subSearchQuery}
+                        onChange={(e) => setSubSearchQuery(e.target.value)}
+                        placeholder="Search language (e.g. English, Arabic)..."
+                        className="w-full px-2.5 py-1 rounded-md bg-black/50 border border-white/15 text-[11px] text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
+                      />
                     )}
 
                     {/* Subtitle Language List - Contained Smooth Scrolling */}
@@ -2362,23 +2478,43 @@ export const VideoPlayerModal: React.FC = () => {
                       </button>
 
                       {/* Subtitle Language List */}
-                      {Object.keys(subtitleGroups).map((lang) => (
-                        <button
-                          key={lang}
-                          onClick={() => handleSelectSubtitle(lang)}
-                          className={`flex items-center justify-between px-2.5 py-1 rounded-md border text-[11px] font-medium cursor-pointer transition-all ${
-                            activeSubLabel === lang
-                              ? 'bg-blue-600/25 border-blue-500 text-white font-semibold'
-                              : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
-                          }`}
-                        >
-                          <span className="capitalize truncate max-w-[170px]">{lang}</span>
-                          {activeSubLabel === lang && <span className="text-blue-400 font-bold text-[10px]">✓</span>}
-                        </button>
-                      ))}
+                      {Object.keys(subtitleGroups)
+                        .filter((lang) =>
+                          !subSearchQuery.trim()
+                            ? true
+                            : lang.toLowerCase().includes(subSearchQuery.trim().toLowerCase())
+                        )
+                        .map((lang) => {
+                          const count = subtitleGroups[lang]?.length || 0;
+                          return (
+                            <button
+                              key={lang}
+                              onClick={() => handleSelectSubtitle(lang, 0)}
+                              className={`flex items-center justify-between px-2.5 py-1 rounded-md border text-[11px] font-medium cursor-pointer transition-all ${
+                                activeSubLabel === lang
+                                  ? 'bg-blue-600/25 border-blue-500 text-white font-semibold'
+                                  : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
+                              }`}
+                            >
+                              <span className="truncate max-w-[155px]">{lang}</span>
+                              <div className="flex items-center gap-1.5">
+                                {count > 1 && (
+                                  <span className="text-[9px] px-1.5 py-0.2 rounded bg-white/10 text-slate-300 font-mono">
+                                    {count}
+                                  </span>
+                                )}
+                                {activeSubLabel === lang && (
+                                  <span className="text-blue-400 font-bold text-[10px]">✓</span>
+                                )}
+                              </div>
+                            </button>
+                          );
+                        })}
 
                       {Object.keys(subtitleGroups).length === 0 && (
-                        <p className="text-[11px] text-slate-400 text-center py-1.5">No subtitles found.</p>
+                        <p className="text-[11px] text-slate-400 text-center py-1.5">
+                          {isLoadingSubtitles ? 'Searching subtitle sources...' : 'No subtitles found.'}
+                        </p>
                       )}
                     </div>
                   </div>

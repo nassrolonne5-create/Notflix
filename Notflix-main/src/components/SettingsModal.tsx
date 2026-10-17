@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Trash2, RefreshCw, Sliders, CheckCircle2 } from 'lucide-react';
+import { X, Trash2, RefreshCw, Sliders, Lock } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 
 export const SettingsModal: React.FC = () => {
@@ -120,9 +120,20 @@ export const SettingsModal: React.FC = () => {
           </button>
         </div>
 
-        {/* Footer info */}
-        <div className="text-center text-[11px] text-slate-500 pt-2 border-t border-white/5">
-          Notflix Full-Stack Edition · Node.js Backend & React Engine
+        {/* Footer info & Admin Studio shortcut */}
+        <div className="flex items-center justify-between text-[11px] text-slate-500 pt-2 border-t border-white/5">
+          <span>Notflix Full-Stack Edition</span>
+          <button
+            type="button"
+            onClick={() => {
+              closeSettings();
+              window.dispatchEvent(new CustomEvent('notflix:open-admin'));
+            }}
+            className="flex items-center gap-1 text-slate-400 hover:text-white transition-colors cursor-pointer font-semibold"
+          >
+            <Lock className="w-3 h-3 text-blue-400" />
+            <span>Admin Studio</span>
+          </button>
         </div>
       </div>
     </div>

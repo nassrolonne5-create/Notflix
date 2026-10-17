@@ -1,7 +1,8 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback, useRef } from 'react';
 import { MediaItem, UserData, UserPlaybackData } from '../types';
-import { fetchUserData, syncUserData, isSafe } from '../services/api';
+import { fetchUserData, syncUserData, isSafe, getDeviceId } from '../services/api';
 import { triggerAd } from '../services/adService';
+import { smartAdController } from '../services/smartAdController';
 
 export type TabType = 'home' | 'movies' | 'tv' | 'anime' | 'library' | 'search';
 
@@ -73,12 +74,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [quickViewItem, setQuickViewItem] = useState<MediaItem | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const playerOpenTimeRef = useRef<number>(0);
 
   const [toast, setToast] = useState<ToastState>({ show: false, message: '' });
 
-  // Initial user data from localStorage + server sync
+  // Initial user data from localStorage (strictly isolated per device)
   const [userData, setUserData] = useState<UserData>(() => {
     try {
+      // Ensure this browser has a unique deviceId
+      getDeviceId();
+
+      // One-time cleanup of any legacy global playback/history data that leaked from old shared userdata.json
+      if (localStorage.getItem('notflix_device_isolated_v2') !== 'true') {
+        localStorage.removeItem('notflix_playback');
+        localStorage.removeItem('notflix_history');
+        localStorage.removeItem('notflix_last_session');
+        localStorage.setItem('notflix_device_isolated_v2', 'true');
+      }
+
       const savedWl = localStorage.getItem('notflix_watchlist');
       const savedFav = localStorage.getItem('notflix_favorites');
       const savedHist = localStorage.getItem('notflix_history');
@@ -98,19 +111,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   });
 
-  // Pull server-stored userdata on mount
+  // Pull per-device server-stored userdata on mount (only for this deviceId)
   useEffect(() => {
     fetchUserData().then((serverData) => {
       if (serverData) {
         setUserData((prev) => {
           const merged: UserData = {
-            watchlist: serverData.watchlist?.length ? serverData.watchlist : prev.watchlist,
-            favorites: serverData.favorites?.length ? serverData.favorites : prev.favorites,
-            history: serverData.history?.length ? serverData.history : prev.history,
-            playbackPosition: { ...prev.playbackPosition, ...serverData.playbackPosition },
+            watchlist: prev.watchlist.length ? prev.watchlist : (serverData.watchlist || []),
+            favorites: prev.favorites.length ? prev.favorites : (serverData.favorites || []),
+            history: prev.history.length ? prev.history : (serverData.history || []),
+            playbackPosition: { ...(serverData.playbackPosition || {}), ...prev.playbackPosition },
             settings: {
-              ...prev.settings,
               ...(serverData.settings || {}),
+              ...prev.settings,
             },
           };
           return merged;
@@ -119,7 +132,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     });
   }, []);
 
-  // Save to localStorage & sync with backend on changes
+  // Save to localStorage & sync with backend for this device on changes
   const saveUserData = (newData: UserData) => {
     setUserData(newData);
     try {
@@ -144,6 +157,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, []);
 
   const openPlayer = (item: MediaItem, season?: number, episode?: number) => {
+    playerOpenTimeRef.current = Date.now();
     triggerAd('poster');
     if ('vibrate' in navigator) navigator.vibrate(12);
 
@@ -167,6 +181,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const closePlayer = () => {
+    // Detect fast modal bounce/abandonment within 6s (indicates UX friction)
+    if (playerOpenTimeRef.current > 0 && Date.now() - playerOpenTimeRef.current < 6000) {
+      smartAdController.recordFriction(1.0, 'quick_player_exit');
+    }
+    smartAdController.setPlaybackActive(false);
+
     setActiveModalItem(null);
     document.title = 'Notflix — Movies & TV Shows';
     try {
@@ -175,6 +195,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const openQuickView = (item: MediaItem) => {
+    triggerAd('poster');
     if ('vibrate' in navigator) navigator.vibrate(25);
     setQuickViewItem(item);
   };

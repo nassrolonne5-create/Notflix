@@ -139,7 +139,11 @@ export const telemetry = {
   // Track initial stream playback start
   trackPlay(item: any, season?: number, episode?: number, serverName?: string) {
     if (!item) return;
-    const isTv = item.type === 'tv' || item.media_type === 'tv' || Boolean(season);
+    const isTv =
+      item.type === 'tv' ||
+      item.media_type === 'tv' ||
+      item.first_air_date !== undefined ||
+      Boolean(!item.title && item.name);
     const title = item.title || item.name || 'Unknown Title';
     const poster = item.poster_path
       ? `https://image.tmdb.org/t/p/w200${item.poster_path}`
@@ -149,8 +153,8 @@ export const telemetry = {
       eventType: 'play',
       title,
       mediaType: isTv ? 'tv' : 'movie',
-      season: season || 1,
-      episode: episode || 1,
+      season: isTv ? (season ?? 1) : undefined,
+      episode: isTv ? (episode ?? 1) : undefined,
       poster,
       serverName: serverName || 'Server 1',
     });
@@ -165,7 +169,11 @@ export const telemetry = {
     serverName?: string
   ) {
     if (!item) return;
-    const isTv = item.type === 'tv' || item.media_type === 'tv' || Boolean(season);
+    const isTv =
+      item.type === 'tv' ||
+      item.media_type === 'tv' ||
+      item.first_air_date !== undefined ||
+      Boolean(!item.title && item.name);
     const title = item.title || item.name || 'Unknown Title';
     const poster = item.poster_path
       ? `https://image.tmdb.org/t/p/w200${item.poster_path}`
@@ -175,8 +183,8 @@ export const telemetry = {
       eventType: 'heartbeat',
       title,
       mediaType: isTv ? 'tv' : 'movie',
-      season: season || 1,
-      episode: episode || 1,
+      season: isTv ? (season ?? 1) : undefined,
+      episode: isTv ? (episode ?? 1) : undefined,
       poster,
       watchSeconds,
       serverName,
