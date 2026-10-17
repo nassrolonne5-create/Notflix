@@ -2,6 +2,9 @@
 <html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <meta name="referrer" content="no-referrer" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>Notflix - Movies & TV Shows</title>
@@ -10,6 +13,109 @@
     <meta name="author" content="Notflix" />
     <meta name="theme-color" content="#0b0f19" />
     <meta name="color-scheme" content="dark" />
+
+    <!-- Deployment Recovery, Sticky-Cookie Cleaner & Stale Cache Guard -->
+    <script data-cfasync="false">
+      (function() {
+        // 1. Wipe any proxy sticky-session cookies that could pin Chrome to an old container after update
+        function clearAllDomainCookies() {
+          try {
+            var cookies = document.cookie ? document.cookie.split(';') : [];
+            for (var i = 0; i < cookies.length; i++) {
+              var cookie = cookies[i];
+              var eqPos = cookie.indexOf('=');
+              var name = (eqPos > -1 ? cookie.substr(0, eqPos) : cookie).trim();
+              if (name) {
+                document.cookie = name + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/';
+                document.cookie = name + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain=' + window.location.hostname;
+              }
+            }
+          } catch (e) {}
+        }
+        clearAllDomainCookies();
+
+        // 2. Unregister any stale Service Workers & clear Cache Storage
+        try {
+          if ('serviceWorker' in navigator && navigator.serviceWorker.getRegistrations) {
+            navigator.serviceWorker.getRegistrations().then(function(regs) {
+              for (var i = 0; i < regs.length; i++) {
+                regs[i].unregister();
+              }
+            }).catch(function() {});
+          }
+          if ('caches' in window && window.caches.keys) {
+            window.caches.keys().then(function(keys) {
+              for (var i = 0; i < keys.length; i++) {
+                window.caches.delete(keys[i]);
+              }
+            }).catch(function() {});
+          }
+        } catch (e) {}
+
+        // 3. Clean up any temporary cache-bust query param (_cb) from address bar once loaded cleanly
+        try {
+          if (window.location.search.indexOf('_cb=') !== -1 && window.history && window.history.replaceState) {
+            var cleanUrl = new URL(window.location.href);
+            cleanUrl.searchParams.delete('_cb');
+            window.history.replaceState({}, document.title, cleanUrl.pathname + cleanUrl.search + cleanUrl.hash);
+          }
+        } catch (e) {}
+
+        // 4. Auto-recover if Chrome tries to load a superseded JS/CSS chunk during/after deployment
+        var isRecovering = false;
+        function recoverAfterDeployment() {
+          if (isRecovering) return;
+          var lastReload = parseInt(sessionStorage.getItem('notflix_deploy_reload_ts') || '0', 10);
+          if (Date.now() - lastReload < 8000) return;
+          isRecovering = true;
+          sessionStorage.setItem('notflix_deploy_reload_ts', String(Date.now()));
+          clearAllDomainCookies();
+
+          var attempts = 0;
+          function checkServerReady() {
+            attempts++;
+            fetch('/api/health?_cb=' + Date.now(), {
+              cache: 'no-store',
+              headers: { 'Pragma': 'no-cache', 'Cache-Control': 'no-cache' }
+            })
+              .then(function(res) {
+                if (res.ok) {
+                  var target = new URL(window.location.href);
+                  target.searchParams.set('_cb', String(Date.now()));
+                  window.location.replace(target.toString());
+                } else if (attempts < 15) {
+                  setTimeout(checkServerReady, 1500);
+                } else {
+                  isRecovering = false;
+                }
+              })
+              .catch(function() {
+                if (attempts < 15) {
+                  setTimeout(checkServerReady, 1500);
+                } else {
+                  isRecovering = false;
+                }
+              });
+          }
+          checkServerReady();
+        }
+
+        window.addEventListener('vite:preloadError', function(event) {
+          event.preventDefault();
+          recoverAfterDeployment();
+        });
+
+        window.addEventListener('error', function(event) {
+          var t = event && event.target;
+          if (t && (t.tagName === 'SCRIPT' || t.tagName === 'LINK')) {
+            var src = t.src || t.href || '';
+            if (src.indexOf('/assets/') !== -1) {
+              recoverAfterDeployment();
+            }
+          }
+        }, true);
+      })();
+    </script>
     
     <!-- Favicon & Brand Site Logo (Google Search Central & Devices) -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />

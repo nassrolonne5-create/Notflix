@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan for safely re-integrating custom monetization ad scripts into the website. Ensures ads run seamlessly in production on custom domains while safeguarding the sandboxed preview environment from iframe errors and popup blocking issues.",
-  "updatedAt": "2026-10-16T19:47:29.127628755Z",
+  "summary": "Implementation plan for the Admin Scraper API & Backend Server Configuration Manager inside the authenticated Admin Dashboard, allowing real-time editing of host/IP, port, or full URL for existing scraper engines, live connection & latency testing, and dual persistence (server disk + admin browser vault).",
+  "updatedAt": "2026-10-17T20:50:53.498963516Z",
   "requestFeedback": true,
   "userFacing": true
 }

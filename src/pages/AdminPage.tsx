@@ -133,6 +133,69 @@ interface AnalyticsResponse {
   };
 }
 
+type ScraperServerId = 'cinepro' | 'tmdb_embed' | 'gateway_fallback';
+
+interface ScraperEndpointConfig {
+  id: ScraperServerId;
+  name: string;
+  role: string;
+  protocol: 'http' | 'https';
+  host: string;
+  port: string;
+  url: string;
+  defaultUrl: string;
+}
+
+interface ScraperConfigStore {
+  scrapers: Record<ScraperServerId, ScraperEndpointConfig>;
+  updatedAt: number;
+  isCustom: boolean;
+}
+
+interface ScraperPingResult {
+  loading: boolean;
+  reachable?: boolean;
+  status?: number;
+  latencyMs?: number;
+  streamCount?: number | null;
+  message?: string;
+}
+
+const SCRAPER_VAULT_STORAGE_KEY = 'notflix_admin_scraper_vault_v1';
+
+const DEFAULT_SCRAPER_ENDPOINTS: Record<ScraperServerId, ScraperEndpointConfig> = {
+  cinepro: {
+    id: 'cinepro',
+    name: 'CinePro Primary Scraper',
+    role: 'Primary high-speed stream & subtitle extractor (/v1/movies & /v1/tv)',
+    protocol: 'http',
+    host: '62.171.179.144',
+    port: '3001',
+    url: 'http://62.171.179.144:3001',
+    defaultUrl: 'http://62.171.179.144:3001',
+  },
+  tmdb_embed: {
+    id: 'tmdb_embed',
+    name: 'TMDB Embed Scraper',
+    role: 'Secondary multi-provider stream extractor (/api/streams/movie & /series)',
+    protocol: 'http',
+    host: '62.171.179.144',
+    port: '3005',
+    url: 'http://62.171.179.144:3005',
+    defaultUrl: 'http://62.171.179.144:3005',
+  },
+  gateway_fallback: {
+    id: 'gateway_fallback',
+    name: 'Coolify Gateway Fallback',
+    role: 'Failover Coolify gateway mirror when primary scrapers return 0 streams',
+    protocol: 'http',
+    host: 'kufenvi0cy9unwwgipjiluoh.62.171.179.144.sslip.io',
+    port: '',
+    url: 'http://kufenvi0cy9unwwgipjiluoh.62.171.179.144.sslip.io',
+    defaultUrl: 'http://kufenvi0cy9unwwgipjiluoh.62.171.179.144.sslip.io',
+  },
+};
+
 export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
   // Authentication State
   const [token, setToken] = useState<string | null>(() => {
@@ -212,7 +275,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     };
   }, []);
 
-  // Verify existing token on mount
+  // Verify existing token on mount (resilient to transient 404/502 during container deployments)
   useEffect(() => {
     if (!token) {
       setIsVerifying(false);
@@ -220,27 +283,60 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
       return;
     }
 
-    fetch('/api/admin/verify', {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.valid) {
-          setIsAuthenticated(true);
-        } else {
-          localStorage.removeItem('notflix_admin_token');
-          setToken(null);
-          setIsAuthenticated(false);
-        }
+    let cancelled = false;
+    let attempts = 0;
+
+    const verifySession = () => {
+      attempts++;
+      fetch(`/api/admin/verify?_cb=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { Authorization: `Bearer ${token}`, 'Cache-Control': 'no-cache' },
       })
-      .catch(() => {
-        localStorage.removeItem('notflix_admin_token');
-        setToken(null);
-        setIsAuthenticated(false);
-      })
-      .finally(() => {
-        setIsVerifying(false);
-      });
+        .then(async (res) => {
+          if (cancelled) return;
+          if (res.status === 401) {
+            localStorage.removeItem('notflix_admin_token');
+            setToken(null);
+            setIsAuthenticated(false);
+            setIsVerifying(false);
+            return;
+          }
+          if (!res.ok) {
+            // Server is likely mid-deployment (404/502/503) — retry instead of logging out or failing
+            if (attempts < 10) {
+              setTimeout(verifySession, 1500);
+            } else {
+              // Assume valid stateless token if server is still restarting
+              setIsAuthenticated(true);
+              setIsVerifying(false);
+            }
+            return;
+          }
+          const data = await res.json();
+          if (data.valid) {
+            setIsAuthenticated(true);
+          } else {
+            localStorage.removeItem('notflix_admin_token');
+            setToken(null);
+            setIsAuthenticated(false);
+          }
+          setIsVerifying(false);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          if (attempts < 10) {
+            setTimeout(verifySession, 1500);
+          } else {
+            setIsAuthenticated(true);
+            setIsVerifying(false);
+          }
+        });
+    };
+
+    verifySession();
+    return () => {
+      cancelled = true;
+    };
   }, [token]);
 
   // Handle Login submission
@@ -293,14 +389,29 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
   // Automatic Persistent Browser Vault (survives container rebuilds/updates even without Docker volumes)
   const ADMIN_VAULT_KEY = 'notflix_admin_analytics_vault_v1';
   const isVaultSyncingRef = React.useRef(false);
+  const lastVaultSyncTimeRef = React.useRef<number>(0);
+  const isDeploymentInProgressRef = React.useRef<boolean>(false);
+  const knownServerVersionRef = React.useRef<string | null>(null);
+
+  const getLocalVaultCount = (): number => {
+    try {
+      const rawVault = localStorage.getItem(ADMIN_VAULT_KEY);
+      if (!rawVault) return 0;
+      const parsed = JSON.parse(rawVault);
+      if (Array.isArray(parsed?.events)) return parsed.events.length;
+      if (Array.isArray(parsed)) return parsed.length;
+    } catch {}
+    return 0;
+  };
 
   const syncWithBrowserVault = useCallback(
     async (authToken: string): Promise<boolean> => {
-      if (isVaultSyncingRef.current) return false;
+      if (isVaultSyncingRef.current || isDeploymentInProgressRef.current) return false;
       isVaultSyncingRef.current = true;
       try {
-        const exportRes = await fetch('/api/admin/analytics/export', {
-          headers: { Authorization: `Bearer ${authToken}` },
+        const exportRes = await fetch(`/api/admin/analytics/export?_cb=${Date.now()}`, {
+          cache: 'no-store',
+          headers: { Authorization: `Bearer ${authToken}`, 'Cache-Control': 'no-cache' },
         });
         if (!exportRes.ok) return false;
         const serverStore = await exportRes.json();
@@ -330,6 +441,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
         if (missingOnServer.length > 0) {
           const importRes = await fetch('/api/admin/analytics/import', {
             method: 'POST',
+            cache: 'no-store',
             headers: {
               'Content-Type': 'application/json',
               Authorization: `Bearer ${authToken}`,
@@ -368,6 +480,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
           } catch {}
         }
 
+        lastVaultSyncTimeRef.current = Date.now();
         return restoredToServer;
       } catch {
         return false;
@@ -378,21 +491,19 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     []
   );
 
-  // Fetch Analytics Data
+  // Fetch Analytics Data (with deployment transition detection & Chrome disk-cache eviction)
   const fetchAnalytics = useCallback(async () => {
-    if (!token) return;
+    if (!token || isDeploymentInProgressRef.current) return;
     setLoadingData(true);
 
     try {
-      // First sync with browser vault so if a deployment reset the container, historical events are restored before computing KPIs
-      const restored = await syncWithBrowserVault(token);
-      if (restored) {
-        setBackupMessage('Auto-restored historical analytics after update');
-        setTimeout(() => setBackupMessage(null), 4000);
-      }
-
-      const res = await fetch(`/api/admin/analytics?range=${dateRange}`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await fetch(`/api/admin/analytics?range=${dateRange}&_cb=${Date.now()}`, {
+        cache: 'no-store',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          Pragma: 'no-cache',
+        },
       });
 
       if (res.status === 401) {
@@ -400,13 +511,82 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
         return;
       }
 
+      // If server returns 404/502/503/504 during a Coolify deployment switchover, pause polling until healthy
+      if (!res.ok) {
+        isDeploymentInProgressRef.current = true;
+        // Wait for new container to pass healthcheck, then evict any cached 404 in Chrome
+        const waitForNewContainer = async () => {
+          for (let i = 0; i < 20; i++) {
+            await new Promise((r) => setTimeout(r, 1500));
+            try {
+              const healthRes = await fetch(`/api/health?_cb=${Date.now()}`, { cache: 'no-store' });
+              if (healthRes.ok) {
+                // Force Chrome to overwrite its HTTP disk cache for / and /admin so navigating never hits a cached 404
+                await Promise.allSettled([
+                  fetch('/', { cache: 'reload', headers: { Accept: 'text/html' } }),
+                  fetch(window.location.pathname, { cache: 'reload', headers: { Accept: 'text/html' } }),
+                ]);
+                break;
+              }
+            } catch {}
+          }
+          isDeploymentInProgressRef.current = false;
+        };
+        waitForNewContainer();
+        return;
+      }
+
+      // Detect if the server version changed (a deployment completed while Admin Dashboard was open!)
+      const serverVersion = res.headers.get('x-deployment-version');
+      let deploymentJustFinished = false;
+      if (serverVersion) {
+        if (knownServerVersionRef.current && knownServerVersionRef.current !== serverVersion) {
+          deploymentJustFinished = true;
+          // Evict any stale HTML entries from Chrome's disk cache immediately
+          Promise.allSettled([
+            fetch('/', { cache: 'reload', headers: { Accept: 'text/html' } }),
+            fetch(window.location.pathname, { cache: 'reload', headers: { Accept: 'text/html' } }),
+          ]);
+        }
+        knownServerVersionRef.current = serverVersion;
+      }
+
       const data = await res.json();
       if (data.success) {
+        const localVaultCount = getLocalVaultCount();
+        const serverCount = typeof data.totalStoredEvents === 'number' ? data.totalStoredEvents : 0;
+        const needsVaultSync =
+          deploymentJustFinished ||
+          lastVaultSyncTimeRef.current === 0 ||
+          serverCount < localVaultCount ||
+          Date.now() - lastVaultSyncTimeRef.current > 60000;
+
+        if (needsVaultSync) {
+          const restored = await syncWithBrowserVault(token);
+          if (restored) {
+            setBackupMessage('Auto-restored historical analytics after update');
+            setTimeout(() => setBackupMessage(null), 4000);
+            // Re-fetch computed KPIs after restoring historical events
+            const refreshedRes = await fetch(`/api/admin/analytics?range=${dateRange}&_cb=${Date.now()}`, {
+              cache: 'no-store',
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            if (refreshedRes.ok) {
+              const refreshedData = await refreshedRes.json();
+              if (refreshedData.success) {
+                setAnalytics(refreshedData);
+                setLastFetchedTime(new Date());
+                return;
+              }
+            }
+          }
+        }
+
         setAnalytics(data);
         setLastFetchedTime(new Date());
       }
-    } catch (err) {
-      console.error('Failed to load analytics:', err);
+    } catch {
+      // Network interruption during container restart — do not crash or log out
     } finally {
       setLoadingData(false);
     }
@@ -471,12 +651,339 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     if (e.target) e.target.value = '';
   };
 
+  // =========================================================================
+  // Scraper API Server Configuration & Browser Vault Sync
+  // =========================================================================
+  const [scraperConfigs, setScraperConfigs] = useState<Record<ScraperServerId, ScraperEndpointConfig>>(
+    () => DEFAULT_SCRAPER_ENDPOINTS
+  );
+  const [scraperEditModes, setScraperEditModes] = useState<Record<ScraperServerId, 'host_port' | 'full_url'>>({
+    cinepro: 'host_port',
+    tmdb_embed: 'host_port',
+    gateway_fallback: 'full_url',
+  });
+  const [scraperPings, setScraperPings] = useState<Record<ScraperServerId, ScraperPingResult>>({
+    cinepro: { loading: false },
+    tmdb_embed: { loading: false },
+    gateway_fallback: { loading: false },
+  });
+  const [scraperSaving, setScraperSaving] = useState<boolean>(false);
+  const [scraperIsCustom, setScraperIsCustom] = useState<boolean>(false);
+  const [scraperUpdatedAt, setScraperUpdatedAt] = useState<number>(0);
+  const [scraperBanner, setScraperBanner] = useState<{
+    type: 'success' | 'error' | 'info';
+    text: string;
+  } | null>(null);
+
+  const handleHostPortChange = (
+    id: ScraperServerId,
+    field: 'protocol' | 'host' | 'port',
+    rawValue: string
+  ) => {
+    setScraperConfigs((prev) => {
+      const current = prev[id];
+      let nextProto = current.protocol;
+      let nextHost = current.host;
+      let nextPort = current.port;
+
+      if (field === 'protocol') {
+        nextProto = rawValue === 'https' ? 'https' : 'http';
+      } else if (field === 'host') {
+        const trimmed = rawValue.trim();
+        // If user pastes a full URL into the Host/IP box, smartly extract protocol, host, and port
+        if (/^https?:\/\//i.test(trimmed)) {
+          try {
+            const parsed = new URL(trimmed);
+            nextProto = parsed.protocol === 'https:' ? 'https' : 'http';
+            nextHost = parsed.hostname;
+            if (parsed.port) nextPort = parsed.port;
+          } catch {
+            nextHost = trimmed.replace(/^https?:\/\//i, '');
+          }
+        } else if (trimmed.includes(':')) {
+          const [hPart, pPart] = trimmed.split(':');
+          nextHost = hPart;
+          if (pPart !== undefined) {
+            nextPort = pPart.replace(/[^0-9]/g, '');
+          }
+        } else {
+          nextHost = trimmed.replace(/\/.*$/, '');
+        }
+      } else if (field === 'port') {
+        nextPort = rawValue.replace(/[^0-9]/g, '').slice(0, 5);
+      }
+
+      const cleanHost = nextHost || '127.0.0.1';
+      const nextUrl = `${nextProto}://${cleanHost}${nextPort ? ':' + nextPort : ''}`;
+      return {
+        ...prev,
+        [id]: {
+          ...current,
+          protocol: nextProto,
+          host: nextHost,
+          port: nextPort,
+          url: nextUrl,
+        },
+      };
+    });
+  };
+
+  const handleFullUrlChange = (id: ScraperServerId, rawUrl: string) => {
+    setScraperConfigs((prev) => {
+      const current = prev[id];
+      let nextProto = current.protocol;
+      let nextHost = current.host;
+      let nextPort = current.port;
+
+      const trimmed = rawUrl.trim();
+      const candidate = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+      try {
+        const parsed = new URL(candidate);
+        nextProto = parsed.protocol === 'https:' ? 'https' : 'http';
+        nextHost = parsed.hostname || current.host;
+        nextPort = parsed.port || '';
+      } catch {
+        // Keep typing smoothly even while URL is incomplete
+      }
+
+      return {
+        ...prev,
+        [id]: {
+          ...current,
+          protocol: nextProto,
+          host: nextHost,
+          port: nextPort,
+          url: rawUrl,
+        },
+      };
+    });
+  };
+
+  const handleTestScraper = useCallback(
+    async (id: ScraperServerId, customCfg?: ScraperEndpointConfig) => {
+      if (!token) return;
+      const target = customCfg || scraperConfigs[id];
+      setScraperPings((prev) => ({
+        ...prev,
+        [id]: { loading: true, message: 'Testing connection...' },
+      }));
+
+      try {
+        const res = await fetch('/api/admin/scrapers/test', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            id,
+            url: target.url,
+            protocol: target.protocol,
+            host: target.host,
+            port: target.port,
+          }),
+        });
+        const data = await res.json();
+        setScraperPings((prev) => ({
+          ...prev,
+          [id]: {
+            loading: false,
+            reachable: Boolean(data.reachable),
+            status: data.status,
+            latencyMs: data.latencyMs,
+            streamCount: data.streamCount,
+            message: data.message || (data.reachable ? 'Online' : 'Unreachable'),
+          },
+        }));
+      } catch {
+        setScraperPings((prev) => ({
+          ...prev,
+          [id]: {
+            loading: false,
+            reachable: false,
+            message: 'Connection test failed',
+          },
+        }));
+      }
+    },
+    [token, scraperConfigs]
+  );
+
+  const handlePingAllScrapers = useCallback(() => {
+    (['cinepro', 'tmdb_embed', 'gateway_fallback'] as ScraperServerId[]).forEach((id) => {
+      handleTestScraper(id);
+    });
+  }, [handleTestScraper]);
+
+  const fetchAndSyncScrapers = useCallback(async () => {
+    if (!token) return;
+    try {
+      const res = await fetch(`/api/admin/scrapers?_cb=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data.success || !data.config) return;
+
+      const serverStore: ScraperConfigStore = data.config;
+
+      // Check Admin Browser Vault to see if a custom scraper config needs to be auto-restored after a container redeploy
+      const rawVault = localStorage.getItem(SCRAPER_VAULT_STORAGE_KEY);
+      if (rawVault) {
+        try {
+          const vaultStore: ScraperConfigStore = JSON.parse(rawVault);
+          if (
+            vaultStore &&
+            vaultStore.isCustom &&
+            vaultStore.scrapers &&
+            vaultStore.updatedAt > (serverStore.updatedAt || 0)
+          ) {
+            const restoreRes = await fetch('/api/admin/scrapers', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({
+                scrapers: vaultStore.scrapers,
+                updatedAt: vaultStore.updatedAt,
+              }),
+            });
+            if (restoreRes.ok) {
+              const restoredData = await restoreRes.json();
+              if (restoredData.success && restoredData.config) {
+                setScraperConfigs(restoredData.config.scrapers);
+                setScraperIsCustom(Boolean(restoredData.config.isCustom));
+                setScraperUpdatedAt(restoredData.config.updatedAt || Date.now());
+                setScraperBanner({
+                  type: 'info',
+                  text: 'Auto-restored your custom scraper server IPs & ports from Admin Browser Vault.',
+                });
+                setTimeout(() => setScraperBanner(null), 5000);
+                return;
+              }
+            }
+          }
+        } catch {}
+      }
+
+      setScraperConfigs(serverStore.scrapers);
+      setScraperIsCustom(Boolean(serverStore.isCustom));
+      setScraperUpdatedAt(serverStore.updatedAt || 0);
+
+      if (serverStore.isCustom) {
+        try {
+          localStorage.setItem(SCRAPER_VAULT_STORAGE_KEY, JSON.stringify(serverStore));
+        } catch {}
+      }
+    } catch {}
+  }, [token]);
+
+  const handleSaveScrapers = async () => {
+    if (!token) return;
+    setScraperSaving(true);
+    setScraperBanner(null);
+    try {
+      const now = Date.now();
+      const res = await fetch('/api/admin/scrapers', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          scrapers: scraperConfigs,
+          updatedAt: now,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success && data.config) {
+        const updatedStore: ScraperConfigStore = data.config;
+        setScraperConfigs(updatedStore.scrapers);
+        setScraperIsCustom(Boolean(updatedStore.isCustom));
+        setScraperUpdatedAt(updatedStore.updatedAt || now);
+        try {
+          localStorage.setItem(SCRAPER_VAULT_STORAGE_KEY, JSON.stringify(updatedStore));
+        } catch {}
+        setScraperBanner({
+          type: 'success',
+          text:
+            data.message ||
+            'Scraper API servers saved to server disk & Admin Browser Vault. Live streams updated immediately.',
+        });
+        // Run live ping on all updated servers to give immediate visual verification
+        (['cinepro', 'tmdb_embed', 'gateway_fallback'] as ScraperServerId[]).forEach((id) => {
+          handleTestScraper(id, updatedStore.scrapers[id]);
+        });
+      } else {
+        setScraperBanner({
+          type: 'error',
+          text: data.error || 'Failed to save scraper configuration.',
+        });
+      }
+    } catch {
+      setScraperBanner({
+        type: 'error',
+        text: 'Network error while saving scraper server configuration.',
+      });
+    } finally {
+      setScraperSaving(false);
+    }
+  };
+
+  const handleResetScrapers = async () => {
+    if (!token) return;
+    setScraperSaving(true);
+    setScraperBanner(null);
+    try {
+      const res = await fetch('/api/admin/scrapers', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ reset: true }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success && data.config) {
+        setScraperConfigs(data.config.scrapers);
+        setScraperIsCustom(false);
+        setScraperUpdatedAt(data.config.updatedAt || Date.now());
+        try {
+          localStorage.removeItem(SCRAPER_VAULT_STORAGE_KEY);
+        } catch {}
+        setScraperBanner({
+          type: 'info',
+          text: 'Restored default Coolify scraper server URLs and ports.',
+        });
+        (['cinepro', 'tmdb_embed', 'gateway_fallback'] as ScraperServerId[]).forEach((id) => {
+          handleTestScraper(id, data.config.scrapers[id]);
+        });
+      }
+    } catch {
+      setScraperBanner({
+        type: 'error',
+        text: 'Failed to reset scraper servers.',
+      });
+    } finally {
+      setScraperSaving(false);
+    }
+  };
+
   // Initial fetch and on dateRange change
   useEffect(() => {
     if (isAuthenticated) {
       fetchAnalytics();
     }
   }, [isAuthenticated, dateRange, fetchAnalytics]);
+
+  // Fetch & sync scraper server config once authenticated
+  useEffect(() => {
+    if (isAuthenticated) {
+      fetchAndSyncScrapers();
+    }
+  }, [isAuthenticated, fetchAndSyncScrapers]);
 
   // Auto-refresh timer (polls every 10 seconds for real live stream updates)
   useEffect(() => {
@@ -747,10 +1254,19 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
           </label>
 
 
+          {/* Jump to Scraper API Servers Manager */}
+          <a
+            href="#scraper-servers-panel"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600/15 hover:bg-blue-600/25 text-blue-300 hover:text-white border border-blue-500/30 text-xs font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Server className="w-3.5 h-3.5 text-blue-400" />
+            <span>Scraper APIs</span>
+          </a>
+
           {/* Back to Website */}
           <button
             onClick={onExit}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-xs font-semibold transition-all cursor-pointer"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-xs font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0"
           >
             <Globe className="w-3.5 h-3.5 text-blue-400" />
             <span>View Site</span>
@@ -867,6 +1383,270 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
             <div className="text-[11px] text-slate-400 mt-2">Audience sessions</div>
           </div>
         </div>
+
+        {/* =========================================================
+            Backend Scraper API & Server Configuration Manager
+           ========================================================= */}
+        <section
+          id="scraper-servers-panel"
+          className="bg-[#0e1424] border border-white/10 rounded-2xl p-5 md:p-6 flex flex-col gap-5 scroll-mt-20"
+        >
+          <div className="flex items-start md:items-center justify-between flex-col md:flex-row gap-4 border-b border-white/10 pb-4">
+            <div className="flex items-start gap-3.5">
+              <div className="w-10 h-10 rounded-xl bg-blue-500/10 border border-blue-500/25 flex items-center justify-center text-blue-400 shrink-0 mt-0.5 md:mt-0">
+                <Server className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2.5 flex-wrap">
+                  <h2 className="text-base font-bold text-white tracking-tight">
+                    Backend Scraper API &amp; Server Configuration
+                  </h2>
+                  <span className="text-xs font-mono text-slate-400">
+                    · {scraperIsCustom ? 'Custom Admin Endpoints Active' : 'Default Coolify Endpoints'}
+                    {scraperUpdatedAt > 0
+                      ? ` · Saved ${new Date(scraperUpdatedAt).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}`
+                      : ''}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 mt-1">
+                  Replace scraper server IPs, edit ports, or update full URLs directly. Changes apply immediately to live streams and are backed up to Server Disk + Admin Browser Vault.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2.5 flex-wrap shrink-0">
+              <button
+                type="button"
+                onClick={handlePingAllScrapers}
+                className="px-3.5 py-2 rounded-xl bg-[#131b2e] hover:bg-[#19233b] text-slate-200 border border-white/10 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Activity className="w-3.5 h-3.5 text-teal-400" />
+                <span>Ping All Servers</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleResetScrapers}
+                disabled={scraperSaving}
+                className="px-3.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+              >
+                Restore Defaults
+              </button>
+
+              <button
+                type="button"
+                onClick={handleSaveScrapers}
+                disabled={scraperSaving}
+                className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-lg shadow-blue-950/40 transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+              >
+                {scraperSaving ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Saving...</span>
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Save &amp; Apply Changes</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {scraperBanner && (
+            <div
+              className={`p-3 rounded-xl border text-xs font-medium flex items-center justify-between gap-3 ${
+                scraperBanner.type === 'success'
+                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-200'
+                  : scraperBanner.type === 'error'
+                  ? 'bg-rose-500/15 border-rose-500/30 text-rose-200'
+                  : 'bg-blue-500/15 border-blue-500/30 text-blue-200'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                {scraperBanner.type === 'error' ? (
+                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                )}
+                <span>{scraperBanner.text}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setScraperBanner(null)}
+                className="text-slate-400 hover:text-white px-2 py-0.5 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
+          {/* 3-Column Scraper Engine Cards */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            {(['cinepro', 'tmdb_embed', 'gateway_fallback'] as ScraperServerId[]).map((id, idx) => {
+              const cfg = scraperConfigs[id] || DEFAULT_SCRAPER_ENDPOINTS[id];
+              const mode = scraperEditModes[id] || 'host_port';
+              const ping = scraperPings[id] || { loading: false };
+              const isModified = cfg.url !== cfg.defaultUrl;
+
+              return (
+                <div
+                  key={id}
+                  className="bg-[#11182a] border border-white/10 rounded-xl p-4 flex flex-col justify-between gap-4"
+                >
+                  <div className="flex flex-col gap-3">
+                    {/* Card Header & Mode Switch */}
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                          <span className="font-mono text-blue-400">0{idx + 1}.</span>
+                          <span>{cfg.name}</span>
+                        </div>
+                        <p className="text-[11px] text-slate-400 mt-0.5">{cfg.role}</p>
+                      </div>
+
+                      {/* Segmented Mode Toggle: Host + Port vs Full URL */}
+                      <div className="flex items-center bg-[#0b101d] border border-white/10 rounded-lg p-0.5 text-[10px] shrink-0">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setScraperEditModes((prev) => ({ ...prev, [id]: 'host_port' }))
+                          }
+                          className={`px-2 py-1 rounded-md font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                            mode === 'host_port'
+                              ? 'bg-blue-600 text-white'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          IP + Port
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setScraperEditModes((prev) => ({ ...prev, [id]: 'full_url' }))
+                          }
+                          className={`px-2 py-1 rounded-md font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                            mode === 'full_url'
+                              ? 'bg-blue-600 text-white'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          Full URL
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Input Fields: Host/IP + Port Mode OR Full URL Mode */}
+                    {mode === 'host_port' ? (
+                      <div className="grid grid-cols-12 gap-2">
+                        <div className="col-span-3">
+                          <label className="block text-[10px] font-semibold text-slate-400 mb-1">
+                            Protocol
+                          </label>
+                          <select
+                            value={cfg.protocol}
+                            onChange={(e) => handleHostPortChange(id, 'protocol', e.target.value)}
+                            className="w-full bg-[#0b101d] border border-white/10 rounded-lg px-2 py-2 text-xs font-mono text-white focus:outline-none focus:border-blue-500"
+                          >
+                            <option value="http">http://</option>
+                            <option value="https">https://</option>
+                          </select>
+                        </div>
+
+                        <div className="col-span-6">
+                          <label className="block text-[10px] font-semibold text-slate-400 mb-1">
+                            Server Host / IP
+                          </label>
+                          <input
+                            type="text"
+                            value={cfg.host}
+                            onChange={(e) => handleHostPortChange(id, 'host', e.target.value)}
+                            placeholder="62.171.179.144"
+                            className="w-full bg-[#0b101d] border border-white/10 rounded-lg px-2.5 py-2 text-xs font-mono tabular-nums text-white placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
+                          />
+                        </div>
+
+                        <div className="col-span-3">
+                          <label className="block text-[10px] font-semibold text-slate-400 mb-1">
+                            Port
+                          </label>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            value={cfg.port}
+                            onChange={(e) => handleHostPortChange(id, 'port', e.target.value)}
+                            placeholder={id === 'cinepro' ? '3001' : id === 'tmdb_embed' ? '3005' : '80'}
+                            className="w-full bg-[#0b101d] border border-white/10 rounded-lg px-2.5 py-2 text-xs font-mono tabular-nums text-amber-300 placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <label className="block text-[10px] font-semibold text-slate-400 mb-1">
+                          Full Scraper Endpoint URL
+                        </label>
+                        <input
+                          type="text"
+                          value={cfg.url}
+                          onChange={(e) => handleFullUrlChange(id, e.target.value)}
+                          placeholder={cfg.defaultUrl}
+                          className="w-full bg-[#0b101d] border border-white/10 rounded-lg px-3 py-2 text-xs font-mono tabular-nums text-white placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+                    )}
+
+                    {/* Effective Resolved Endpoint Preview */}
+                    <div className="flex items-center justify-between text-[11px] font-mono tabular-nums text-slate-400 bg-[#0b101d]/70 px-2.5 py-1.5 rounded-lg border border-white/5">
+                      <span className="truncate" title={cfg.url}>
+                        Active: <strong className="text-slate-200">{cfg.url}</strong>
+                      </span>
+                      <span className="shrink-0 ml-2 text-[10px] text-slate-500">
+                        {isModified ? 'Edited' : 'Default'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Footer: Live Connection Test & Ping Result */}
+                  <div className="pt-3 border-t border-white/5 flex items-center justify-between gap-2">
+                    <div className="min-w-0 flex-1 text-[11px] font-mono tabular-nums truncate">
+                      {ping.loading ? (
+                        <span className="text-blue-400 flex items-center gap-1.5">
+                          <RefreshCw className="w-3 h-3 animate-spin shrink-0" />
+                          <span>Pinging upstream...</span>
+                        </span>
+                      ) : ping.message ? (
+                        <span
+                          className={
+                            ping.reachable ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold'
+                          }
+                          title={ping.message}
+                        >
+                          {ping.message}
+                        </span>
+                      ) : (
+                        <span className="text-slate-500">Click Test Ping to verify server</span>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleTestScraper(id)}
+                      disabled={ping.loading}
+                      className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 border border-white/10 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+                    >
+                      <Zap className="w-3 h-3 text-amber-400" />
+                      <span>Test Ping</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
 
         {/* Live Streamers Monitor (Shows who is actively watching right now) */}
         {analytics?.liveStreams && analytics.liveStreams.length > 0 && (
@@ -1527,21 +2307,40 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
 
               <div className="flex flex-col gap-2">
                 {[
-                  { name: 'CinePro Cloud Scraper', status: 'Operational', uptime: '99.8%' },
-                  { name: 'TMDB Embed Gateway', status: 'Operational', uptime: '99.9%' },
-                  { name: 'Fast Direct Mirrors', status: 'Operational', uptime: '100%' },
-                  { name: 'Subtitle Proxy Cluster', status: 'Operational', uptime: '100%' },
+                  {
+                    name: 'CinePro Primary Scraper',
+                    endpoint: `${scraperConfigs.cinepro.host}${scraperConfigs.cinepro.port ? ':' + scraperConfigs.cinepro.port : ''}`,
+                    ping: scraperPings.cinepro,
+                  },
+                  {
+                    name: 'TMDB Embed Scraper',
+                    endpoint: `${scraperConfigs.tmdb_embed.host}${scraperConfigs.tmdb_embed.port ? ':' + scraperConfigs.tmdb_embed.port : ''}`,
+                    ping: scraperPings.tmdb_embed,
+                  },
+                  {
+                    name: 'Coolify Gateway Fallback',
+                    endpoint: scraperConfigs.gateway_fallback.host,
+                    ping: scraperPings.gateway_fallback,
+                  },
                 ].map((srv) => (
                   <div
                     key={srv.name}
-                    className="flex items-center justify-between p-2 rounded-xl bg-[#131b2e] border border-white/5 text-xs"
+                    className="flex items-center justify-between p-2 rounded-xl bg-[#131b2e] border border-white/5 text-xs gap-2"
                   >
-                    <div className="flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                      <span className="text-slate-300 font-medium">{srv.name}</span>
+                    <div className="flex flex-col min-w-0">
+                      <span className="text-slate-200 font-medium truncate">{srv.name}</span>
+                      <span className="text-[10px] font-mono tabular-nums text-slate-400 truncate">
+                        {srv.endpoint}
+                      </span>
                     </div>
-                    <span className="text-emerald-400 font-mono text-[10px] font-bold">
-                      {srv.uptime}
+                    <span
+                      className={`font-mono tabular-nums text-[10px] font-bold shrink-0 ${
+                        srv.ping?.reachable === false ? 'text-rose-400' : 'text-emerald-400'
+                      }`}
+                    >
+                      {srv.ping?.latencyMs !== undefined
+                        ? `${srv.ping.latencyMs} ms`
+                        : 'Configured'}
                     </span>
                   </div>
                 ))}
