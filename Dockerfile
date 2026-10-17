@@ -2,46 +2,47 @@
 # 1. Base stage
 FROM node:22-alpine AS base
 WORKDIR /app
-RUN apk add --no-cache libc6-compat
+RUN apk add --no-cache libc6-compat curl wget
 
-# 2. Dependencies stage
+# 2. Dependencies stage (installs all dependencies including dev for building)
 FROM base AS deps
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --prefer-offline --no-audit
 
-# 3. Builder stage
+# 3. Builder stage (compiles client bundle and server bundle)
 FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NODE_ENV=production
 ENV NODE_OPTIONS="--max-old-space-size=2048"
-RUN npm run build && npm prune --omit=dev --no-audit
+RUN npm run build
 
-# 4. Production Runner stage
+# 4. Production Runner stage (clean, minimal, fast start)
 FROM base AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
 
-# Copy runtime files
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./package.json
+# Install production dependencies only using the warmed npm cache (instant 2s)
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --omit=dev --prefer-offline --no-audit
+
+# Copy built production assets
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server.js ./server.js
 COPY --from=builder /app/server.ts ./server.ts
 COPY --from=builder /app/data ./data
 
-# Create data directory for user persistence with correct ownership
+# Setup persistence directory permissions for Coolify volume mounts
 RUN mkdir -p /app/data /app/downloads && \
-    addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 notflix && \
-    chown -R notflix:nodejs /app
-
-VOLUME ["/app/data", "/app/downloads"]
-
-USER notflix
+    chmod -R 777 /app/data /app/downloads
 
 EXPOSE 3000
+
+# Healthcheck guarantees Coolify zero-downtime auto-deploy waits until the server is ready before routing
+HEALTHCHECK --interval=3s --timeout=3s --start-period=5s --retries=5 \
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/api/health || exit 1
 
 CMD ["node", "server.js"]
