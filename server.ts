@@ -1572,9 +1572,50 @@ app.post('/api/user/sync', (req: Request, res: Response) => {
 
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'Linotte17';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'LinotteM1704&@';
+const ADMIN_TOKEN_SECRET = crypto
+  .createHash('sha256')
+  .update(`notflix-admin-secret:${ADMIN_USERNAME}:${ADMIN_PASSWORD}`)
+  .digest('hex');
 
-// Admin active sessions: token -> { createdAt, expiresAt, username }
+// Admin active sessions & revoked tokens (supports stateless HMAC tokens that survive container restarts)
 const activeAdminTokens = new Map<string, { createdAt: number; expiresAt: number; username: string }>();
+const revokedAdminTokens = new Set<string>();
+
+function createStatelessAdminToken(username: string, expiresAt: number): string {
+  const payload = Buffer.from(JSON.stringify({ u: username, exp: expiresAt })).toString('base64url');
+  const sig = crypto.createHmac('sha256', ADMIN_TOKEN_SECRET).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function verifyAdminToken(token: string): { username: string; expiresAt: number } | null {
+  if (!token || revokedAdminTokens.has(token)) return null;
+
+  // 1. Check stateless HMAC token (survives container updates/restarts)
+  if (token.includes('.')) {
+    const [payload, sig] = token.split('.');
+    if (payload && sig) {
+      const expectedSig = crypto.createHmac('sha256', ADMIN_TOKEN_SECRET).update(payload).digest('base64url');
+      if (sig === expectedSig) {
+        try {
+          const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8'));
+          if (decoded && decoded.u === ADMIN_USERNAME && typeof decoded.exp === 'number' && Date.now() <= decoded.exp) {
+            return { username: decoded.u, expiresAt: decoded.exp };
+          }
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+
+  // 2. Fallback to legacy in-memory token map
+  const session = activeAdminTokens.get(token);
+  if (session && Date.now() <= session.expiresAt) {
+    return { username: session.username, expiresAt: session.expiresAt };
+  }
+  if (session) activeAdminTokens.delete(token);
+  return null;
+}
 
 function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
@@ -1582,16 +1623,16 @@ function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
     return res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
   }
   const token = authHeader.slice(7).trim();
-  const session = activeAdminTokens.get(token);
-  if (!session || Date.now() > session.expiresAt) {
-    if (session) activeAdminTokens.delete(token);
+  const verified = verifyAdminToken(token);
+  if (!verified) {
     return res.status(401).json({ error: 'Unauthorized: Session expired or invalid' });
   }
   next();
 }
 
-// Persistent Analytics storage
+// Persistent Analytics storage (multi-path merge + redundant mirror)
 const ANALYTICS_DATA_FILE = path.join(DATA_DIR, 'analytics.json');
+const ANALYTICS_BACKUP_MIRROR_FILE = '/var/tmp/notflix_analytics_backup.json';
 
 interface AnalyticsEvent {
   id: string;
@@ -1655,11 +1696,16 @@ function sanitizeAnalyticsEvents(events: AnalyticsEvent[]): AnalyticsEvent[] {
 function readAnalyticsData(): AnalyticsData {
   const candidatePaths = [
     ANALYTICS_DATA_FILE,
+    ANALYTICS_BACKUP_MIRROR_FILE,
+    '/data/analytics.json',
+    '/app/data/analytics.json',
     path.join(process.cwd(), 'data', 'analytics.json'),
     path.join(__dirname, 'data', 'analytics.json'),
-    '/app/data/analytics.json',
-    '/data/analytics.json',
+    '/app/data_seed/analytics.json',
+    path.join(process.cwd(), 'data_seed', 'analytics.json'),
   ];
+
+  const mergedMap = new Map<string, AnalyticsEvent>();
 
   for (const candidate of candidatePaths) {
     try {
@@ -1667,9 +1713,17 @@ function readAnalyticsData(): AnalyticsData {
         const content = fs.readFileSync(candidate, 'utf-8');
         const parsed = JSON.parse(content);
         if (Array.isArray(parsed.events) && parsed.events.length > 0) {
-          console.log(`📊 Loaded analytics data from ${candidate} (${parsed.events.length} events)`);
-          parsed.events = sanitizeAnalyticsEvents(parsed.events);
-          return parsed;
+          const sanitized = sanitizeAnalyticsEvents(parsed.events);
+          let addedFromCandidate = 0;
+          for (const ev of sanitized) {
+            if (ev && ev.id && !mergedMap.has(ev.id)) {
+              mergedMap.set(ev.id, ev);
+              addedFromCandidate++;
+            }
+          }
+          if (addedFromCandidate > 0) {
+            console.log(`📊 Merged ${addedFromCandidate} analytics events from ${candidate} (total: ${mergedMap.size})`);
+          }
         }
       }
     } catch (e) {
@@ -1677,28 +1731,60 @@ function readAnalyticsData(): AnalyticsData {
     }
   }
 
-  return { events: [], lastUpdated: Date.now() };
+  const mergedEvents = Array.from(mergedMap.values()).sort((a, b) => a.ts - b.ts).slice(-20000);
+  return { events: mergedEvents, lastUpdated: Date.now() };
+}
+
+function flushAnalyticsToDiskSync() {
+  try {
+    analyticsStore.lastUpdated = Date.now();
+    if (analyticsStore.events.length > 20000) {
+      analyticsStore.events = analyticsStore.events.slice(-20000);
+    }
+    const serialized = JSON.stringify(analyticsStore);
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(ANALYTICS_DATA_FILE, serialized, 'utf-8');
+    try {
+      fs.writeFileSync(ANALYTICS_BACKUP_MIRROR_FILE, serialized, 'utf-8');
+    } catch {
+      // Ignore if /var/tmp is read-only
+    }
+  } catch (err) {
+    console.error('Error saving analytics data:', err);
+  }
 }
 
 analyticsStore = readAnalyticsData();
+if (analyticsStore.events.length > 0) {
+  flushAnalyticsToDiskSync();
+}
 
 let saveAnalyticsTimeout: NodeJS.Timeout | null = null;
 function scheduleSaveAnalytics() {
   if (saveAnalyticsTimeout) return;
   saveAnalyticsTimeout = setTimeout(() => {
     saveAnalyticsTimeout = null;
-    try {
-      analyticsStore.lastUpdated = Date.now();
-      // Cap at 20,000 events to prevent disk bloating while preserving rich real history
-      if (analyticsStore.events.length > 20000) {
-        analyticsStore.events = analyticsStore.events.slice(-20000);
-      }
-      fs.writeFileSync(ANALYTICS_DATA_FILE, JSON.stringify(analyticsStore), 'utf-8');
-    } catch (err) {
-      console.error('Error saving analytics data:', err);
-    }
-  }, 2000);
+    flushAnalyticsToDiskSync();
+  }, 1500);
 }
+
+// Flush pending analytics immediately on container stop/redeploy (SIGTERM / SIGINT)
+process.on('SIGTERM', () => {
+  if (saveAnalyticsTimeout) {
+    clearTimeout(saveAnalyticsTimeout);
+    saveAnalyticsTimeout = null;
+  }
+  flushAnalyticsToDiskSync();
+});
+process.on('SIGINT', () => {
+  if (saveAnalyticsTimeout) {
+    clearTimeout(saveAnalyticsTimeout);
+    saveAnalyticsTimeout = null;
+  }
+  flushAnalyticsToDiskSync();
+});
 
 // In-memory active live viewers tracker: sessionId -> { lastPing, title, device, mediaType, season, episode, poster }
 const activeLiveViewers = new Map<
@@ -1725,8 +1811,8 @@ app.post('/api/admin/login', (req: Request, res: Response) => {
     return res.status(401).json({ error: 'Invalid username or password' });
   }
 
-  const token = crypto.randomBytes(32).toString('hex');
-  const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days session
+  const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000; // 30 days session
+  const token = createStatelessAdminToken(ADMIN_USERNAME, expiresAt);
   activeAdminTokens.set(token, { createdAt: Date.now(), expiresAt, username: ADMIN_USERNAME });
 
   return res.json({
@@ -1744,12 +1830,11 @@ app.get('/api/admin/verify', (req: Request, res: Response) => {
     return res.status(401).json({ valid: false });
   }
   const token = authHeader.slice(7).trim();
-  const session = activeAdminTokens.get(token);
-  if (!session || Date.now() > session.expiresAt) {
-    if (session) activeAdminTokens.delete(token);
+  const verified = verifyAdminToken(token);
+  if (!verified) {
     return res.status(401).json({ valid: false });
   }
-  return res.json({ valid: true, username: session.username });
+  return res.json({ valid: true, username: verified.username });
 });
 
 // POST /api/admin/logout
@@ -1758,6 +1843,7 @@ app.post('/api/admin/logout', (req: Request, res: Response) => {
   if (authHeader?.startsWith('Bearer ')) {
     const token = authHeader.slice(7).trim();
     activeAdminTokens.delete(token);
+    revokedAdminTokens.add(token);
   }
   return res.json({ success: true });
 });
@@ -2079,6 +2165,7 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
     return res.json({
       success: true,
       range,
+      totalStoredEvents: analyticsStore.events.length,
       kpis: {
         liveViewers: liveViewersCount,
         totalViews,
@@ -2144,16 +2231,7 @@ app.post('/api/admin/analytics/import', requireAdminAuth, (req: Request, res: Re
     }
 
     analyticsStore.events.sort((a, b) => a.ts - b.ts);
-    analyticsStore.lastUpdated = Date.now();
-
-    try {
-      if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-      }
-      fs.writeFileSync(ANALYTICS_DATA_FILE, JSON.stringify(analyticsStore, null, 2), 'utf-8');
-    } catch (writeErr) {
-      console.error('Error persisting imported analytics:', writeErr);
-    }
+    flushAnalyticsToDiskSync();
 
     return res.json({
       success: true,

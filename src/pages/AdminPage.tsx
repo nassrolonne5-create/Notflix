@@ -290,12 +290,107 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     setIsAuthenticated(false);
   };
 
+  // Automatic Persistent Browser Vault (survives container rebuilds/updates even without Docker volumes)
+  const ADMIN_VAULT_KEY = 'notflix_admin_analytics_vault_v1';
+  const isVaultSyncingRef = React.useRef(false);
+
+  const syncWithBrowserVault = useCallback(
+    async (authToken: string): Promise<boolean> => {
+      if (isVaultSyncingRef.current) return false;
+      isVaultSyncingRef.current = true;
+      try {
+        const exportRes = await fetch('/api/admin/analytics/export', {
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        if (!exportRes.ok) return false;
+        const serverStore = await exportRes.json();
+        const serverEvents: any[] = Array.isArray(serverStore?.events) ? serverStore.events : [];
+
+        // Load local browser vault
+        let vaultEvents: any[] = [];
+        try {
+          const rawVault = localStorage.getItem(ADMIN_VAULT_KEY);
+          if (rawVault) {
+            const parsedVault = JSON.parse(rawVault);
+            if (Array.isArray(parsedVault?.events)) {
+              vaultEvents = parsedVault.events;
+            } else if (Array.isArray(parsedVault)) {
+              vaultEvents = parsedVault;
+            }
+          }
+        } catch {
+          vaultEvents = [];
+        }
+
+        const serverIdSet = new Set(serverEvents.map((e) => e?.id).filter(Boolean));
+        const missingOnServer = vaultEvents.filter((e) => e && e.id && !serverIdSet.has(e.id));
+
+        let restoredToServer = false;
+        // If local browser vault has historical events that the server lost after an update/redeploy, auto-restore them!
+        if (missingOnServer.length > 0) {
+          const importRes = await fetch('/api/admin/analytics/import', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${authToken}`,
+            },
+            body: JSON.stringify({ events: missingOnServer }),
+          });
+          if (importRes.ok) {
+            restoredToServer = true;
+          }
+        }
+
+        // Merge both sets into the local browser vault (keep latest 10,000 events)
+        const mergedMap = new Map<string, any>();
+        for (const ev of vaultEvents) {
+          if (ev && ev.id) mergedMap.set(ev.id, ev);
+        }
+        for (const ev of serverEvents) {
+          if (ev && ev.id) mergedMap.set(ev.id, ev);
+        }
+        const mergedList = Array.from(mergedMap.values())
+          .sort((a, b) => (a.ts || 0) - (b.ts || 0))
+          .slice(-10000);
+
+        try {
+          localStorage.setItem(
+            ADMIN_VAULT_KEY,
+            JSON.stringify({ events: mergedList, lastUpdated: Date.now() })
+          );
+        } catch {
+          // If localStorage quota is tight, store the most recent 4,000 events
+          try {
+            localStorage.setItem(
+              ADMIN_VAULT_KEY,
+              JSON.stringify({ events: mergedList.slice(-4000), lastUpdated: Date.now() })
+            );
+          } catch {}
+        }
+
+        return restoredToServer;
+      } catch {
+        return false;
+      } finally {
+        isVaultSyncingRef.current = false;
+      }
+    },
+    []
+  );
+
   // Fetch Analytics Data
   const fetchAnalytics = useCallback(async () => {
     if (!token) return;
     setLoadingData(true);
 
     try {
+      // First sync with browser vault so if a deployment reset the container, historical events are restored before computing KPIs
+      const restored = await syncWithBrowserVault(token);
+      if (restored) {
+        setBackupMessage('Auto-restored historical analytics after update');
+        setTimeout(() => setBackupMessage(null), 4000);
+      }
+
       const res = await fetch(`/api/admin/analytics?range=${dateRange}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -315,7 +410,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     } finally {
       setLoadingData(false);
     }
-  }, [token, dateRange]);
+  }, [token, dateRange, syncWithBrowserVault]);
 
   // Analytics Backup & Restore handlers
   const [backupMessage, setBackupMessage] = useState<string | null>(null);
@@ -361,6 +456,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
         });
         const result = await res.json();
         if (result.success) {
+          if (token) await syncWithBrowserVault(token);
           fetchAnalytics();
           setBackupMessage(result.message || 'Analytics restored!');
         } else {

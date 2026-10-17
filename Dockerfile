@@ -29,15 +29,17 @@ COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --omit=dev --prefer-offline --no-audit
 
-# Copy built production assets
+# Copy built production assets (keep /app/data_seed separate so /app/data volume is never overwritten on deploy)
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server.js ./server.js
 COPY --from=builder /app/server.ts ./server.ts
-COPY --from=builder /app/data ./data
+COPY --from=builder /app/data ./data_seed
 
 # Setup persistence directory permissions for Coolify volume mounts
-RUN mkdir -p /app/data /app/downloads && \
-    chmod -R 777 /app/data /app/downloads
+RUN mkdir -p /app/data /app/data_seed /app/downloads && \
+    chmod -R 777 /app/data /app/data_seed /app/downloads
+
+VOLUME ["/app/data"]
 
 EXPOSE 3000
 
