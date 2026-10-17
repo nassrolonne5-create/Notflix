@@ -32,15 +32,18 @@ export interface SmartAdMetrics {
   effectiveCooldowns: Record<string, number>;
 }
 
-// Base intervals in milliseconds
+// Base intervals in milliseconds (tuned for high repetition and rapid delivery)
 const BASE_COOLDOWNS: Record<string, number> = {
-  global: 12000,      // 12s minimum global spacing between ANY ad
-  poster: 15000,      // 15s base for movie/show posters
-  dock: 20000,        // 20s base for floating dock tabs
-  tab: 20000,         // 20s base for category/tab switches
-  fullscreen: 25000,  // 25s base for fullscreen toggles
-  episode: 35000,     // 35s base for next-episode clicks
-  download: 15000,    // 15s base for download triggers
+  global: 3000,      // 3s minimum global spacing between ANY ad
+  poster: 4000,      // 4s base for movie/show posters
+  dock: 5000,        // 5s base for floating dock tabs
+  tab: 5000,         // 5s base for category/tab switches
+  fullscreen: 6000,  // 6s base for fullscreen toggles
+  episode: 8000,     // 8s base for next-episode clicks
+  download: 4000,    // 4s base for download triggers
+  search: 4000,      // 4s base for search triggers
+  play: 4000,        // 4s base for play triggers
+  pip: 5000,         // 5s base for pip triggers
 };
 
 const STORAGE_KEY = 'notflix_smart_ad_metrics_v1';
@@ -135,19 +138,19 @@ class SmartAdFrequencyController {
     const sessionAgeSec = Math.floor((Date.now() - this.sessionStartTime) / 1000);
     const velocity = this.getInteractionVelocity();
 
-    // 1. High Friction / Rage-Click Detection (velocity > 18 clicks/min or friction score >= 2)
-    if (this.frictionScore >= 2 || velocity >= 18) {
-      return { tier: 'high_friction', multiplier: 2.0 }; // 2x interval: back off to preserve user
+    // 1. High Friction / Rage-Click Detection
+    if (this.frictionScore >= 4 || velocity >= 25) {
+      return { tier: 'high_friction', multiplier: 1.1 };
     }
 
-    // 2. Active Video Playback Immersion (watching movie > 120s or active playback)
-    if (this.isPlaybackActive || this.watchTimeSeconds >= 120) {
-      return { tier: 'immersive_watch', multiplier: 1.45 }; // 1.45x interval: respectful of watch flow
+    // 2. Active Video Playback Immersion
+    if (this.isPlaybackActive || this.watchTimeSeconds >= 180) {
+      return { tier: 'immersive_watch', multiplier: 1.0 };
     }
 
-    // 3. New User Onboarding Grace Period (< 75 seconds and < 2 items explored)
-    if (sessionAgeSec < 75 && this.itemsExplored < 2) {
-      return { tier: 'onboarding', multiplier: 1.35 }; // 1.35x interval: allow first impressions
+    // 3. New User Onboarding (first 20 seconds only)
+    if (sessionAgeSec < 20 && this.itemsExplored < 1) {
+      return { tier: 'onboarding', multiplier: 1.0 };
     }
 
     // 4. Loyal Returning Visitor
@@ -163,11 +166,11 @@ class SmartAdFrequencyController {
     } catch {}
 
     if (isLoyal) {
-      return { tier: 'loyal_viewer', multiplier: 1.1 };
+      return { tier: 'loyal_viewer', multiplier: 0.8 };
     }
 
     // 5. High-Intent Discovery Mode (Browsing, search, exploring cards)
-    return { tier: 'discovery', multiplier: 0.85 }; // 0.85x interval: optimal monetization window
+    return { tier: 'discovery', multiplier: 0.65 }; // 0.65x interval: repetitive delivery
   }
 
   /**

@@ -59,15 +59,13 @@ interface AdPacingState {
   downloadClicks: number;
 }
 
-// Global anti-spam cooldown: minimum gap between ANY ad on the entire site
-const GLOBAL_MIN_INTERVAL_MS = 12000; // 12 seconds
-
-// Individual trigger cadence limits (increased impressions without being spammy)
-const POSTER_INTERVAL_MS = 15000;    // 15 seconds cooldown for poster clicks
-const DOCK_INTERVAL_MS = 20000;      // 20 seconds cooldown for floating dock tabs
-const FULLSCREEN_INTERVAL_MS = 25000;// 25 seconds cooldown for fullscreen toggles
-const TAB_INTERVAL_MS = 20000;       // 20 seconds cooldown for general tab changes
-const EPISODE_INTERVAL_MS = 35000;   // 35 seconds cooldown for episode switching
+// Tuned intervals for repetitive, higher-frequency ad monetization
+const GLOBAL_MIN_INTERVAL_MS = 3000; // 3 seconds minimum global spacing
+const POSTER_INTERVAL_MS = 4000;     // 4 seconds cooldown for poster clicks
+const DOCK_INTERVAL_MS = 5000;       // 5 seconds cooldown for floating dock tabs
+const FULLSCREEN_INTERVAL_MS = 6000; // 6 seconds cooldown for fullscreen toggles
+const TAB_INTERVAL_MS = 5000;        // 5 seconds cooldown for general tab changes
+const EPISODE_INTERVAL_MS = 8000;    // 8 seconds cooldown for episode switching
 
 const getInitialAdPacingState = (): AdPacingState => ({
   lastGlobalAdTime: 0,
