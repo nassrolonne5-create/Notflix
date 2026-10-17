@@ -247,15 +247,25 @@ const antiScraperMiddleware = (req: Request, res: Response, next: NextFunction) 
 
 app.use('/api', antiScraperMiddleware);
 
-// Persistent User Data storage
+// Persistent Per-Device User Data storage (strictly isolated by deviceId)
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
-const USER_DATA_FILE = path.join(DATA_DIR, 'userdata.json');
+const USER_PROFILES_FILE = path.join(DATA_DIR, 'user_profiles.json');
+const LEGACY_GLOBAL_USER_DATA_FILE = path.join(DATA_DIR, 'userdata.json');
 
 if (!fs.existsSync(DATA_DIR)) {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   } catch (e) {
     console.error('Error creating data directory:', e);
+  }
+}
+
+// Clean up any legacy global userdata.json so global watch positions never leak across users
+if (fs.existsSync(LEGACY_GLOBAL_USER_DATA_FILE)) {
+  try {
+    fs.unlinkSync(LEGACY_GLOBAL_USER_DATA_FILE);
+  } catch (e) {
+    console.warn('Could not remove legacy global userdata.json:', e);
   }
 }
 
@@ -281,31 +291,68 @@ const defaultUserData: UserData = {
   },
 };
 
-function readUserData(): UserData {
-  try {
-    if (fs.existsSync(USER_DATA_FILE)) {
-      const content = fs.readFileSync(USER_DATA_FILE, 'utf-8');
-      const parsed = JSON.parse(content);
-      return {
-        ...defaultUserData,
-        ...parsed,
-        settings: {
-          ...defaultUserData.settings,
-          ...(parsed.settings || {}),
-        },
-      };
-    }
-  } catch (err) {
-    console.warn('Could not read user data file, returning defaults', err);
-  }
-  return defaultUserData;
+function sanitizeDeviceId(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (trimmed.length < 8 || trimmed.length > 128) return null;
+  if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) return null;
+  return trimmed;
 }
 
-function writeUserData(data: UserData) {
+function readAllUserProfiles(): Record<string, UserData & { updatedAt?: number }> {
   try {
-    fs.writeFileSync(USER_DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
+    if (fs.existsSync(USER_PROFILES_FILE)) {
+      const content = fs.readFileSync(USER_PROFILES_FILE, 'utf-8');
+      const parsed = JSON.parse(content);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    }
   } catch (err) {
-    console.error('Failed to write user data file:', err);
+    console.warn('Could not read user profiles file, returning empty map', err);
+  }
+  return {};
+}
+
+function readUserData(deviceId: string | null): UserData {
+  if (!deviceId) return defaultUserData;
+  const profiles = readAllUserProfiles();
+  const parsed = profiles[deviceId];
+  if (!parsed) return defaultUserData;
+  return {
+    watchlist: Array.isArray(parsed.watchlist) ? parsed.watchlist : [],
+    favorites: Array.isArray(parsed.favorites) ? parsed.favorites : [],
+    history: Array.isArray(parsed.history) ? parsed.history : [],
+    playbackPosition:
+      parsed.playbackPosition && typeof parsed.playbackPosition === 'object'
+        ? parsed.playbackPosition
+        : {},
+    settings: {
+      ...defaultUserData.settings,
+      ...(parsed.settings || {}),
+    },
+  };
+}
+
+function writeUserData(deviceId: string | null, data: UserData) {
+  if (!deviceId) return;
+  try {
+    const profiles = readAllUserProfiles();
+    profiles[deviceId] = {
+      ...data,
+      updatedAt: Date.now(),
+    };
+    // Cap stored device profiles to 2000 most recently active devices
+    const keys = Object.keys(profiles);
+    if (keys.length > 2000) {
+      keys
+        .sort((a, b) => (profiles[a].updatedAt || 0) - (profiles[b].updatedAt || 0))
+        .slice(0, keys.length - 2000)
+        .forEach((k) => delete profiles[k]);
+    }
+    fs.writeFileSync(USER_PROFILES_FILE, JSON.stringify(profiles), 'utf-8');
+  } catch (err) {
+    console.error('Failed to write user profiles file:', err);
   }
 }
 
@@ -1480,17 +1527,22 @@ app.options('/v1/proxy', (req: Request, res: Response) => {
 });
 
 // ==========================================
-// 5. USER DATA PERSISTENCE & SYNC
+// 5. USER DATA PERSISTENCE & SYNC (PER-DEVICE ISOLATED)
 // ==========================================
 app.get('/api/user/data', (req: Request, res: Response) => {
-  const data = readUserData();
+  const deviceId = sanitizeDeviceId(req.headers['x-device-id'] || req.query.deviceId);
+  const data = readUserData(deviceId);
   return res.json(data);
 });
 
 app.post('/api/user/sync', (req: Request, res: Response) => {
   try {
-    const incoming = req.body;
-    const current = readUserData();
+    const incoming = req.body || {};
+    const deviceId = sanitizeDeviceId(req.headers['x-device-id'] || incoming.deviceId || req.query.deviceId);
+    if (!deviceId) {
+      return res.json({ success: true, data: defaultUserData });
+    }
+    const current = readUserData(deviceId);
 
     const updated: UserData = {
       watchlist: Array.isArray(incoming.watchlist) ? incoming.watchlist : current.watchlist,
@@ -1506,7 +1558,7 @@ app.post('/api/user/sync', (req: Request, res: Response) => {
           : current.settings,
     };
 
-    writeUserData(updated);
+    writeUserData(deviceId, updated);
     return res.json({ success: true, data: updated });
   } catch (err) {
     console.error('Error syncing user data:', err);

@@ -822,10 +822,33 @@ export async function fetchSubtitles(
   }
 }
 
-// User Data Sync API
+// Unique Per-Device ID for isolated user playback/history/watchlist persistence
+export function getDeviceId(): string {
+  try {
+    let deviceId = localStorage.getItem('notflix_device_id');
+    if (!deviceId || deviceId.length < 8) {
+      const randomPart =
+        typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID().replace(/[^a-zA-Z0-9_-]/g, '')
+          : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}_${Math.random().toString(36).slice(2, 12)}`;
+      deviceId = `dev_${randomPart}`;
+      localStorage.setItem('notflix_device_id', deviceId);
+    }
+    return deviceId;
+  } catch {
+    return `dev_temp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+
+// User Data Sync API (Strictly Per-Device Isolated)
 export async function fetchUserData(): Promise<UserData | null> {
   try {
-    const res = await fetch('/api/user/data');
+    const deviceId = getDeviceId();
+    const res = await fetch(`/api/user/data?deviceId=${encodeURIComponent(deviceId)}`, {
+      headers: {
+        'X-Device-Id': deviceId,
+      },
+    });
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -835,10 +858,17 @@ export async function fetchUserData(): Promise<UserData | null> {
 
 export async function syncUserData(data: Partial<UserData>): Promise<boolean> {
   try {
+    const deviceId = getDeviceId();
     const res = await fetch('/api/user/sync', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Device-Id': deviceId,
+      },
+      body: JSON.stringify({
+        ...data,
+        deviceId,
+      }),
     });
     return res.ok;
   } catch {
