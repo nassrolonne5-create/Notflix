@@ -4,6 +4,7 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
@@ -187,8 +188,17 @@ const antiScraperMiddleware = (req: Request, res: Response, next: NextFunction) 
   const userAgent = (req.headers['user-agent'] as string) || '';
   const now = Date.now();
 
-  // Allow loopback / internal health checks
-  if (ip === '127.0.0.1' || ip === '::1' || ip.startsWith('127.') || ip === 'localhost') {
+  // Allow loopback and internal Docker / Coolify / Traefik healthcheck probes
+  const cleanIp = ip.replace(/^::ffff:/i, '');
+  if (
+    cleanIp === '127.0.0.1' ||
+    cleanIp === '::1' ||
+    cleanIp === 'localhost' ||
+    cleanIp.startsWith('127.') ||
+    cleanIp.startsWith('10.') ||
+    cleanIp.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(cleanIp)
+  ) {
     return next();
   }
 
@@ -431,8 +441,8 @@ function isSafe(item: any): boolean {
 // ==========================================
 // 1. HEALTH CHECK
 // ==========================================
-app.get(['/api/health', '/health', '/healthz'], (req: Request, res: Response) => {
-  res.json({
+app.all(['/api/health', '/health', '/healthz'], (req: Request, res: Response) => {
+  res.status(200).json({
     status: 'ok',
     service: 'Notflix Backend',
     timestamp: new Date().toISOString(),
@@ -2272,8 +2282,20 @@ app.get('/api/version', (_req: Request, res: Response) => {
 // ==========================================
 async function startServer() {
   const distPath = path.join(__dirname, 'dist');
-  const hasDist = fs.existsSync(path.join(distPath, 'index.html'));
-  const isProd = process.env.NODE_ENV === 'production' || (hasDist && process.env.NODE_ENV !== 'development');
+  let hasDist = fs.existsSync(path.join(distPath, 'index.html'));
+
+  // Self-healing fallback: if a cached container build ever skipped dist/index.html, build it automatically
+  if (!hasDist && process.env.NODE_ENV === 'production') {
+    console.warn('⚠️ dist/index.html missing in production container — running self-healing vite build...');
+    try {
+      execSync('npx vite build', { stdio: 'inherit', cwd: __dirname });
+      hasDist = fs.existsSync(path.join(distPath, 'index.html'));
+    } catch (buildErr) {
+      console.error('⚠️ Self-healing vite build failed, falling back to Vite runtime middleware:', buildErr);
+    }
+  }
+
+  const isProd = hasDist && process.env.NODE_ENV !== 'development';
 
   // Persistent downloads folder (mount target for Coolify persistent storage)
   const downloadsPath = path.join(__dirname, 'downloads');

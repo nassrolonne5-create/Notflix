@@ -2,12 +2,11 @@
 nixPkgs = ["nodejs_22"]
 
 [phases.install]
-cmds = ["npm ci --prefer-offline --no-audit"]
+cmds = ["npm ci --include=dev --prefer-offline --no-audit"]
 cacheDirectories = ["/root/.npm"]
 
 [phases.build]
-cmds = ["npm run build"]
-cacheDirectories = ["dist"]
+cmds = ["rm -rf dist server.js && npm run build && test -f dist/index.html && test -f server.js"]
 
 [variables]
 NODE_ENV = "production"

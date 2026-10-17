@@ -1,5 +1,7 @@
 node_modules/
 build/
+dist/
+server.js
 coverage/
 .DS_Store
 *.log
@@ -12,4 +14,3 @@ dist.zip
 data/analytics.json
 data/user_profiles.json
 data/userdata.json
-
