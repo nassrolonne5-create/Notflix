@@ -40,6 +40,7 @@ import {
 import { StreamSource, SubtitleTrack, Season, Episode, CastMember, MediaItem } from '../types';
 import { MediaCard } from './MediaCard';
 import { triggerAd, initAdResumeListeners } from '../services/adService';
+import { smartAdController } from '../services/smartAdController';
 import { telemetry } from '../services/telemetry';
 
 const formatTime = (seconds: number) => {
@@ -1733,19 +1734,26 @@ export const VideoPlayerModal: React.FC = () => {
   const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
   const currentStream = streams[activeStreamIndex];
 
-  // Real Analytics Heartbeat (transmits anonymous watch seconds every 25s while playing)
+  // Real Analytics Heartbeat & Smart Ad Watch Time Tracker
   useEffect(() => {
+    smartAdController.setPlaybackActive(isPlaying);
     if (!isPlaying || !activeModalItem) return;
+
     const interval = setInterval(() => {
+      smartAdController.recordWatchTime(25);
       telemetry.trackHeartbeat(
         activeModalItem,
-        currentSeason,
-        currentEpisode,
+        isTV ? currentSeason : undefined,
+        isTV ? currentEpisode : undefined,
         25,
         `Server ${activeStreamIndex + 1}`
       );
     }, 25000);
-    return () => clearInterval(interval);
+
+    return () => {
+      clearInterval(interval);
+      smartAdController.setPlaybackActive(false);
+    };
   }, [isPlaying, activeModalItem, currentSeason, currentEpisode, activeStreamIndex]);
 
   // Lock document.body scrolling while VideoPlayerModal is mounted
@@ -1862,8 +1870,8 @@ export const VideoPlayerModal: React.FC = () => {
                 setIsPlaying(true);
                 telemetry.trackPlay(
                   activeModalItem,
-                  currentSeason,
-                  currentEpisode,
+                  isTV ? currentSeason : undefined,
+                  isTV ? currentEpisode : undefined,
                   `Server ${activeStreamIndex + 1}`
                 );
               }}

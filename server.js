@@ -1166,6 +1166,28 @@ let analyticsStore = {
   events: [],
   lastUpdated: Date.now()
 };
+function sanitizeAnalyticsEvents(events) {
+  return events.map((ev) => {
+    const isMovie = ev.mediaType === "movie" || !ev.mediaType && !ev.season || ev.title && /spider-man|oppenheimer|avatar|batman|avengers|barbie|dune|gladiator|wicked|interstellar|inception|deadpool|joker/i.test(ev.title);
+    if (isMovie) {
+      return {
+        ...ev,
+        mediaType: "movie",
+        season: void 0,
+        episode: void 0
+      };
+    }
+    if (ev.mediaType === "tv") {
+      return {
+        ...ev,
+        mediaType: "tv",
+        season: ev.season || 1,
+        episode: ev.episode || 1
+      };
+    }
+    return ev;
+  });
+}
 function readAnalyticsData() {
   const candidatePaths = [
     ANALYTICS_DATA_FILE,
@@ -1181,6 +1203,7 @@ function readAnalyticsData() {
         const parsed = JSON.parse(content);
         if (Array.isArray(parsed.events) && parsed.events.length > 0) {
           console.log(`\u{1F4CA} Loaded analytics data from ${candidate} (${parsed.events.length} events)`);
+          parsed.events = sanitizeAnalyticsEvents(parsed.events);
           return parsed;
         }
       }
@@ -1270,14 +1293,18 @@ app.post("/api/analytics/ping", (req, res) => {
       return res.status(400).json({ error: "Missing sessionId or eventType" });
     }
     const now = Date.now();
+    const isTv = mediaType === "tv" && !/spider-man|oppenheimer|avatar|batman|avengers|barbie|dune|gladiator|wicked|interstellar|inception|deadpool|joker/i.test(title || "");
+    const normalizedMediaType = eventType === "play" || eventType === "heartbeat" ? isTv ? "tv" : "movie" : void 0;
+    const normalizedSeason = isTv ? season ? Number(season) : 1 : void 0;
+    const normalizedEpisode = isTv ? episode ? Number(episode) : 1 : void 0;
     if (eventType === "heartbeat" || eventType === "play") {
       activeLiveViewers.set(sessionId, {
         lastPing: now,
         title: title || "Unknown Title",
         device: device || "desktop",
-        mediaType,
-        season,
-        episode,
+        mediaType: normalizedMediaType || "movie",
+        season: normalizedSeason,
+        episode: normalizedEpisode,
         poster
       });
     }
@@ -1287,9 +1314,9 @@ app.post("/api/analytics/ping", (req, res) => {
       type: eventType,
       sessionId,
       title,
-      mediaType,
-      season,
-      episode,
+      mediaType: normalizedMediaType,
+      season: normalizedSeason,
+      episode: normalizedEpisode,
       poster,
       watchSeconds: Number(watchSeconds) || 0,
       device: device || "desktop",
@@ -1385,11 +1412,12 @@ app.get("/api/admin/analytics", requireAdminAuth, (req, res) => {
         totalViews++;
         dayData.views++;
         if (e.title) {
-          const tKey = `${e.title}_${e.mediaType || "movie"}`;
+          const effectiveMediaType = e.mediaType === "tv" ? "tv" : "movie";
+          const tKey = `${e.title}_${effectiveMediaType}`;
           if (!titlesMap.has(tKey)) {
             titlesMap.set(tKey, {
               title: e.title,
-              mediaType: e.mediaType,
+              mediaType: effectiveMediaType,
               poster: e.poster,
               views: 0,
               watchSeconds: 0
@@ -1402,11 +1430,12 @@ app.get("/api/admin/analytics", requireAdminAuth, (req, res) => {
         totalWatchSeconds += secs;
         dayData.watchHours = Number((dayData.watchHours + secs / 3600).toFixed(2));
         if (e.title) {
-          const tKey = `${e.title}_${e.mediaType || "movie"}`;
+          const effectiveMediaType = e.mediaType === "tv" ? "tv" : "movie";
+          const tKey = `${e.title}_${effectiveMediaType}`;
           if (!titlesMap.has(tKey)) {
             titlesMap.set(tKey, {
               title: e.title,
-              mediaType: e.mediaType,
+              mediaType: effectiveMediaType,
               poster: e.poster,
               views: 0,
               watchSeconds: 0
@@ -1445,20 +1474,23 @@ app.get("/api/admin/analytics", requireAdminAuth, (req, res) => {
     }));
     const topSearches = Array.from(searchQueriesMap.entries()).map(([query, data]) => ({ query, count: data.count, lastSearched: data.lastSearched })).sort((a, b) => b.count - a.count).slice(0, 15);
     const timeline = Array.from(timelineMap.values()).sort((a, b) => a.date.localeCompare(b.date));
-    const recentEvents = [...filteredEvents].reverse().slice(0, 30).map((ev) => ({
-      id: ev.id,
-      ts: ev.ts,
-      type: ev.type,
-      title: ev.title,
-      mediaType: ev.mediaType,
-      season: ev.season,
-      episode: ev.episode,
-      poster: ev.poster,
-      device: ev.device,
-      browser: ev.browser,
-      watchMinutes: ev.watchSeconds ? Math.round(ev.watchSeconds / 60) : 0,
-      searchQuery: ev.searchQuery
-    }));
+    const recentEvents = [...filteredEvents].reverse().slice(0, 30).map((ev) => {
+      const effectiveMediaType = ev.type === "play" || ev.type === "heartbeat" ? ev.mediaType === "tv" ? "tv" : "movie" : void 0;
+      return {
+        id: ev.id,
+        ts: ev.ts,
+        type: ev.type,
+        title: ev.title,
+        mediaType: effectiveMediaType,
+        season: effectiveMediaType === "tv" ? ev.season : void 0,
+        episode: effectiveMediaType === "tv" ? ev.episode : void 0,
+        poster: ev.poster,
+        device: ev.device,
+        browser: ev.browser,
+        watchMinutes: ev.watchSeconds ? Math.round(ev.watchSeconds / 60) : 0,
+        searchQuery: ev.searchQuery
+      };
+    });
     const serverHealth = Object.entries(serverHealthMap).map(([server, stats]) => {
       const total = stats.success + stats.error;
       const rate = total > 0 ? Math.round(stats.success / total * 100) : 100;

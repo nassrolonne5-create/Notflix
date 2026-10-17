@@ -1570,6 +1570,36 @@ let analyticsStore: AnalyticsData = {
   lastUpdated: Date.now(),
 };
 
+function sanitizeAnalyticsEvents(events: AnalyticsEvent[]): AnalyticsEvent[] {
+  return events.map((ev) => {
+    // If it's a known movie or explicitly marked movie
+    const isMovie =
+      ev.mediaType === 'movie' ||
+      (!ev.mediaType && !ev.season) ||
+      (ev.title && /spider-man|oppenheimer|avatar|batman|avengers|barbie|dune|gladiator|wicked|interstellar|inception|deadpool|joker/i.test(ev.title));
+
+    if (isMovie) {
+      return {
+        ...ev,
+        mediaType: 'movie',
+        season: undefined,
+        episode: undefined,
+      };
+    }
+
+    if (ev.mediaType === 'tv') {
+      return {
+        ...ev,
+        mediaType: 'tv',
+        season: ev.season || 1,
+        episode: ev.episode || 1,
+      };
+    }
+
+    return ev;
+  });
+}
+
 function readAnalyticsData(): AnalyticsData {
   const candidatePaths = [
     ANALYTICS_DATA_FILE,
@@ -1586,6 +1616,7 @@ function readAnalyticsData(): AnalyticsData {
         const parsed = JSON.parse(content);
         if (Array.isArray(parsed.events) && parsed.events.length > 0) {
           console.log(`📊 Loaded analytics data from ${candidate} (${parsed.events.length} events)`);
+          parsed.events = sanitizeAnalyticsEvents(parsed.events);
           return parsed;
         }
       }
@@ -1706,15 +1737,25 @@ app.post('/api/analytics/ping', (req: Request, res: Response) => {
 
     const now = Date.now();
 
+    const isTv =
+      mediaType === 'tv' &&
+      !/spider-man|oppenheimer|avatar|batman|avengers|barbie|dune|gladiator|wicked|interstellar|inception|deadpool|joker/i.test(title || '');
+
+    const normalizedMediaType: 'movie' | 'tv' | undefined =
+      eventType === 'play' || eventType === 'heartbeat' ? (isTv ? 'tv' : 'movie') : undefined;
+
+    const normalizedSeason = isTv ? (season ? Number(season) : 1) : undefined;
+    const normalizedEpisode = isTv ? (episode ? Number(episode) : 1) : undefined;
+
     // Track active live stream state (viewer currently playing)
     if (eventType === 'heartbeat' || eventType === 'play') {
       activeLiveViewers.set(sessionId, {
         lastPing: now,
         title: title || 'Unknown Title',
         device: device || 'desktop',
-        mediaType,
-        season,
-        episode,
+        mediaType: normalizedMediaType || 'movie',
+        season: normalizedSeason,
+        episode: normalizedEpisode,
         poster,
       });
     }
@@ -1726,9 +1767,9 @@ app.post('/api/analytics/ping', (req: Request, res: Response) => {
       type: eventType,
       sessionId,
       title,
-      mediaType,
-      season,
-      episode,
+      mediaType: normalizedMediaType,
+      season: normalizedSeason,
+      episode: normalizedEpisode,
       poster,
       watchSeconds: Number(watchSeconds) || 0,
       device: device || 'desktop',
@@ -1871,11 +1912,12 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
         dayData.views++;
 
         if (e.title) {
-          const tKey = `${e.title}_${e.mediaType || 'movie'}`;
+          const effectiveMediaType: 'movie' | 'tv' = e.mediaType === 'tv' ? 'tv' : 'movie';
+          const tKey = `${e.title}_${effectiveMediaType}`;
           if (!titlesMap.has(tKey)) {
             titlesMap.set(tKey, {
               title: e.title,
-              mediaType: e.mediaType,
+              mediaType: effectiveMediaType,
               poster: e.poster,
               views: 0,
               watchSeconds: 0,
@@ -1889,11 +1931,12 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
         dayData.watchHours = Number((dayData.watchHours + secs / 3600).toFixed(2));
 
         if (e.title) {
-          const tKey = `${e.title}_${e.mediaType || 'movie'}`;
+          const effectiveMediaType: 'movie' | 'tv' = e.mediaType === 'tv' ? 'tv' : 'movie';
+          const tKey = `${e.title}_${effectiveMediaType}`;
           if (!titlesMap.has(tKey)) {
             titlesMap.set(tKey, {
               title: e.title,
-              mediaType: e.mediaType,
+              mediaType: effectiveMediaType,
               poster: e.poster,
               views: 0,
               watchSeconds: 0,
@@ -1949,20 +1992,24 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
     const recentEvents = [...filteredEvents]
       .reverse()
       .slice(0, 30)
-      .map((ev) => ({
-        id: ev.id,
-        ts: ev.ts,
-        type: ev.type,
-        title: ev.title,
-        mediaType: ev.mediaType,
-        season: ev.season,
-        episode: ev.episode,
-        poster: ev.poster,
-        device: ev.device,
-        browser: ev.browser,
-        watchMinutes: ev.watchSeconds ? Math.round(ev.watchSeconds / 60) : 0,
-        searchQuery: ev.searchQuery,
-      }));
+      .map((ev) => {
+        const effectiveMediaType: 'movie' | 'tv' | undefined =
+          ev.type === 'play' || ev.type === 'heartbeat' ? (ev.mediaType === 'tv' ? 'tv' : 'movie') : undefined;
+        return {
+          id: ev.id,
+          ts: ev.ts,
+          type: ev.type,
+          title: ev.title,
+          mediaType: effectiveMediaType,
+          season: effectiveMediaType === 'tv' ? ev.season : undefined,
+          episode: effectiveMediaType === 'tv' ? ev.episode : undefined,
+          poster: ev.poster,
+          device: ev.device,
+          browser: ev.browser,
+          watchMinutes: ev.watchSeconds ? Math.round(ev.watchSeconds / 60) : 0,
+          searchQuery: ev.searchQuery,
+        };
+      });
 
     // Server health summary
     const serverHealth = Object.entries(serverHealthMap).map(([server, stats]) => {

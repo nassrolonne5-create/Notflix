@@ -37,8 +37,13 @@ const AppContent: React.FC = () => {
   // Sync routing on popstate and hashchange
   useEffect(() => {
     const handleNavigation = () => {
-      setIsAdmin(checkIsAdmin());
+      const adminState = checkIsAdmin();
+      setIsAdmin(adminState);
+      if (typeof window !== 'undefined') {
+        (window as any).__NOTFLIX_IS_ADMIN__ = adminState;
+      }
     };
+    handleNavigation();
     window.addEventListener('popstate', handleNavigation);
     window.addEventListener('hashchange', handleNavigation);
 

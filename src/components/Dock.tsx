@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Home, Film, Tv, Sparkles, Bookmark, Search } from 'lucide-react';
 import { useApp, TabType } from '../context/AppContext';
+import { triggerAd } from '../services/adService';
 
 interface NavItem {
   id: TabType;
@@ -91,6 +92,7 @@ export const Dock: React.FC = () => {
               key={item.id}
               onClick={() => {
                 if ('vibrate' in navigator) navigator.vibrate(10);
+                triggerAd('dock');
                 setActiveTab(item.id);
                 window.scrollTo({ top: 0, behavior: 'smooth' });
               }}

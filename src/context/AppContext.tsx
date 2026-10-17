@@ -1,7 +1,8 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback, useRef } from 'react';
 import { MediaItem, UserData, UserPlaybackData } from '../types';
 import { fetchUserData, syncUserData, isSafe } from '../services/api';
 import { triggerAd } from '../services/adService';
+import { smartAdController } from '../services/smartAdController';
 
 export type TabType = 'home' | 'movies' | 'tv' | 'anime' | 'library' | 'search';
 
@@ -73,6 +74,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [quickViewItem, setQuickViewItem] = useState<MediaItem | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const playerOpenTimeRef = useRef<number>(0);
 
   const [toast, setToast] = useState<ToastState>({ show: false, message: '' });
 
@@ -144,6 +146,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, []);
 
   const openPlayer = (item: MediaItem, season?: number, episode?: number) => {
+    playerOpenTimeRef.current = Date.now();
     triggerAd('poster');
     if ('vibrate' in navigator) navigator.vibrate(12);
 
@@ -167,6 +170,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const closePlayer = () => {
+    // Detect fast modal bounce/abandonment within 6s (indicates UX friction)
+    if (playerOpenTimeRef.current > 0 && Date.now() - playerOpenTimeRef.current < 6000) {
+      smartAdController.recordFriction(1.0, 'quick_player_exit');
+    }
+    smartAdController.setPlaybackActive(false);
+
     setActiveModalItem(null);
     document.title = 'Notflix — Movies & TV Shows';
     try {
@@ -175,6 +184,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const openQuickView = (item: MediaItem) => {
+    triggerAd('poster');
     if ('vibrate' in navigator) navigator.vibrate(25);
     setQuickViewItem(item);
   };
