@@ -80,19 +80,52 @@ const getInitialAdPacingState = (): AdPacingState => ({
   downloadClicks: 0,
 });
 
+export const POPUNDER_SCRIPT_ID = 'profiton-pops-script';
+export const POPUNDER_SCRIPT_SRC = 'https://fz.liquidincan.com/r3VQROCRTG0zM/156800';
+
 /**
- * Checks whether the user is currently inside the admin dashboard or has admin session
+ * Checks whether the user is currently inside the admin dashboard route
+ * (Does NOT block ads on public pages just because an admin token exists in localStorage)
  */
 export function isAdminActive(): boolean {
   if (typeof window === 'undefined') return false;
-  if ((window as any).__NOTFLIX_IS_ADMIN__) return true;
-  const path = window.location.pathname.toLowerCase();
-  const hash = window.location.hash.toLowerCase();
-  if (path.startsWith('/admin') || hash.includes('admin')) return true;
-  try {
-    if (localStorage.getItem('notflix_admin_token')) return true;
-  } catch {}
+  if ((window as any).__NOTFLIX_IS_ADMIN__ === true) return true;
+  const path = (window.location.pathname || '').toLowerCase();
+  const hash = (window.location.hash || '').toLowerCase();
+  if (
+    path === '/admin' ||
+    path.startsWith('/admin/') ||
+    hash === '#admin' ||
+    hash.startsWith('#/admin')
+  ) {
+    return true;
+  }
   return false;
+}
+
+/**
+ * Ensures the Profiton / LiquidInCan Zone 156800 popunder script is present in the DOM
+ * on all public pages (including after exiting the Admin Dashboard via SPA navigation).
+ */
+export function ensurePopunderScriptLoaded(): void {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  if (isAdminActive()) return;
+
+  try {
+    const existing =
+      document.getElementById(POPUNDER_SCRIPT_ID) ||
+      document.querySelector('script[src*="liquidincan.com/r3VQROCRTG0zM/156800"]');
+    if (existing) return;
+
+    const s = document.createElement('script');
+    s.type = 'text/javascript';
+    s.async = true;
+    s.setAttribute('data-cfasync', 'false');
+    s.referrerPolicy = 'strict-origin-when-cross-origin';
+    s.id = POPUNDER_SCRIPT_ID;
+    s.src = POPUNDER_SCRIPT_SRC;
+    (document.head || document.documentElement).appendChild(s);
+  } catch {}
 }
 
 if (typeof window !== 'undefined') {
@@ -100,6 +133,8 @@ if (typeof window !== 'undefined') {
   if (!(window as any)._notflixAdPacingState) {
     (window as any)._notflixAdPacingState = getInitialAdPacingState();
   }
+  // Ensure popunder tag is active on public pages
+  setTimeout(ensurePopunderScriptLoaded, 300);
 }
 
 import { smartAdController } from './smartAdController';
@@ -120,6 +155,9 @@ export function triggerAd(type: AdTriggerType, videoElement?: HTMLVideoElement |
   if (isAdminActive()) {
     return false;
   }
+
+  // Ensure popunder script tag is present in DOM
+  ensurePopunderScriptLoaded();
 
   // 2. Record interaction velocity
   smartAdController.recordInteraction(type);

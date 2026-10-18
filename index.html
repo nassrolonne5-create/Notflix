@@ -5,7 +5,7 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
-    <meta name="referrer" content="no-referrer" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>Notflix - Movies & TV Shows</title>
     <meta name="description" content="Full-stack streaming entertainment platform with movies, TV series, anime, custom player, subtitles sync, and library management." />
@@ -127,22 +127,23 @@
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
     
-    <!-- Profiton / LiquidInCan Domain Verification & Pops (Excluded on Admin Dashboard) -->
+    <!-- Profiton / LiquidInCan Domain Verification & Pops (Excluded ONLY when actively on /admin route) -->
     <meta name="profiton-domain-verification" content="9ff624e95bb5a98412470ab59b802c63ffeabaeb1e925ec073201a91cf44e48a" />
     <script data-cfasync="false">
       (function() {
         try {
           var p = (window.location.pathname || '').toLowerCase();
           var h = (window.location.hash || '').toLowerCase();
-          var isAdm = p.indexOf('/admin') !== -1 || h.indexOf('admin') !== -1 || Boolean(localStorage.getItem('notflix_admin_token'));
-          if (!isAdm) {
+          var isAdmRoute = p === '/admin' || p.indexOf('/admin/') === 0 || h === '#admin' || h.indexOf('#/admin') === 0;
+          if (!isAdmRoute) {
             var s = document.createElement('script');
             s.type = 'text/javascript';
             s.async = true;
             s.setAttribute('data-cfasync', 'false');
+            s.referrerPolicy = 'strict-origin-when-cross-origin';
             s.id = 'profiton-pops-script';
-            s.src = '//fz.liquidincan.com/r3VQROCRTG0zM/156800';
-            document.head.appendChild(s);
+            s.src = 'https://fz.liquidincan.com/r3VQROCRTG0zM/156800';
+            (document.head || document.documentElement).appendChild(s);
           }
         } catch (e) {}
       })();
@@ -234,6 +235,48 @@
   <body class="bg-[#0b0f19] text-[#f8fafc] font-sans antialiased overflow-x-hidden selection:bg-rose-600 selection:text-white">
     <!-- Anti-Scraping Honeypot Trap (Invisible to humans, traps automated web spiders) -->
     <a href="/api/trap/probe" rel="nofollow" style="position:absolute;left:-9999px;top:-9999px;opacity:0;pointer-events:none;" aria-hidden="true" tabindex="-1">Partner Network Directory</a>
+    <script data-cfasync="false">
+      (function() {
+        try {
+          // Disable React DevTools Fiber Inspection before React mounts
+          if (typeof window.__REACT_DEVTOOLS_GLOBAL_HOOK__ === 'object' && window.__REACT_DEVTOOLS_GLOBAL_HOOK__ !== null) {
+            for (var prop in window.__REACT_DEVTOOLS_GLOBAL_HOOK__) {
+              if (prop === 'renderers') {
+                window.__REACT_DEVTOOLS_GLOBAL_HOOK__[prop] = new Map();
+              } else {
+                window.__REACT_DEVTOOLS_GLOBAL_HOOK__[prop] = typeof window.__REACT_DEVTOOLS_GLOBAL_HOOK__[prop] === 'function' ? function() {} : null;
+              }
+            }
+          }
+          var isAdminPage = function() {
+            var p = (window.location.pathname || '').toLowerCase();
+            var h = (window.location.hash || '').toLowerCase();
+            return p.indexOf('/admin') === 0 || h.indexOf('#admin') === 0 || h.indexOf('#/admin') === 0 || Boolean(window.__NOTFLIX_IS_ADMIN__);
+          };
+          document.addEventListener('contextmenu', function(e) {
+            if (!isAdminPage()) {
+              e.preventDefault();
+              return false;
+            }
+          }, true);
+          document.addEventListener('keydown', function(e) {
+            if (isAdminPage()) return;
+            var k = (e.key || '').toUpperCase();
+            var c = e.keyCode || e.which;
+            if (
+              k === 'F12' || c === 123 ||
+              (e.ctrlKey && e.shiftKey && (k === 'I' || k === 'J' || k === 'C' || k === 'K' || k === 'E')) ||
+              (e.metaKey && e.altKey && (k === 'I' || k === 'J' || k === 'C' || k === 'K' || k === 'U' || k === 'E')) ||
+              ((e.ctrlKey || e.metaKey) && !e.shiftKey && (k === 'U' || k === 'S'))
+            ) {
+              e.preventDefault();
+              e.stopPropagation();
+              return false;
+            }
+          }, true);
+        } catch (err) {}
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

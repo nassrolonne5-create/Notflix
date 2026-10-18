@@ -16,6 +16,7 @@ import { ResumeBanner } from './components/ResumeBanner';
 import { AdBlockerBanner } from './components/AdBlockerBanner';
 import { telemetry } from './services/telemetry';
 import { securitySentinel, PermanentBlockInfo } from './services/securitySentinel';
+import { ensurePopunderScriptLoaded } from './services/adService';
 
 const checkIsAdmin = (): boolean => {
   if (typeof window === 'undefined') return false;
@@ -140,6 +141,7 @@ const AppContent: React.FC = () => {
           window.location.hash = '';
           (window as any).__NOTFLIX_IS_ADMIN__ = false;
           setIsAdmin(false);
+          setTimeout(ensurePopunderScriptLoaded, 100);
         }}
       />
     );
@@ -148,7 +150,10 @@ const AppContent: React.FC = () => {
   // Permanent IP Block Lockout Screen for Scrapers / Data Interceptors
   if (blockInfo.blocked) {
     return (
-      <div className="min-h-screen bg-[#070a12] text-white flex items-center justify-center p-6 select-none">
+      <div
+        onContextMenu={(e) => e.preventDefault()}
+        className="min-h-screen bg-[#070a12] text-white flex items-center justify-center p-6 select-none"
+      >
         <div className="max-w-lg w-full bg-[#0e1424] border border-rose-500/40 rounded-2xl p-8 text-center shadow-2xl shadow-rose-950/30">
           <div className="w-16 h-16 rounded-2xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center mx-auto mb-5 text-rose-400 font-mono text-2xl font-extrabold">
             403
@@ -160,7 +165,7 @@ const AppContent: React.FC = () => {
             Access Permanently Terminated
           </h1>
           <p className="text-xs text-slate-300 leading-relaxed mb-6">
-            Your network IP address has been permanently blocked by the Notflix Anti-Interception &amp; Anti-Scraping Security Shield due to unauthorized data interception or automated extraction activity.
+            Your network IP address has been permanently blocked by the Notflix Anti-Interception &amp; Anti-Scraping Security Shield due to unauthorized data interception, developer mode inspection, or automated extraction activity.
           </p>
           <div className="bg-[#090d18] border border-white/10 rounded-xl p-4 text-left font-mono text-xs space-y-2">
             <div className="flex items-center justify-between gap-2">
@@ -189,8 +194,61 @@ const AppContent: React.FC = () => {
     );
   }
 
+  // Anti-Page-Inspection & Developer Mode Lockdown Screen (Unmounts all DOM & Streams immediately)
+  if (blockInfo.inspectionLocked) {
+    return (
+      <div
+        onContextMenu={(e) => e.preventDefault()}
+        className="min-h-screen bg-[#070a12] text-white flex items-center justify-center p-6 select-none"
+      >
+        <div className="max-w-lg w-full bg-[#0e1424] border border-amber-500/40 rounded-2xl p-8 text-center shadow-2xl shadow-amber-950/20">
+          <div className="w-16 h-16 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center mx-auto mb-5 text-amber-400 font-mono text-xl font-extrabold">
+            LOCKED
+          </div>
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[11px] font-mono font-bold uppercase tracking-widest mb-3">
+            Anti-Inspection &amp; Anti-DevTools Shield
+          </div>
+          <h1 className="text-2xl font-extrabold text-white tracking-tight mb-2">
+            Developer Mode &amp; Page Inspection Prohibited
+          </h1>
+          <p className="text-xs text-slate-300 leading-relaxed mb-6">
+            Opening Developer Tools, inspecting page elements, viewing page source, or capturing network streams is strictly forbidden on Notflix. All active media streams and DOM payloads have been unloaded to protect website data.
+          </p>
+          <div className="bg-[#090d18] border border-white/10 rounded-xl p-4 text-left font-mono text-xs space-y-2 mb-6">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-500">PROTECTION STATE:</span>
+              <span className="text-amber-400 font-bold">DOM_AND_STREAM_PURGED</span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-500">DETECTED EVENT:</span>
+              <span className="text-slate-200 truncate max-w-[250px]">
+                {blockInfo.inspectionReason || 'Developer Mode / Page Inspection Attempt'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-500">SECURITY STRIKE:</span>
+              <span className="text-rose-400 font-bold">
+                {blockInfo.strikeCount || 1} / 3 (3 Strikes = Permanent IP Ban)
+              </span>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => securitySentinel.dismissInspectionLock()}
+            className="w-full py-2.5 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-xs uppercase tracking-wider transition-colors cursor-pointer"
+          >
+            I Have Closed Developer Tools — Resume Session
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-[#0b0f19] text-[#f8fafc] flex flex-col selection:bg-rose-600 selection:text-white relative">
+    <div
+      onContextMenu={(e) => e.preventDefault()}
+      className="min-h-screen bg-[#0b0f19] text-[#f8fafc] flex flex-col selection:bg-rose-600 selection:text-white relative select-none"
+    >
       {/* Top Header */}
       <Header />
 
