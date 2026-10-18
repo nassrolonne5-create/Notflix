@@ -282,16 +282,6 @@ const AppContent: React.FC = () => {
           >
             Admin Studio
           </button>
-          {/* Invisible Honeypot Trap for Automated DOM Scrapers & Data Interceptors */}
-          <a
-            href="/api/trap/probe"
-            style={{ display: 'none' }}
-            aria-hidden="true"
-            tabIndex={-1}
-            rel="nofollow noopener"
-          >
-            Raw Stream M3U8 Database Dump
-          </a>
         </div>
       </footer>
 

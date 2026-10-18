@@ -1,6 +1,6 @@
 // Client-Side Anti-Interception, Anti-Scraping & Anti-Page-Inspection Sentinel
-// Prevents Developer Mode (DevTools), DOM Inspection, Source Viewing, and Stream Data Capture
-// Safe across all browser and iframe environments (never mutates read-only/getter-only window properties)
+// Prevents Developer Mode shortcuts (F12, Inspect Element, View Source, Save Page) and Right-Click
+// Zero false positives on Firefox, Chrome, Safari, Edge, Brave, or Mobile browsers.
 
 export interface PermanentBlockInfo {
   blocked: boolean;
@@ -23,9 +23,6 @@ class SecuritySentinel {
     strikeCount: 0,
   };
   private listeners: Set<BlockListener> = new Set();
-  private streamFetchTimestamps: number[] = [];
-  private inspectionStrikes = 0;
-  private lastStrikeTime = 0;
 
   public subscribe(listener: BlockListener): () => void {
     this.listeners.add(listener);
@@ -59,59 +56,6 @@ class SecuritySentinel {
     return false;
   }
 
-  private purgeActiveMediaAndConsole() {
-    if (typeof document === 'undefined') return;
-    try {
-      // Immediately scrub any active video/iframe sources so DevTools Network/Elements cannot capture stream URLs
-      const videos = document.querySelectorAll('video');
-      videos.forEach((v) => {
-        try {
-          v.pause();
-          v.removeAttribute('src');
-          v.load();
-        } catch {}
-      });
-      const iframes = document.querySelectorAll('iframe');
-      iframes.forEach((f) => {
-        try {
-          f.src = 'about:blank';
-        } catch {}
-      });
-      if (typeof console !== 'undefined' && typeof console.clear === 'function') {
-        console.clear();
-      }
-    } catch {}
-  }
-
-  public triggerInspectionLock(reason: string) {
-    if (this.isAdminContext() || this.blockState.blocked) return;
-
-    const now = Date.now();
-    // Debounce rapid duplicate events within 800ms
-    if (now - this.lastStrikeTime > 800) {
-      this.inspectionStrikes += 1;
-      this.lastStrikeTime = now;
-    }
-
-    this.purgeActiveMediaAndConsole();
-
-    this.blockState = {
-      ...this.blockState,
-      inspectionLocked: true,
-      inspectionReason: reason,
-      strikeCount: this.inspectionStrikes,
-    };
-    this.notifyListeners();
-
-    // If user repeatedly tries to force Developer Mode / Page Inspection (3+ strikes), permanently ban their IP
-    if (this.inspectionStrikes >= 3) {
-      this.reportInterceptionAttempt(
-        `Persistent Developer Mode / Page Inspection Data Capture (${reason})`,
-        'interception'
-      );
-    }
-  }
-
   public dismissInspectionLock() {
     if (this.blockState.blocked) return;
     this.blockState = {
@@ -124,27 +68,16 @@ class SecuritySentinel {
 
   public triggerBlock(info: PermanentBlockInfo) {
     if (this.isAdminContext()) return;
-    this.purgeActiveMediaAndConsole();
     this.blockState = {
       ...this.blockState,
       ...info,
       blocked: true,
-      inspectionLocked: true,
     };
     this.notifyListeners();
   }
 
   public recordStreamRequest() {
-    if (this.isAdminContext() || this.blockState.blocked) return;
-    const now = Date.now();
-    this.streamFetchTimestamps = this.streamFetchTimestamps.filter((t) => now - t < 60000);
-    this.streamFetchTimestamps.push(now);
-    if (this.streamFetchTimestamps.length > 35) {
-      this.reportInterceptionAttempt(
-        'Automated Bulk Stream API Harvesting Script Detected',
-        'scraper'
-      );
-    }
+    // Stream rate limiting is handled accurately on the server by distinct TMDB IDs
   }
 
   public async inspectResponse(response: Response, urlStr = '') {
@@ -174,10 +107,9 @@ class SecuritySentinel {
 
   public async reportInterceptionAttempt(
     reason: string,
-    category: 'scraper' | 'interception' = 'interception'
+    category: 'scraper' | 'interception' = 'scraper'
   ) {
     if (this.isAdminContext() || this.blockState.blocked) return;
-    this.purgeActiveMediaAndConsole();
     try {
       const res = await fetch('/api/security/intercept-report', {
         method: 'POST',
@@ -189,22 +121,19 @@ class SecuritySentinel {
           ts: Date.now(),
         }),
       });
-      const data = await res.json().catch(() => ({}));
-      this.triggerBlock({
-        blocked: true,
-        ip: data?.ip || 'Detected Network IP',
-        reason: data?.reason || reason,
-        code: 'IP_PERMANENTLY_BLOCKED',
-        bannedAt: data?.bannedAt || Date.now(),
-      });
-    } catch {
-      this.triggerBlock({
-        blocked: true,
-        reason,
-        code: 'IP_PERMANENTLY_BLOCKED',
-        bannedAt: Date.now(),
-      });
-    }
+      if (res.status === 403) {
+        const data = await res.json().catch(() => ({}));
+        if (data?.code === 'IP_PERMANENTLY_BLOCKED') {
+          this.triggerBlock({
+            blocked: true,
+            ip: data?.ip || 'Detected Network IP',
+            reason: data?.reason || reason,
+            code: 'IP_PERMANENTLY_BLOCKED',
+            bannedAt: data?.bannedAt || Date.now(),
+          });
+        }
+      }
+    } catch {}
   }
 
   private lockReactDevToolsHook() {
@@ -228,7 +157,8 @@ class SecuritySentinel {
 
     this.lockReactDevToolsHook();
 
-    // 1. Block all Developer Mode / Inspect Element / View Source / Save Page keyboard shortcuts
+    // 1. Prevent Developer Mode / Inspect Element / View Source / Save Page keyboard shortcuts
+    // Blocks the browser shortcut silently without banning legitimate users who press a key by mistake
     const handleKeyDown = (e: KeyboardEvent) => {
       if (this.isAdminContext()) return;
 
@@ -241,7 +171,7 @@ class SecuritySentinel {
       // F12 Developer Tools
       const isF12 = key === 'F12' || code === 123;
 
-      // Windows/Linux: Ctrl+Shift+I (Inspect), Ctrl+Shift+J (Console), Ctrl+Shift+C (Element Picker), Ctrl+Shift+K (Firefox Console), Ctrl+Shift+E (Network)
+      // Windows/Linux: Ctrl+Shift+I (Inspect), Ctrl+Shift+J (Console), Ctrl+Shift+C (Element Picker), Ctrl+Shift+K (Firefox Console), Ctrl+Shift+E (Firefox Network)
       const isCtrlShiftInspector =
         e.ctrlKey && shift && ['I', 'J', 'C', 'K', 'E'].includes(key);
 
@@ -256,14 +186,6 @@ class SecuritySentinel {
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
-
-        const shortcutLabel = isF12
-          ? 'F12 Developer Tools Shortcut Blocked'
-          : isSourceOrSave
-          ? `Page Source / DOM Export Shortcut (Ctrl+${key}) Blocked`
-          : `Developer Inspector Shortcut (${key}) Blocked`;
-
-        this.triggerInspectionLock(shortcutLabel);
         return false;
       }
     };
@@ -299,128 +221,35 @@ class SecuritySentinel {
       }
       e.preventDefault();
       e.stopPropagation();
-      if (e.clipboardData) {
-        e.clipboardData.setData('text/plain', 'Protected by Notflix Anti-Inspection Shield.');
-      }
     };
 
     window.addEventListener('copy', handleCopyOrCut, { capture: true });
     window.addEventListener('cut', handleCopyOrCut, { capture: true });
 
-    // 5. Check for automated headless browser / DOM scraping frameworks & injected mobile DevTools (Eruda / vConsole)
-    const checkAutomationAndDevToolsHooks = () => {
+    // 5. Only report 100% confirmed headless scraping frameworks (PhantomJS, Nightmare, Selenium WebDriver)
+    const checkHeadlessScraperFrameworks = () => {
       if (this.isAdminContext() || this.blockState.blocked) return;
       try {
         const w = window as any;
         const d = document as any;
 
-        // Detect Headless / WebDriver scrapers
         if (
           w.callPhantom ||
           w._phantom ||
           w.__nightmare ||
-          w.domAutomation ||
-          w.domAutomationController ||
           d.__webdriver_script_fn ||
           d.__selenium_unwrapped ||
           d.__fxdriver_unwrapped
         ) {
           this.reportInterceptionAttempt(
-            'Automated Headless DOM Scraper / WebDriver Framework Detected',
+            'Confirmed Headless Scraper Framework (PhantomJS/Selenium/Nightmare)',
             'scraper'
           );
-          return;
-        }
-
-        // Detect injected third-party DevTools (Eruda, vConsole, Firebug)
-        const erudaEl = document.getElementById('eruda') || document.querySelector('.eruda-container');
-        const vConsoleEl = document.getElementById('__vconsole');
-        if (w.eruda || w.VConsole || erudaEl || vConsoleEl || w.Firebug?.chrome?.isInitialized) {
-          if (erudaEl) erudaEl.remove();
-          if (vConsoleEl) vConsoleEl.remove();
-          this.reportInterceptionAttempt(
-            'Unauthorized Injected Developer Console (Eruda/vConsole/Firebug) Detected',
-            'interception'
-          );
-          return;
         }
       } catch {}
     };
 
-    setTimeout(checkAutomationAndDevToolsHooks, 1200);
-
-    // 6. Active Developer Mode (DevTools) Open Detection Loop
-    // Combines top-level window viewport delta + debugger timing trap + console inspection trap
-    let consecutiveViewportHits = 0;
-
-    const detectActiveDevTools = () => {
-      if (this.isAdminContext() || this.blockState.blocked) return;
-
-      try {
-        checkAutomationAndDevToolsHooks();
-
-        // Vector A: Top-level window outer vs inner size threshold (Docked DevTools)
-        // Only run when not inside an iframe (window.self === window.top) to avoid false positives in preview containers
-        if (window.self === window.top) {
-          const widthDiff = Math.abs(window.outerWidth - window.innerWidth);
-          const heightDiff = Math.abs(window.outerHeight - window.innerHeight);
-          // Account for browser zoom level
-          const deviceZoom = window.devicePixelRatio || 1;
-          const threshold = 220 * Math.max(1, deviceZoom * 0.65);
-
-          if (widthDiff > threshold || heightDiff > threshold) {
-            consecutiveViewportHits += 1;
-            if (consecutiveViewportHits >= 2) {
-              this.triggerInspectionLock(
-                'Docked Browser Developer Mode (DevTools) Detected'
-              );
-              return;
-            }
-          } else {
-            consecutiveViewportHits = 0;
-          }
-        }
-
-        // Vector B: Debugger execution pause timing trap
-        // If DevTools is open with breakpoints or active inspection, debugger statement pauses > 120ms
-        const start = performance.now();
-        try {
-          // Dynamic Function constructor prevents static bundler stripping while remaining safe
-          const dbg = new Function('debugger');
-          dbg();
-        } catch {}
-        const elapsed = performance.now() - start;
-
-        if (elapsed > 140) {
-          this.triggerInspectionLock(
-            'Active Developer Mode Debugger / Network Inspector Detected'
-          );
-          return;
-        }
-      } catch {}
-    };
-
-    setInterval(detectActiveDevTools, 2000);
-    window.addEventListener('resize', () => {
-      if (!this.isAdminContext() && window.self === window.top) {
-        detectActiveDevTools();
-      }
-    });
-
-    // 7. Passively monitor network resource requests via PerformanceObserver (zero mutation of window.fetch)
-    try {
-      if (typeof PerformanceObserver !== 'undefined') {
-        const observer = new PerformanceObserver((list) => {
-          if (this.isAdminContext() || this.blockState.blocked) return;
-          for (const entry of list.getEntries()) {
-            if (entry.name && entry.name.includes('/api/streams/')) {
-              this.recordStreamRequest();
-            }
-          }
-        });
-        observer.observe({ entryTypes: ['resource'] });
-      }
-    } catch {}
+    setTimeout(checkHeadlessScraperFrameworks, 2000);
   }
 }
 

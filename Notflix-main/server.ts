@@ -138,11 +138,12 @@ if (fs.existsSync(LEGACY_GLOBAL_USER_DATA_FILE)) {
 }
 
 // ============================================================================
-// Anti-Interception, Anti-Scraping & Permanent IP Block Subsystem
+// Anti-Interception, Anti-Scraping & Permanent IP Block Subsystem (v2 Zero-False-Positive)
 // ============================================================================
+const BAN_STORAGE_SCHEMA_VERSION = 2;
 const STREAM_SECURITY_SECRET =
   process.env.STREAM_SECURITY_SECRET ||
-  'notflix-stream-secret-' + crypto.randomBytes(16).toString('hex');
+  'notflix-stream-hmac-secret-v2-persistent';
 
 export type BanCategory =
   | 'scraper'
@@ -252,8 +253,19 @@ function isKnownInterceptionTool(userAgent: string): boolean {
 }
 
 function isKnownScraperBot(userAgent: string): boolean {
-  if (!userAgent) return true; // Missing User-Agent on API routes is a standard scraper signature
+  if (!userAgent) return false; // Never ban for missing User-Agent (some browser media/range requests omit UA)
   return SCRAPER_USER_AGENTS.some((pattern) => pattern.test(userAgent));
+}
+
+function isStandardHumanBrowser(userAgent: string): boolean {
+  if (!userAgent) return false;
+  if (isKnownScraperBot(userAgent) || isKnownInterceptionTool(userAgent)) return false;
+  return (
+    /Mozilla\/5\.0/i.test(userAgent) &&
+    /(Firefox\/|FxiOS\/|Chrome\/|CriOS\/|Safari\/|Edg\/|OPR\/|SamsungBrowser\/|Mobile|Android|iPhone|iPad|Macintosh|Windows NT|X11)/i.test(
+      userAgent
+    )
+  );
 }
 
 // Sensitive paths that only data interceptors, source-dumpers, or scanners probe
@@ -360,16 +372,21 @@ function loadPermanentBansFromDisk() {
     path.join(__dirname, 'data', 'blocked_ips.json'),
   ];
 
+  let purgedLegacyV1Bans = false;
+
   for (const candidate of candidatePaths) {
     try {
       if (fs.existsSync(candidate)) {
         const raw = fs.readFileSync(candidate, 'utf-8');
         const parsed = JSON.parse(raw);
-        const list: PermanentBanRecord[] = Array.isArray(parsed)
-          ? parsed
-          : Array.isArray(parsed?.bans)
-          ? parsed.bans
-          : [];
+
+        // Automatically purge v1 ban files that could contain false-positive browser bans (e.g. Firefox prefetch/viewport)
+        if (!parsed || parsed.schemaVersion !== BAN_STORAGE_SCHEMA_VERSION) {
+          purgedLegacyV1Bans = true;
+          continue;
+        }
+
+        const list: PermanentBanRecord[] = Array.isArray(parsed?.bans) ? parsed.bans : [];
         for (const item of list) {
           if (item && item.ip && !isInternalOrLoopbackIp(item.ip)) {
             const cleanIp = item.ip.replace(/^::ffff:/i, '').trim();
@@ -394,8 +411,13 @@ function loadPermanentBansFromDisk() {
     }
   }
 
+  if (purgedLegacyV1Bans) {
+    savePermanentBansToDiskSync();
+    console.log('🧹 Purged legacy v1 false-positive IP bans and upgraded ban store to v2.');
+  }
+
   if (permanentlyBannedIps.size > 0) {
-    console.log(`🛡️ Loaded ${permanentlyBannedIps.size} permanently blocked IPs from persistent storage.`);
+    console.log(`🛡️ Loaded ${permanentlyBannedIps.size} verified permanently blocked IPs from persistent storage.`);
   }
 }
 
@@ -403,6 +425,7 @@ function savePermanentBansToDiskSync() {
   try {
     const serialized = JSON.stringify(
       {
+        schemaVersion: BAN_STORAGE_SCHEMA_VERSION,
         updatedAt: Date.now(),
         bans: Array.from(permanentlyBannedIps.values()),
       },
@@ -731,29 +754,22 @@ const globalSecurityShieldMiddleware = (req: Request, res: Response, next: NextF
     if (record) return sendPermanentBlockResponse(req, res, record);
   }
 
-  // 10. API Rate Limiting + Automatic Permanent Ban Escalation on Repeated Bulk Scraping
-  if (req.path.startsWith('/api/')) {
-    const allowed = checkRateLimit(ip, globalApiRateLimiter, 140, 60 * 1000);
+  // 10. API Rate Limiting (Never bans normal browsers watching video segments, subtitles, or TMDB catalog)
+  if (
+    req.path.startsWith('/api/') &&
+    !req.path.startsWith('/api/proxy/') &&
+    !req.path.startsWith('/api/subtitles/') &&
+    !req.path.startsWith('/api/analytics/') &&
+    !req.path.startsWith('/api/user/') &&
+    !req.path.startsWith('/api/security/')
+  ) {
+    const allowed = checkRateLimit(ip, globalApiRateLimiter, 450, 60 * 1000);
     if (!allowed) {
       securityMetrics.totalRateLimited++;
-      const strikes = (rateLimitStrikes.get(ip) || 0) + 1;
-      rateLimitStrikes.set(ip, strikes);
-
-      if (strikes >= 3) {
-        const record = banIpPermanently(
-          ip,
-          'Persistent Bulk API Scraping (Rate-Limit Strike Threshold Exceeded)',
-          'burst_abuse',
-          userAgent,
-          req.path
-        );
-        if (record) return sendPermanentBlockResponse(req, res, record);
-      }
-
-      recordSecurityEvent(ip, `Global API Rate Limit Exceeded (Strike ${strikes}/3)`, userAgent, req.path, 'burst_abuse', false);
-      res.setHeader('Retry-After', '60');
+      recordSecurityEvent(ip, 'High API Request Rate Throttled (429)', userAgent, req.path, 'burst_abuse', false);
+      res.setHeader('Retry-After', '30');
       return res.status(429).json({
-        error: 'Too many requests. Continued automated scraping will permanently block your IP.',
+        error: 'Too many requests. Please slow down.',
         code: 'RATE_LIMITED',
       });
     }
@@ -1804,32 +1820,40 @@ async function rankStreams(streams: any[], _isTV = false): Promise<any[]> {
   });
 }
 
+// Track distinct movie/TV IDs scraped per IP in 5-minute windows to catch automated catalog dumpers without ever affecting real viewers
+const distinctCatalogScrapeTracker = new Map<string, { windowStart: number; ids: Set<string> }>();
+
 // GET /api/security/stream-token - Issues short-lived HMAC token for playback
 app.get('/api/security/stream-token', (req: Request, res: Response) => {
   const type = (req.query.type as string) || 'movie';
   const id = (req.query.id as string) || '0';
-  const ip = getClientIp(req);
 
   const ts = Date.now();
   const signature = crypto
     .createHmac('sha256', STREAM_SECURITY_SECRET)
-    .update(`${ts}:${type}:${id}:${ip}`)
+    .update(`${ts}:${type}:${id}`)
     .digest('hex');
 
   const token = `${ts}.${signature}`;
   return res.json({
     token,
-    expiresAt: ts + 90000,
+    expiresAt: ts + 300000,
   });
 });
 
-// GET /api/trap/probe & /api/trap/* - Honeypot Trap for automated DOM scrapers & data interceptors
+// GET /api/trap/probe & /api/trap/* - Honeypot Trap ONLY for confirmed non-browser bots & CLI scrapers
 app.all(['/api/trap/probe', '/api/trap/*', '/trap/*'], (req: Request, res: Response) => {
   const ip = getClientIp(req);
   const userAgent = (req.headers['user-agent'] as string) || '';
+
+  // Never ban a standard human browser (e.g. Firefox link prefetcher or browser security extension)
+  if (isStandardHumanBrowser(userAgent) && !isKnownScraperBot(userAgent) && !isKnownInterceptionTool(userAgent)) {
+    return res.status(204).end();
+  }
+
   const record = banIpPermanently(
     ip,
-    'Honeypot Anti-Scrape / Data Interception Trap Triggered',
+    'Automated Bot Honeypot Trap Triggered',
     'honeypot',
     userAgent,
     req.path
@@ -1843,7 +1867,7 @@ app.all(['/api/trap/probe', '/api/trap/*', '/trap/*'], (req: Request, res: Respo
   });
 });
 
-// POST /api/security/intercept-report - Client-side sentinel report for active data interception or automated stream harvesting
+// POST /api/security/intercept-report - Client-side sentinel report ONLY for confirmed headless frameworks (PhantomJS/Selenium/Nightmare)
 app.post('/api/security/intercept-report', (req: Request, res: Response) => {
   const ip = getClientIp(req);
   const userAgent = (req.headers['user-agent'] as string) || '';
@@ -1851,7 +1875,18 @@ app.post('/api/security/intercept-report', (req: Request, res: Response) => {
   const reason =
     typeof body.reason === 'string' && body.reason.trim()
       ? body.reason.trim().slice(0, 120)
-      : 'Client-Side Data Interception / Automated Scraping Detected';
+      : 'Confirmed Headless Scraper Framework';
+
+  // Only permanently ban if it's a confirmed headless scraper framework or known bot tool
+  const isConfirmedFramework =
+    /PhantomJS|Selenium|Nightmare|Headless|WebDriver/i.test(reason) ||
+    isKnownScraperBot(userAgent) ||
+    isKnownInterceptionTool(userAgent);
+
+  if (!isConfirmedFramework) {
+    return res.json({ success: true, ignored: true });
+  }
+
   const category: BanCategory = body.category === 'scraper' ? 'scraper' : 'interception';
   const reqPath = typeof body.path === 'string' ? body.path.slice(0, 80) : '/api/security/intercept-report';
 
@@ -1872,100 +1907,53 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
     const ip = getClientIp(req);
     const userAgent = (req.headers['user-agent'] as string) || '';
 
-    // 1. Stream Rate Limit: Max 30 stream resolutions per 5 minutes per IP (Escalates to Permanent IP Ban on repeat abuse)
-    const streamAllowed = checkRateLimit(ip, streamRateLimiter, 30, 5 * 60 * 1000);
-    if (!streamAllowed) {
-      securityMetrics.totalRateLimited++;
-      const strikes = (rateLimitStrikes.get(ip) || 0) + 1;
-      rateLimitStrikes.set(ip, strikes);
-
-      if (strikes >= 2) {
+    // 1. Detect Automated Bulk Catalog Scraping (> 85 distinct movie/TV IDs scraped within 5 minutes by the same IP)
+    // Normal human viewers switching servers or episodes of a show request only 1–15 distinct title IDs in 5 minutes.
+    const now = Date.now();
+    const tracker = distinctCatalogScrapeTracker.get(ip);
+    if (!tracker || now - tracker.windowStart > 5 * 60 * 1000) {
+      distinctCatalogScrapeTracker.set(ip, { windowStart: now, ids: new Set([`${type}:${id}`]) });
+    } else {
+      tracker.ids.add(`${type}:${id}`);
+      if (tracker.ids.size > 85) {
         const record = banIpPermanently(
           ip,
-          'Automated Bulk Stream Harvesting / Extraction Detected',
-          'burst_abuse',
+          `Automated Bulk Catalog Stream Harvester (${tracker.ids.size} distinct titles in 5m)`,
+          'scraper',
           userAgent,
           req.path
         );
         if (record) return sendPermanentBlockResponse(req, res, record);
       }
-
-      recordSecurityEvent(ip, 'Stream Rate Limit Exceeded', userAgent, req.path, 'burst_abuse', false);
-      res.setHeader('Retry-After', '120');
-      return res.status(429).json({
-        error: 'Stream resolution limit reached. Continued bulk scraping will permanently block your IP.',
-        code: 'STREAM_RATE_LIMITED',
-      });
     }
 
-    // 2. Token Signature & Anti-Interception / Hotlink Verification
-    const token = (req.query.token as string) || (req.headers['x-stream-token'] as string);
-    let isTokenValid = false;
-    let isTokenForged = false;
-    if (token) {
-      if (!token.includes('.')) {
-        isTokenForged = true;
-      } else {
-        const [tsStr, sig] = token.split('.');
-        const tokenTs = parseInt(tsStr, 10);
-        const age = Date.now() - tokenTs;
-        if (isNaN(tokenTs)) {
-          isTokenForged = true;
-        } else {
-          const expectedSigWithIp = crypto
-            .createHmac('sha256', STREAM_SECURITY_SECRET)
-            .update(`${tokenTs}:${type}:${id}:${ip}`)
-            .digest('hex');
-          const expectedSigGeneral = crypto
-            .createHmac('sha256', STREAM_SECURITY_SECRET)
-            .update(`${tokenTs}:${type}:${id}`)
-            .digest('hex');
-
-          if (sig !== expectedSigWithIp && sig !== expectedSigGeneral) {
-            isTokenForged = true;
-          } else if (age >= 0 && age <= 120000) {
-            isTokenValid = true;
-          }
-        }
-      }
-    }
-
-    // If someone tampered with or forged the stream security token, permanently block their IP immediately
-    if (isTokenForged) {
-      const record = banIpPermanently(
-        ip,
-        'Forged / Tampered Stream Security Token Interception',
-        'interception',
-        userAgent,
-        req.path
-      );
-      if (record) return sendPermanentBlockResponse(req, res, record);
-    }
-
-    // Referer / Origin verification for hotlinking & external stream interception prevention
+    // 2. Block External Website Hotlinking (when an external third-party website embeds /api/streams/ directly)
     const referer = (req.headers['referer'] as string) || '';
     const host = (req.headers['host'] as string) || '';
-    const isDirectBrowser =
-      !referer ||
-      referer.includes(host) ||
-      referer.includes('notflixtv.com') ||
-      referer.includes('localhost') ||
-      referer.includes('127.0.0.1') ||
-      referer.includes('run.app');
+    if (referer) {
+      const isAllowedOrigin =
+        referer.includes(host) ||
+        referer.includes('notflixtv.com') ||
+        referer.includes('localhost') ||
+        referer.includes('127.0.0.1') ||
+        referer.includes('run.app') ||
+        referer.includes('sslip.io');
 
-    if (!isTokenValid && !isDirectBrowser) {
-      const record = banIpPermanently(
-        ip,
-        'External Stream Interception / Hotlink Scraping Detected',
-        'hotlink',
-        userAgent,
-        req.path
-      );
-      if (record) return sendPermanentBlockResponse(req, res, record);
-      return res.status(403).json({
-        error: 'PERMANENT IP BLOCK: Unauthorized stream interception or hotlinking is prohibited.',
-        code: 'IP_PERMANENTLY_BLOCKED',
-      });
+      if (!isAllowedOrigin) {
+        securityMetrics.totalInterceptionsBlocked++;
+        recordSecurityEvent(
+          ip,
+          `Blocked External Hotlink Referer (${referer.slice(0, 60)})`,
+          userAgent,
+          req.path,
+          'hotlink',
+          false
+        );
+        return res.status(403).json({
+          error: 'External stream hotlinking is prohibited.',
+          code: 'HOTLINK_BLOCKED',
+        });
+      }
     }
     const isTV = type === 'tv';
     const s = parseInt((req.query.s as string) || '1', 10);
