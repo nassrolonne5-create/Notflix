@@ -1,4 +1,5 @@
 import { MediaItem, Season, Episode, StreamSource, SubtitleTrack, UserData, CastMember } from '../types';
+import { securitySentinel } from './securitySentinel';
 
 export const TMDB_IMG = 'https://image.tmdb.org/t/p/';
 
@@ -192,6 +193,9 @@ export async function tmdbFetch(endpoint: string, params: Record<string, string>
   try {
     const url = `/api/tmdb/${cleanEndpoint}${searchParams.toString() ? '?' + searchParams.toString() : ''}`;
     const res = await fetch(url);
+    if (res.status === 403) {
+      securitySentinel.inspectResponse(res, url);
+    }
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data.results)) {
@@ -685,14 +689,19 @@ export async function fetchStreams(
 
   // 1. Try Backend Server Proxy first with 14s timeout (sufficient for backend parallel scraping)
   try {
+    securitySentinel.recordStreamRequest();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 14000);
-    const res = await fetch(`/api/streams/${type}/${id}${queryString}`, {
+    const streamUrl = `/api/streams/${type}/${id}${queryString}`;
+    const res = await fetch(streamUrl, {
       signal: controller.signal,
       headers: streamToken ? { 'X-Stream-Token': streamToken } : {},
       cache: forceRefresh ? 'no-cache' : 'default',
     });
     clearTimeout(timer);
+    if (res.status === 403) {
+      securitySentinel.inspectResponse(res, streamUrl);
+    }
     if (res.ok) {
       const data = await res.json();
       const streams = Array.isArray(data.streams) ? data.streams : [];

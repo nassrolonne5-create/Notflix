@@ -113,12 +113,56 @@ interface CacheEntry {
 const apiCache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
+// Persistent Data Directory Setup
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const USER_PROFILES_FILE = path.join(DATA_DIR, 'user_profiles.json');
+const LEGACY_GLOBAL_USER_DATA_FILE = path.join(DATA_DIR, 'userdata.json');
+const BLOCKED_IPS_FILE = path.join(DATA_DIR, 'blocked_ips.json');
+const BLOCKED_IPS_BACKUP_MIRROR_FILE = '/var/tmp/notflix_blocked_ips_backup.json';
+
+if (!fs.existsSync(DATA_DIR)) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  } catch (e) {
+    console.error('Error creating data directory:', e);
+  }
+}
+
+// Clean up any legacy global userdata.json so global watch positions never leak across users
+if (fs.existsSync(LEGACY_GLOBAL_USER_DATA_FILE)) {
+  try {
+    fs.unlinkSync(LEGACY_GLOBAL_USER_DATA_FILE);
+  } catch (e) {
+    console.warn('Could not remove legacy global userdata.json:', e);
+  }
+}
+
 // ============================================================================
-// Anti-Bot, Anti-Scraping & Stream Protection Subsystem
+// Anti-Interception, Anti-Scraping & Permanent IP Block Subsystem
 // ============================================================================
 const STREAM_SECURITY_SECRET =
   process.env.STREAM_SECURITY_SECRET ||
   'notflix-stream-secret-' + crypto.randomBytes(16).toString('hex');
+
+export type BanCategory =
+  | 'scraper'
+  | 'interception'
+  | 'honeypot'
+  | 'hotlink'
+  | 'burst_abuse'
+  | 'manual';
+
+export interface PermanentBanRecord {
+  ip: string;
+  reason: string;
+  category: BanCategory;
+  userAgent: string;
+  path: string;
+  bannedAt: number;
+  permanent: true;
+  blockedAttempts: number;
+  lastAttemptAt: number;
+}
 
 // Legitimate Search Engine Crawler Whitelist (Preserves SEO and favicon indexing)
 const SEARCH_ENGINE_BOTS = [
@@ -140,81 +184,333 @@ function isLegitimateSearchCrawler(userAgent: string): boolean {
   return SEARCH_ENGINE_BOTS.some((pattern) => pattern.test(userAgent));
 }
 
-// Known Scraper and Headless User-Agent Signatures
+// Known Scraper, CLI Extractor & Headless Automation Signatures
 const SCRAPER_USER_AGENTS = [
   /python-requests/i,
+  /python-httpx/i,
   /aiohttp/i,
   /scrapy/i,
   /urllib/i,
+  /pycurl/i,
   /curl\//i,
   /wget\//i,
+  /httpie/i,
   /headlesschrome/i,
   /phantomjs/i,
+  /slimerjs/i,
+  /casperjs/i,
   /go-http-client/i,
   /libwww-perl/i,
+  /lwp-trivial/i,
   /httpclient/i,
   /postmanruntime/i,
-  /node-fetch\//i,
+  /insomnia/i,
+  /node-fetch/i,
   /got\//i,
   /playwright/i,
   /puppeteer/i,
+  /selenium/i,
+  /webdriver/i,
   /mechanize/i,
+  /httrack/i,
+  /webreaper/i,
+  /webcopier/i,
+  /sitegrabber/i,
 ];
 
+// Known Network Interception, MITM Proxy & Vulnerability Scanner Signatures
+const INTERCEPTION_USER_AGENTS = [
+  /burpsuite/i,
+  /burpcollaborator/i,
+  /mitmproxy/i,
+  /fiddler/i,
+  /charlesproxy/i,
+  /owasp/i,
+  /\bzap\b/i,
+  /sqlmap/i,
+  /nikto/i,
+  /nmap/i,
+  /zgrab/i,
+  /masscan/i,
+  /gobuster/i,
+  /dirbuster/i,
+  /feroxbuster/i,
+  /nuclei/i,
+  /ffuf/i,
+  /wfuzz/i,
+  /acunetix/i,
+  /nessus/i,
+  /openvas/i,
+  /commix/i,
+  /arachni/i,
+  /w3af/i,
+];
+
+function isKnownInterceptionTool(userAgent: string): boolean {
+  if (!userAgent) return false;
+  return INTERCEPTION_USER_AGENTS.some((pattern) => pattern.test(userAgent));
+}
+
 function isKnownScraperBot(userAgent: string): boolean {
-  if (!userAgent) return true; // Missing User-Agent is standard scraper pattern
+  if (!userAgent) return true; // Missing User-Agent on API routes is a standard scraper signature
   return SCRAPER_USER_AGENTS.some((pattern) => pattern.test(userAgent));
+}
+
+// Sensitive paths that only data interceptors, source-dumpers, or scanners probe
+const DATA_INTERCEPTION_TRAP_PATHS = [
+  /^\/\.env/i,
+  /^\/\.git/i,
+  /^\/server\.ts/i,
+  /^\/package\.json/i,
+  /^\/tsconfig\.json/i,
+  /^\/data\//i,
+  /analytics\.json/i,
+  /scrapers\.json/i,
+  /user_profiles\.json/i,
+  /blocked_ips\.json/i,
+  /^\/wp-admin/i,
+  /^\/wp-login/i,
+  /^\/phpmyadmin/i,
+  /^\/actuator/i,
+  /^\/api\/dump/i,
+  /^\/api\/v1\/dump-streams/i,
+  /^\/api\/internal\/keys/i,
+  /^\/config\.json/i,
+  /^\/backup\.json/i,
+];
+
+function isDataInterceptionProbePath(reqPath: string): boolean {
+  return DATA_INTERCEPTION_TRAP_PATHS.some((pattern) => pattern.test(reqPath));
 }
 
 interface SecurityMetrics {
   totalBlockedScrapers: number;
+  totalInterceptionsBlocked: number;
   totalRateLimited: number;
   totalHoneypotTrapped: number;
   recentSecurityEvents: Array<{
     ip: string;
     reason: string;
+    category?: string;
     userAgent: string;
     path: string;
     ts: number;
+    permanent?: boolean;
   }>;
 }
 
 const securityMetrics: SecurityMetrics = {
   totalBlockedScrapers: 0,
+  totalInterceptionsBlocked: 0,
   totalRateLimited: 0,
   totalHoneypotTrapped: 0,
   recentSecurityEvents: [],
 };
 
-function recordSecurityEvent(ip: string, reason: string, userAgent: string, path: string) {
+function recordSecurityEvent(
+  ip: string,
+  reason: string,
+  userAgent: string,
+  reqPath: string,
+  category: BanCategory = 'scraper',
+  permanent = true
+) {
   securityMetrics.recentSecurityEvents.unshift({
     ip,
     reason,
+    category,
     userAgent: (userAgent || 'unknown').slice(0, 80),
-    path,
+    path: reqPath,
     ts: Date.now(),
+    permanent,
   });
-  if (securityMetrics.recentSecurityEvents.length > 50) {
+  if (securityMetrics.recentSecurityEvents.length > 60) {
     securityMetrics.recentSecurityEvents.pop();
   }
 }
 
-// Active bans (IP -> expiration timestamp)
-const bannedIps = new Map<string, number>();
+// Persistent Permanent IP Blacklist Map (IP -> PermanentBanRecord)
+const permanentlyBannedIps = new Map<string, PermanentBanRecord>();
+// Whitelisted Admin IPs (automatically populated when admin logs in or verifies session)
+const whitelistedAdminIps = new Set<string>();
+// Rate-limit strike counter per IP (escalates repeated rate-limit violations into a permanent IP ban)
+const rateLimitStrikes = new Map<string, number>();
+
+function isInternalOrLoopbackIp(ip: string): boolean {
+  const cleanIp = (ip || '').replace(/^::ffff:/i, '').trim();
+  return (
+    !cleanIp ||
+    cleanIp === '127.0.0.1' ||
+    cleanIp === '::1' ||
+    cleanIp === 'localhost' ||
+    cleanIp.startsWith('127.') ||
+    cleanIp.startsWith('10.') ||
+    cleanIp.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(cleanIp)
+  );
+}
+
+function loadPermanentBansFromDisk() {
+  const candidatePaths = [
+    BLOCKED_IPS_FILE,
+    BLOCKED_IPS_BACKUP_MIRROR_FILE,
+    '/data/blocked_ips.json',
+    '/app/data/blocked_ips.json',
+    path.join(process.cwd(), 'data', 'blocked_ips.json'),
+    path.join(__dirname, 'data', 'blocked_ips.json'),
+  ];
+
+  for (const candidate of candidatePaths) {
+    try {
+      if (fs.existsSync(candidate)) {
+        const raw = fs.readFileSync(candidate, 'utf-8');
+        const parsed = JSON.parse(raw);
+        const list: PermanentBanRecord[] = Array.isArray(parsed)
+          ? parsed
+          : Array.isArray(parsed?.bans)
+          ? parsed.bans
+          : [];
+        for (const item of list) {
+          if (item && item.ip && !isInternalOrLoopbackIp(item.ip)) {
+            const cleanIp = item.ip.replace(/^::ffff:/i, '').trim();
+            if (!permanentlyBannedIps.has(cleanIp)) {
+              permanentlyBannedIps.set(cleanIp, {
+                ip: cleanIp,
+                reason: item.reason || 'Permanent Security Ban',
+                category: item.category || 'scraper',
+                userAgent: item.userAgent || 'unknown',
+                path: item.path || '/',
+                bannedAt: item.bannedAt || Date.now(),
+                permanent: true,
+                blockedAttempts: item.blockedAttempts || 1,
+                lastAttemptAt: item.lastAttemptAt || item.bannedAt || Date.now(),
+              });
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn(`Could not read blocked_ips candidate ${candidate}:`, e);
+    }
+  }
+
+  if (permanentlyBannedIps.size > 0) {
+    console.log(`🛡️ Loaded ${permanentlyBannedIps.size} permanently blocked IPs from persistent storage.`);
+  }
+}
+
+function savePermanentBansToDiskSync() {
+  try {
+    const serialized = JSON.stringify(
+      {
+        updatedAt: Date.now(),
+        bans: Array.from(permanentlyBannedIps.values()),
+      },
+      null,
+      2
+    );
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(BLOCKED_IPS_FILE, serialized, 'utf-8');
+    try {
+      fs.writeFileSync(BLOCKED_IPS_BACKUP_MIRROR_FILE, serialized, 'utf-8');
+    } catch {}
+  } catch (err) {
+    console.error('Error saving permanent IP bans to disk:', err);
+  }
+}
+
+loadPermanentBansFromDisk();
+
+let saveBansTimeout: NodeJS.Timeout | null = null;
+function scheduleSavePermanentBans() {
+  if (saveBansTimeout) return;
+  saveBansTimeout = setTimeout(() => {
+    saveBansTimeout = null;
+    savePermanentBansToDiskSync();
+  }, 1000);
+}
+
+function banIpPermanently(
+  rawIp: string,
+  reason: string,
+  category: BanCategory = 'scraper',
+  userAgent = 'unknown',
+  reqPath = '/'
+): PermanentBanRecord | null {
+  const cleanIp = (rawIp || '').replace(/^::ffff:/i, '').trim();
+  if (isInternalOrLoopbackIp(cleanIp)) return null;
+  if (whitelistedAdminIps.has(cleanIp) && category !== 'manual') return null;
+  if (isLegitimateSearchCrawler(userAgent) && category !== 'manual') return null;
+
+  const now = Date.now();
+  const existing = permanentlyBannedIps.get(cleanIp);
+  if (existing) {
+    existing.blockedAttempts += 1;
+    existing.lastAttemptAt = now;
+    scheduleSavePermanentBans();
+    return existing;
+  }
+
+  const record: PermanentBanRecord = {
+    ip: cleanIp,
+    reason,
+    category,
+    userAgent: (userAgent || 'unknown').slice(0, 120),
+    path: reqPath,
+    bannedAt: now,
+    permanent: true,
+    blockedAttempts: 1,
+    lastAttemptAt: now,
+  };
+
+  permanentlyBannedIps.set(cleanIp, record);
+  savePermanentBansToDiskSync();
+
+  securityMetrics.totalBlockedScrapers++;
+  if (category === 'interception' || category === 'hotlink') {
+    securityMetrics.totalInterceptionsBlocked++;
+  } else if (category === 'honeypot') {
+    securityMetrics.totalHoneypotTrapped++;
+  }
+
+  recordSecurityEvent(cleanIp, `PERMANENT BAN: ${reason}`, userAgent, reqPath, category, true);
+  console.warn(`🚨 [PERMANENT IP BLOCK] Blocked ${cleanIp} permanently | Reason: ${reason} | Path: ${reqPath}`);
+  return record;
+}
+
+function unblockIpPermanently(rawIp: string): boolean {
+  const cleanIp = (rawIp || '').replace(/^::ffff:/i, '').trim();
+  const deleted = permanentlyBannedIps.delete(cleanIp);
+  rateLimitStrikes.delete(cleanIp);
+  if (deleted) {
+    savePermanentBansToDiskSync();
+  }
+  return deleted;
+}
 
 // In-Memory Sliding-Window Rate Limiters (IP -> timestamp[])
 const globalApiRateLimiter = new Map<string, number[]>();
 const streamRateLimiter = new Map<string, number[]>();
 
 function getClientIp(req: Request): string {
+  const cfIp = req.headers['cf-connecting-ip'];
+  if (typeof cfIp === 'string' && cfIp.trim()) {
+    return cfIp.trim().replace(/^::ffff:/i, '');
+  }
+  const realIp = req.headers['x-real-ip'];
+  if (typeof realIp === 'string' && realIp.trim()) {
+    return realIp.trim().replace(/^::ffff:/i, '');
+  }
   const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string') {
-    return forwarded.split(',')[0].trim();
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim().replace(/^::ffff:/i, '');
   }
   if (Array.isArray(forwarded) && forwarded[0]) {
-    return forwarded[0].trim();
+    return forwarded[0].trim().replace(/^::ffff:/i, '');
   }
-  return req.socket.remoteAddress || '127.0.0.1';
+  return (req.socket.remoteAddress || '127.0.0.1').replace(/^::ffff:/i, '');
 }
 
 function checkRateLimit(ip: string, map: Map<string, number[]>, maxRequests: number, windowMs: number): boolean {
@@ -230,7 +526,7 @@ function checkRateLimit(ip: string, map: Map<string, number[]>, maxRequests: num
   return true;
 }
 
-// Periodic cleanup of expired rate-limit buckets
+// Periodic cleanup of expired rate-limit buckets (Permanent IP bans NEVER expire)
 setInterval(() => {
   const now = Date.now();
   for (const [ip, timestamps] of globalApiRateLimiter.entries()) {
@@ -243,106 +539,230 @@ setInterval(() => {
     if (valid.length === 0) streamRateLimiter.delete(ip);
     else streamRateLimiter.set(ip, valid);
   }
-  for (const [ip, expireAt] of bannedIps.entries()) {
-    if (now > expireAt) bannedIps.delete(ip);
-  }
 }, 5 * 60 * 1000);
 
-const antiScraperMiddleware = (req: Request, res: Response, next: NextFunction) => {
+function renderPermanentBlockHtml(record: PermanentBanRecord): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>403 Access Permanently Terminated — Security Shield</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #070a12;
+      color: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      max-width: 520px;
+      width: 100%;
+      background: #0e1424;
+      border: 1px solid rgba(244, 63, 94, 0.4);
+      border-radius: 16px;
+      padding: 32px;
+      text-align: center;
+      box-shadow: 0 25px 50px -12px rgba(136, 19, 55, 0.35);
+    }
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 6px;
+      background: rgba(244, 63, 94, 0.15);
+      border: 1px solid rgba(244, 63, 94, 0.35);
+      color: #fda4af;
+      font-family: monospace;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 14px;
+    }
+    h1 { font-size: 24px; font-weight: 800; margin-bottom: 10px; color: #ffffff; }
+    p { font-size: 13px; color: #cbd5e1; line-height: 1.6; margin-bottom: 22px; }
+    .meta {
+      background: #090d18;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 16px;
+      text-align: left;
+      font-family: monospace;
+      font-size: 12px;
+    }
+    .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+    .row:last-child { border-bottom: none; }
+    .lbl { color: #64748b; }
+    .val { color: #f43f5e; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">Permanent IP Blacklist Active</div>
+    <h1>Access Permanently Terminated</h1>
+    <p>Your network IP address has been permanently blocked by the Anti-Interception &amp; Anti-Scraping Security Shield due to unauthorized data interception or automated scraping activity.</p>
+    <div class="meta">
+      <div class="row"><span class="lbl">STATUS:</span><span class="val">HTTP 403 FORBIDDEN (PERMANENT)</span></div>
+      <div class="row"><span class="lbl">BLOCKED IP:</span><span class="val" style="color:#e2e8f0">${record.ip}</span></div>
+      <div class="row"><span class="lbl">VIOLATION:</span><span class="val" style="color:#fcd34d">${record.reason}</span></div>
+      <div class="row"><span class="lbl">TIMESTAMP:</span><span class="val" style="color:#94a3b8">${new Date(record.bannedAt).toISOString()}</span></div>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+function sendPermanentBlockResponse(req: Request, res: Response, record: PermanentBanRecord) {
+  const isApiOrJson =
+    req.path.startsWith('/api/') ||
+    req.path.startsWith('/v1/') ||
+    (req.headers.accept || '').includes('application/json');
+
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  if (isApiOrJson) {
+    return res.status(403).json({
+      error:
+        'PERMANENT IP BLOCK: Your IP address has been permanently blacklisted for attempting to intercept website data or scrape content.',
+      code: 'IP_PERMANENTLY_BLOCKED',
+      ip: record.ip,
+      reason: record.reason,
+      category: record.category,
+      bannedAt: record.bannedAt,
+      permanent: true,
+    });
+  }
+
+  return res.status(403).type('text/html').send(renderPermanentBlockHtml(record));
+}
+
+// Global Anti-Interception & Permanent IP Block Middleware (Protects entire website + APIs + Streams)
+const globalSecurityShieldMiddleware = (req: Request, res: Response, next: NextFunction) => {
   const ip = getClientIp(req);
   const userAgent = (req.headers['user-agent'] as string) || '';
-  const now = Date.now();
 
-  // Allow loopback and internal Docker / Coolify / Traefik healthcheck probes
-  const cleanIp = ip.replace(/^::ffff:/i, '');
+  // 1. Always allow internal/loopback Docker/Coolify/Traefik health probes
+  if (isInternalOrLoopbackIp(ip)) {
+    return next();
+  }
+
+  // 2. Always allow health checks, Admin UI, Admin API, and static JS/CSS/font assets so Admin Dashboard is always reachable
   if (
-    cleanIp === '127.0.0.1' ||
-    cleanIp === '::1' ||
-    cleanIp === 'localhost' ||
-    cleanIp.startsWith('127.') ||
-    cleanIp.startsWith('10.') ||
-    cleanIp.startsWith('192.168.') ||
-    /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(cleanIp)
+    req.path === '/health' ||
+    req.path === '/api/health' ||
+    req.path === '/healthz' ||
+    req.path.startsWith('/admin') ||
+    req.path.startsWith('/api/admin') ||
+    req.path.startsWith('/assets/') ||
+    req.path.startsWith('/src/') ||
+    req.path.startsWith('/@') ||
+    req.path.startsWith('/node_modules/')
   ) {
     return next();
   }
 
-  // 1. Check if IP is actively banned (e.g. from honeypot trap)
-  const banExpiry = bannedIps.get(ip);
-  if (banExpiry && now < banExpiry) {
-    securityMetrics.totalBlockedScrapers++;
-    recordSecurityEvent(ip, 'Banned IP (Honeypot Trigger)', userAgent, req.path);
-    return res.status(403).json({
-      error: 'Access denied: Automated scraping activity detected from your network.',
-      code: 'SCRAPER_BLOCKED',
-    });
+  // 3. Allow whitelisted Admin IPs
+  if (whitelistedAdminIps.has(ip)) {
+    return next();
   }
 
-  // 2. Allow whitelisted legitimate search engine crawlers (Google, Bing)
+  // 4. Enforce Permanent IP Blacklist across the entire website (HTML pages, APIs, and Stream Proxies)
+  const existingBan = permanentlyBannedIps.get(ip);
+  if (existingBan) {
+    existingBan.blockedAttempts += 1;
+    existingBan.lastAttemptAt = Date.now();
+    securityMetrics.totalBlockedScrapers++;
+    scheduleSavePermanentBans();
+    return sendPermanentBlockResponse(req, res, existingBan);
+  }
+
+  // 5. Allow whitelisted legitimate search engine crawlers (Googlebot, Bingbot, etc.)
   if (isLegitimateSearchCrawler(userAgent)) {
     return next();
   }
 
-  // 3. Skip anti-bot checks for health check, honeypot trap itself, and admin auth endpoints
+  // 6. Let explicit trap routes handle their own permanent ban logic
   if (
-    req.path === '/health' ||
-    req.path === '/api/health' ||
     req.path.startsWith('/trap') ||
     req.path.startsWith('/api/trap') ||
-    req.path.startsWith('/admin') ||
-    req.path.startsWith('/api/admin')
+    req.path === '/api/security/intercept-report'
   ) {
     return next();
   }
 
-  // 4. Block known scraper signatures and headless tools
-  if (isKnownScraperBot(userAgent)) {
-    securityMetrics.totalBlockedScrapers++;
-    recordSecurityEvent(ip, 'Blacklisted Scraper User-Agent', userAgent, req.path);
-    return res.status(403).json({
-      error: 'Automated scraping forbidden. Please use a standard web browser.',
-      code: 'BOT_DETECTED',
-    });
+  // 7. Immediate Permanent IP Ban if probing sensitive backend files, configs, or data-dump endpoints
+  if (isDataInterceptionProbePath(req.path)) {
+    const record = banIpPermanently(
+      ip,
+      'Attempted Backend Data / Config Interception Probe',
+      'interception',
+      userAgent,
+      req.path
+    );
+    if (record) return sendPermanentBlockResponse(req, res, record);
   }
 
-  // 5. Global API Rate Limiting: 120 requests per 60 seconds per IP
-  const allowed = checkRateLimit(ip, globalApiRateLimiter, 120, 60 * 1000);
-  if (!allowed) {
-    securityMetrics.totalRateLimited++;
-    recordSecurityEvent(ip, 'Global API Rate Limit Exceeded', userAgent, req.path);
-    res.setHeader('Retry-After', '60');
-    return res.status(429).json({
-      error: 'Too many requests. Please slow down and try again shortly.',
-      code: 'RATE_LIMITED',
-    });
+  // 8. Immediate Permanent IP Ban for known MITM Interception Proxies & Vulnerability Scanners on any route
+  if (isKnownInterceptionTool(userAgent)) {
+    const record = banIpPermanently(
+      ip,
+      'Network Interception Proxy / Security Scanner Detected',
+      'interception',
+      userAgent,
+      req.path
+    );
+    if (record) return sendPermanentBlockResponse(req, res, record);
+  }
+
+  // 9. Immediate Permanent IP Ban for known Scraper Bots / CLI Extractors on API, Stream, or Page routes
+  if (isKnownScraperBot(userAgent)) {
+    const record = banIpPermanently(
+      ip,
+      'Automated Scraper / Extraction Tool Signature Detected',
+      'scraper',
+      userAgent,
+      req.path
+    );
+    if (record) return sendPermanentBlockResponse(req, res, record);
+  }
+
+  // 10. API Rate Limiting + Automatic Permanent Ban Escalation on Repeated Bulk Scraping
+  if (req.path.startsWith('/api/')) {
+    const allowed = checkRateLimit(ip, globalApiRateLimiter, 140, 60 * 1000);
+    if (!allowed) {
+      securityMetrics.totalRateLimited++;
+      const strikes = (rateLimitStrikes.get(ip) || 0) + 1;
+      rateLimitStrikes.set(ip, strikes);
+
+      if (strikes >= 3) {
+        const record = banIpPermanently(
+          ip,
+          'Persistent Bulk API Scraping (Rate-Limit Strike Threshold Exceeded)',
+          'burst_abuse',
+          userAgent,
+          req.path
+        );
+        if (record) return sendPermanentBlockResponse(req, res, record);
+      }
+
+      recordSecurityEvent(ip, `Global API Rate Limit Exceeded (Strike ${strikes}/3)`, userAgent, req.path, 'burst_abuse', false);
+      res.setHeader('Retry-After', '60');
+      return res.status(429).json({
+        error: 'Too many requests. Continued automated scraping will permanently block your IP.',
+        code: 'RATE_LIMITED',
+      });
+    }
   }
 
   next();
 };
 
-app.use('/api', antiScraperMiddleware);
-
-// Persistent Per-Device User Data storage (strictly isolated by deviceId)
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
-const USER_PROFILES_FILE = path.join(DATA_DIR, 'user_profiles.json');
-const LEGACY_GLOBAL_USER_DATA_FILE = path.join(DATA_DIR, 'userdata.json');
-
-if (!fs.existsSync(DATA_DIR)) {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  } catch (e) {
-    console.error('Error creating data directory:', e);
-  }
-}
-
-// Clean up any legacy global userdata.json so global watch positions never leak across users
-if (fs.existsSync(LEGACY_GLOBAL_USER_DATA_FILE)) {
-  try {
-    fs.unlinkSync(LEGACY_GLOBAL_USER_DATA_FILE);
-  } catch (e) {
-    console.warn('Could not remove legacy global userdata.json:', e);
-  }
-}
+app.use(globalSecurityShieldMiddleware);
 
 // ============================================================================
 // Dynamic Scraper Server Configuration Subsystem (Admin Editable + Persistent)
@@ -1403,18 +1823,46 @@ app.get('/api/security/stream-token', (req: Request, res: Response) => {
   });
 });
 
-// GET /api/trap/probe - Honeypot Trap for automated DOM scrapers
-app.get('/api/trap/probe', (req: Request, res: Response) => {
+// GET /api/trap/probe & /api/trap/* - Honeypot Trap for automated DOM scrapers & data interceptors
+app.all(['/api/trap/probe', '/api/trap/*', '/trap/*'], (req: Request, res: Response) => {
   const ip = getClientIp(req);
   const userAgent = (req.headers['user-agent'] as string) || '';
-  // Ban IP for 24 hours
-  bannedIps.set(ip, Date.now() + 24 * 60 * 60 * 1000);
-  securityMetrics.totalHoneypotTrapped++;
-  recordSecurityEvent(ip, 'Honeypot Trap Triggered', userAgent, req.path);
-  console.warn(`🚨 Anti-Scraper Honeypot triggered by ${ip} (UA: ${userAgent})`);
+  const record = banIpPermanently(
+    ip,
+    'Honeypot Anti-Scrape / Data Interception Trap Triggered',
+    'honeypot',
+    userAgent,
+    req.path
+  );
+  if (record) {
+    return sendPermanentBlockResponse(req, res, record);
+  }
   return res.status(403).json({
-    error: 'Access blocked: Automated crawler activity detected.',
-    code: 'TRAP_TRIGGERED',
+    error: 'PERMANENT IP BLOCK: Automated crawler or data interception activity detected.',
+    code: 'IP_PERMANENTLY_BLOCKED',
+  });
+});
+
+// POST /api/security/intercept-report - Client-side sentinel report for active data interception or automated stream harvesting
+app.post('/api/security/intercept-report', (req: Request, res: Response) => {
+  const ip = getClientIp(req);
+  const userAgent = (req.headers['user-agent'] as string) || '';
+  const body = req.body || {};
+  const reason =
+    typeof body.reason === 'string' && body.reason.trim()
+      ? body.reason.trim().slice(0, 120)
+      : 'Client-Side Data Interception / Automated Scraping Detected';
+  const category: BanCategory = body.category === 'scraper' ? 'scraper' : 'interception';
+  const reqPath = typeof body.path === 'string' ? body.path.slice(0, 80) : '/api/security/intercept-report';
+
+  const record = banIpPermanently(ip, reason, category, userAgent, reqPath);
+  return res.status(403).json({
+    error: 'PERMANENT IP BLOCK: Your IP address has been permanently blacklisted.',
+    code: 'IP_PERMANENTLY_BLOCKED',
+    ip,
+    reason,
+    bannedAt: record?.bannedAt || Date.now(),
+    permanent: true,
   });
 });
 
@@ -1424,57 +1872,99 @@ app.get('/api/streams/:type/:id', async (req: Request, res: Response) => {
     const ip = getClientIp(req);
     const userAgent = (req.headers['user-agent'] as string) || '';
 
-    // 1. Stream Rate Limit: Max 30 stream resolutions per 5 minutes per IP
+    // 1. Stream Rate Limit: Max 30 stream resolutions per 5 minutes per IP (Escalates to Permanent IP Ban on repeat abuse)
     const streamAllowed = checkRateLimit(ip, streamRateLimiter, 30, 5 * 60 * 1000);
     if (!streamAllowed) {
       securityMetrics.totalRateLimited++;
-      recordSecurityEvent(ip, 'Stream Rate Limit Exceeded', userAgent, req.path);
+      const strikes = (rateLimitStrikes.get(ip) || 0) + 1;
+      rateLimitStrikes.set(ip, strikes);
+
+      if (strikes >= 2) {
+        const record = banIpPermanently(
+          ip,
+          'Automated Bulk Stream Harvesting / Extraction Detected',
+          'burst_abuse',
+          userAgent,
+          req.path
+        );
+        if (record) return sendPermanentBlockResponse(req, res, record);
+      }
+
+      recordSecurityEvent(ip, 'Stream Rate Limit Exceeded', userAgent, req.path, 'burst_abuse', false);
       res.setHeader('Retry-After', '120');
       return res.status(429).json({
-        error: 'Stream resolution limit reached. Please wait before switching streams.',
+        error: 'Stream resolution limit reached. Continued bulk scraping will permanently block your IP.',
         code: 'STREAM_RATE_LIMITED',
       });
     }
 
-    // 2. Token Signature & Hotlink Protection Check
+    // 2. Token Signature & Anti-Interception / Hotlink Verification
     const token = (req.query.token as string) || (req.headers['x-stream-token'] as string);
     let isTokenValid = false;
-    if (token && token.includes('.')) {
-      const [tsStr, sig] = token.split('.');
-      const tokenTs = parseInt(tsStr, 10);
-      const age = Date.now() - tokenTs;
-      if (!isNaN(tokenTs) && age >= 0 && age <= 120000) {
-        const expectedSigWithIp = crypto
-          .createHmac('sha256', STREAM_SECURITY_SECRET)
-          .update(`${tokenTs}:${type}:${id}:${ip}`)
-          .digest('hex');
-        const expectedSigGeneral = crypto
-          .createHmac('sha256', STREAM_SECURITY_SECRET)
-          .update(`${tokenTs}:${type}:${id}`)
-          .digest('hex');
+    let isTokenForged = false;
+    if (token) {
+      if (!token.includes('.')) {
+        isTokenForged = true;
+      } else {
+        const [tsStr, sig] = token.split('.');
+        const tokenTs = parseInt(tsStr, 10);
+        const age = Date.now() - tokenTs;
+        if (isNaN(tokenTs)) {
+          isTokenForged = true;
+        } else {
+          const expectedSigWithIp = crypto
+            .createHmac('sha256', STREAM_SECURITY_SECRET)
+            .update(`${tokenTs}:${type}:${id}:${ip}`)
+            .digest('hex');
+          const expectedSigGeneral = crypto
+            .createHmac('sha256', STREAM_SECURITY_SECRET)
+            .update(`${tokenTs}:${type}:${id}`)
+            .digest('hex');
 
-        if (sig === expectedSigWithIp || sig === expectedSigGeneral) {
-          isTokenValid = true;
+          if (sig !== expectedSigWithIp && sig !== expectedSigGeneral) {
+            isTokenForged = true;
+          } else if (age >= 0 && age <= 120000) {
+            isTokenValid = true;
+          }
         }
       }
     }
 
-    // Referer / Origin verification for hotlinking prevention
+    // If someone tampered with or forged the stream security token, permanently block their IP immediately
+    if (isTokenForged) {
+      const record = banIpPermanently(
+        ip,
+        'Forged / Tampered Stream Security Token Interception',
+        'interception',
+        userAgent,
+        req.path
+      );
+      if (record) return sendPermanentBlockResponse(req, res, record);
+    }
+
+    // Referer / Origin verification for hotlinking & external stream interception prevention
     const referer = (req.headers['referer'] as string) || '';
     const host = (req.headers['host'] as string) || '';
     const isDirectBrowser =
       !referer ||
       referer.includes(host) ||
+      referer.includes('notflixtv.com') ||
       referer.includes('localhost') ||
       referer.includes('127.0.0.1') ||
       referer.includes('run.app');
 
     if (!isTokenValid && !isDirectBrowser) {
-      securityMetrics.totalBlockedScrapers++;
-      recordSecurityEvent(ip, 'Hotlinking / Invalid Stream Token', userAgent, req.path);
+      const record = banIpPermanently(
+        ip,
+        'External Stream Interception / Hotlink Scraping Detected',
+        'hotlink',
+        userAgent,
+        req.path
+      );
+      if (record) return sendPermanentBlockResponse(req, res, record);
       return res.status(403).json({
-        error: 'Unauthorized stream request. Direct scraping or hotlinking is prohibited.',
-        code: 'STREAM_FORBIDDEN',
+        error: 'PERMANENT IP BLOCK: Unauthorized stream interception or hotlinking is prohibited.',
+        code: 'IP_PERMANENTLY_BLOCKED',
       });
     }
     const isTV = type === 'tv';
@@ -1926,8 +2416,24 @@ app.get('/api/proxy/stream', async (req: Request, res: Response) => {
     if (targetUrl.includes('/v1/proxy')) {
       const queryString = targetUrl.includes('?') ? targetUrl.slice(targetUrl.indexOf('?')) : '';
       targetUrl = `${getCineproUrl()}/v1/proxy${queryString}`;
-    } else if (targetUrl.startsWith('/')) {
-      targetUrl = `http://127.0.0.1:3000${targetUrl}`;
+    } else if (
+      targetUrl.startsWith('/') ||
+      /^https?:\/\/(localhost|127\.|0\.0\.0\.0|169\.254\.|\[::1\])/i.test(targetUrl) ||
+      targetUrl.includes('/api/admin') ||
+      targetUrl.includes('analytics.json') ||
+      targetUrl.includes('scrapers.json')
+    ) {
+      const ip = getClientIp(req);
+      const userAgent = (req.headers['user-agent'] as string) || '';
+      const record = banIpPermanently(
+        ip,
+        'Stream Proxy SSRF / Internal Data Interception Attempt',
+        'interception',
+        userAgent,
+        req.path
+      );
+      if (record) return sendPermanentBlockResponse(req, res, record);
+      return res.status(403).send('Forbidden: Internal network interception blocked');
     }
 
     if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
@@ -2472,6 +2978,13 @@ function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
   if (!verified) {
     return res.status(401).json({ error: 'Unauthorized: Session expired or invalid' });
   }
+  const adminIp = getClientIp(req);
+  if (adminIp && !isInternalOrLoopbackIp(adminIp)) {
+    whitelistedAdminIps.add(adminIp);
+    if (permanentlyBannedIps.has(adminIp)) {
+      unblockIpPermanently(adminIp);
+    }
+  }
   next();
 }
 
@@ -2625,7 +3138,12 @@ function handleGracefulShutdown(signal: string) {
     clearTimeout(saveAnalyticsTimeout);
     saveAnalyticsTimeout = null;
   }
+  if (saveBansTimeout) {
+    clearTimeout(saveBansTimeout);
+    saveBansTimeout = null;
+  }
   flushAnalyticsToDiskSync();
+  savePermanentBansToDiskSync();
   if (scraperConfigStore.isCustom) {
     saveScraperConfigToDiskSync(scraperConfigStore);
   }
@@ -2683,6 +3201,14 @@ app.post('/api/admin/login', (req: Request, res: Response) => {
   const token = createStatelessAdminToken(ADMIN_USERNAME, expiresAt);
   activeAdminTokens.set(token, { createdAt: Date.now(), expiresAt, username: ADMIN_USERNAME });
 
+  const adminIp = getClientIp(req);
+  if (adminIp && !isInternalOrLoopbackIp(adminIp)) {
+    whitelistedAdminIps.add(adminIp);
+    if (permanentlyBannedIps.has(adminIp)) {
+      unblockIpPermanently(adminIp);
+    }
+  }
+
   return res.json({
     success: true,
     token,
@@ -2701,6 +3227,13 @@ app.get('/api/admin/verify', (req: Request, res: Response) => {
   const verified = verifyAdminToken(token);
   if (!verified) {
     return res.status(401).json({ valid: false });
+  }
+  const adminIp = getClientIp(req);
+  if (adminIp && !isInternalOrLoopbackIp(adminIp)) {
+    whitelistedAdminIps.add(adminIp);
+    if (permanentlyBannedIps.has(adminIp)) {
+      unblockIpPermanently(adminIp);
+    }
   }
   return res.json({ valid: true, username: verified.username });
 });
@@ -3053,16 +3586,78 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
       serverHealth,
       security: {
         totalBlockedScrapers: securityMetrics.totalBlockedScrapers,
+        totalInterceptionsBlocked: securityMetrics.totalInterceptionsBlocked,
         totalRateLimited: securityMetrics.totalRateLimited,
         totalHoneypotTrapped: securityMetrics.totalHoneypotTrapped,
-        activeBannedIps: bannedIps.size,
-        recentEvents: securityMetrics.recentSecurityEvents.slice(0, 20),
+        activeBannedIps: permanentlyBannedIps.size,
+        permanentBans: Array.from(permanentlyBannedIps.values())
+          .sort((a, b) => b.lastAttemptAt - a.lastAttemptAt)
+          .slice(0, 100),
+        recentEvents: securityMetrics.recentSecurityEvents.slice(0, 30),
       },
     });
   } catch (err) {
     console.error('Error generating analytics:', err);
     return res.status(500).json({ error: 'Failed to compute analytics' });
   }
+});
+
+// GET /api/admin/security/bans (Fetch all permanently blocked IPs)
+app.get('/api/admin/security/bans', requireAdminAuth, (_req: Request, res: Response) => {
+  return res.json({
+    success: true,
+    count: permanentlyBannedIps.size,
+    bans: Array.from(permanentlyBannedIps.values()).sort((a, b) => b.lastAttemptAt - a.lastAttemptAt),
+  });
+});
+
+// POST /api/admin/security/ban (Manually block an IP permanently from Admin Dashboard)
+app.post('/api/admin/security/ban', requireAdminAuth, (req: Request, res: Response) => {
+  const { ip, reason } = req.body || {};
+  if (!ip || typeof ip !== 'string' || !ip.trim()) {
+    return res.status(400).json({ error: 'Valid IP address is required' });
+  }
+  const cleanIp = ip.trim().replace(/^::ffff:/i, '');
+  if (isInternalOrLoopbackIp(cleanIp)) {
+    return res.status(400).json({ error: 'Cannot block loopback or internal container network IPs' });
+  }
+  const record = banIpPermanently(
+    cleanIp,
+    typeof reason === 'string' && reason.trim() ? reason.trim() : 'Manually Blocked by Admin',
+    'manual',
+    'Admin Manual Block',
+    '/admin'
+  );
+  return res.json({
+    success: true,
+    record,
+    bans: Array.from(permanentlyBannedIps.values()).sort((a, b) => b.lastAttemptAt - a.lastAttemptAt),
+  });
+});
+
+// POST /api/admin/security/unblock (Unblock a permanently banned IP or clear all bans)
+app.post('/api/admin/security/unblock', requireAdminAuth, (req: Request, res: Response) => {
+  const { ip, all } = req.body || {};
+  if (all === true) {
+    const cleared = permanentlyBannedIps.size;
+    permanentlyBannedIps.clear();
+    rateLimitStrikes.clear();
+    savePermanentBansToDiskSync();
+    return res.json({
+      success: true,
+      cleared,
+      bans: [],
+    });
+  }
+  if (!ip || typeof ip !== 'string' || !ip.trim()) {
+    return res.status(400).json({ error: 'IP address is required to unblock' });
+  }
+  const removed = unblockIpPermanently(ip);
+  return res.json({
+    success: true,
+    removed,
+    bans: Array.from(permanentlyBannedIps.values()).sort((a, b) => b.lastAttemptAt - a.lastAttemptAt),
+  });
 });
 
 // GET /api/admin/analytics/export (Export raw analytics.json backup)

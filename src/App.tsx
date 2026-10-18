@@ -15,6 +15,7 @@ import { Toast } from './components/Toast';
 import { ResumeBanner } from './components/ResumeBanner';
 import { AdBlockerBanner } from './components/AdBlockerBanner';
 import { telemetry } from './services/telemetry';
+import { securitySentinel, PermanentBlockInfo } from './services/securitySentinel';
 
 const checkIsAdmin = (): boolean => {
   if (typeof window === 'undefined') return false;
@@ -33,6 +34,16 @@ const checkIsAdmin = (): boolean => {
 const AppContent: React.FC = () => {
   const { activeTab, activeModalItem, quickViewItem } = useApp();
   const [isAdmin, setIsAdmin] = useState<boolean>(checkIsAdmin);
+  const [blockInfo, setBlockInfo] = useState<PermanentBlockInfo>(() =>
+    securitySentinel.getBlockState()
+  );
+
+  useEffect(() => {
+    securitySentinel.init();
+    return securitySentinel.subscribe((state) => {
+      setBlockInfo(state);
+    });
+  }, []);
 
   // Sync routing on popstate and hashchange
   useEffect(() => {
@@ -134,6 +145,50 @@ const AppContent: React.FC = () => {
     );
   }
 
+  // Permanent IP Block Lockout Screen for Scrapers / Data Interceptors
+  if (blockInfo.blocked) {
+    return (
+      <div className="min-h-screen bg-[#070a12] text-white flex items-center justify-center p-6 select-none">
+        <div className="max-w-lg w-full bg-[#0e1424] border border-rose-500/40 rounded-2xl p-8 text-center shadow-2xl shadow-rose-950/30">
+          <div className="w-16 h-16 rounded-2xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center mx-auto mb-5 text-rose-400 font-mono text-2xl font-extrabold">
+            403
+          </div>
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-rose-500/15 border border-rose-500/30 text-rose-300 text-[11px] font-mono font-bold uppercase tracking-widest mb-3">
+            Permanent IP Blacklist Active
+          </div>
+          <h1 className="text-2xl font-extrabold text-white tracking-tight mb-2">
+            Access Permanently Terminated
+          </h1>
+          <p className="text-xs text-slate-300 leading-relaxed mb-6">
+            Your network IP address has been permanently blocked by the Notflix Anti-Interception &amp; Anti-Scraping Security Shield due to unauthorized data interception or automated extraction activity.
+          </p>
+          <div className="bg-[#090d18] border border-white/10 rounded-xl p-4 text-left font-mono text-xs space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-500">STATUS CODE:</span>
+              <span className="text-rose-400 font-bold">IP_PERMANENTLY_BLOCKED (HTTP 403)</span>
+            </div>
+            {blockInfo.ip && (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-500">CLIENT IP:</span>
+                <span className="text-slate-200 font-bold">{blockInfo.ip}</span>
+              </div>
+            )}
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-500">VIOLATION:</span>
+              <span className="text-amber-300 truncate max-w-[260px]">
+                {blockInfo.reason || 'Data Interception / Automated Scraping'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-500">BAN DURATION:</span>
+              <span className="text-rose-400 font-bold uppercase">Permanent</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#0b0f19] text-[#f8fafc] flex flex-col selection:bg-rose-600 selection:text-white relative">
       {/* Top Header */}
@@ -169,6 +224,16 @@ const AppContent: React.FC = () => {
           >
             Admin Studio
           </button>
+          {/* Invisible Honeypot Trap for Automated DOM Scrapers & Data Interceptors */}
+          <a
+            href="/api/trap/probe"
+            style={{ display: 'none' }}
+            aria-hidden="true"
+            tabIndex={-1}
+            rel="nofollow noopener"
+          >
+            Raw Stream M3U8 Database Dump
+          </a>
         </div>
       </footer>
 

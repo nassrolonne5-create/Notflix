@@ -121,15 +121,29 @@ interface AnalyticsResponse {
   serverHealth: ServerHealthItem[];
   security?: {
     totalBlockedScrapers: number;
+    totalInterceptionsBlocked?: number;
     totalRateLimited: number;
     totalHoneypotTrapped: number;
     activeBannedIps: number;
+    permanentBans?: Array<{
+      ip: string;
+      reason: string;
+      category: string;
+      userAgent: string;
+      path: string;
+      bannedAt: number;
+      permanent: boolean;
+      blockedAttempts: number;
+      lastAttemptAt: number;
+    }>;
     recentEvents: Array<{
       ip: string;
       reason: string;
+      category?: string;
       userAgent: string;
       path: string;
       ts: number;
+      permanent?: boolean;
     }>;
   };
 }
@@ -688,6 +702,74 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     type: 'success' | 'error' | 'info';
     text: string;
   } | null>(null);
+
+  // Permanent IP Ban Management State
+  const [manualBanIp, setManualBanIp] = useState<string>('');
+  const [manualBanReason, setManualBanReason] = useState<string>('');
+  const [banActionLoading, setBanActionLoading] = useState<boolean>(false);
+
+  const handleManualPermanentBan = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token || !manualBanIp.trim()) return;
+    setBanActionLoading(true);
+    try {
+      const res = await fetch('/api/admin/security/ban', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          ip: manualBanIp.trim(),
+          reason: manualBanReason.trim() || 'Manually Blocked by Admin (Data Interception / Scraping)',
+        }),
+      });
+      if (res.ok) {
+        setManualBanIp('');
+        setManualBanReason('');
+        fetchAnalytics();
+      }
+    } catch {}
+    setBanActionLoading(false);
+  };
+
+  const handleUnblockIp = async (ipToUnblock: string) => {
+    if (!token || !ipToUnblock) return;
+    setBanActionLoading(true);
+    try {
+      const res = await fetch('/api/admin/security/unblock', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ ip: ipToUnblock }),
+      });
+      if (res.ok) {
+        fetchAnalytics();
+      }
+    } catch {}
+    setBanActionLoading(false);
+  };
+
+  const handleUnblockAllIps = async () => {
+    if (!token) return;
+    setBanActionLoading(true);
+    try {
+      const res = await fetch('/api/admin/security/unblock', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ all: true }),
+      });
+      if (res.ok) {
+        fetchAnalytics();
+      }
+    } catch {}
+    setBanActionLoading(false);
+  };
 
   const handleHostPortChange = (
     id: ScraperServerId,
@@ -2432,7 +2514,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
         </div>
 
         {/* =========================================================
-            Anti-Bot & Anti-Scraping Defense Shield Telemetry
+            Anti-Interception, Anti-Scraping & Permanent IP Block Shield
            ========================================================= */}
         <div className="bg-[#0e1424] border border-white/10 rounded-2xl p-5 md:p-6 flex flex-col gap-5">
           <div className="flex items-center justify-between flex-wrap gap-3">
@@ -2441,21 +2523,21 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                 <Shield className="w-5 h-5" />
               </div>
               <div>
-                <h3 className="text-base font-bold text-white flex items-center gap-2">
-                  <span>Anti-Bot & Scraper Defense Shield</span>
-                  <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-400">
-                    Live Active
+                <h3 className="text-base font-bold text-white flex items-center gap-2 flex-wrap">
+                  <span>Anti-Interception &amp; Permanent IP Block Shield</span>
+                  <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded bg-rose-500/15 border border-rose-500/30 text-rose-400">
+                    Permanent IP Ban Active
                   </span>
                 </h3>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  Protecting stream extractors and media APIs from automated leeches, crawlers, and hotlink abuse.
+                  Automatically &amp; permanently blocks any IP that attempts to intercept website data, tamper with stream tokens, probe backend files, or scrape content.
                 </p>
               </div>
             </div>
 
             <div className="flex items-center gap-2 text-xs text-slate-400">
               <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              <span>Googlebot & Search Engines Whitelisted</span>
+              <span>Admin &amp; Search Engines Whitelisted</span>
             </div>
           </div>
 
@@ -2468,37 +2550,134 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
               <div className="text-2xl md:text-3xl font-extrabold font-mono text-rose-400 my-1">
                 {analytics?.security?.totalBlockedScrapers || 0}
               </div>
-              <span className="text-[10px] text-slate-400">Python, Scrapy & headless tools</span>
+              <span className="text-[10px] text-slate-400">Scrapers, bots &amp; CLI extractors</span>
             </div>
 
             <div className="p-3.5 rounded-xl bg-[#12192b] border border-white/5 flex flex-col justify-between">
               <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                Rate-Limit Throttled
+                Interception &amp; Traps
+              </span>
+              <div className="text-2xl md:text-3xl font-extrabold font-mono text-purple-400 my-1">
+                {(analytics?.security?.totalInterceptionsBlocked || 0) +
+                  (analytics?.security?.totalHoneypotTrapped || 0)}
+              </div>
+              <span className="text-[10px] text-slate-400">MITM proxies, token forgery &amp; traps</span>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-[#12192b] border border-white/5 flex flex-col justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Rate-Limit Strikes
               </span>
               <div className="text-2xl md:text-3xl font-extrabold font-mono text-amber-400 my-1">
                 {analytics?.security?.totalRateLimited || 0}
               </div>
-              <span className="text-[10px] text-slate-400">Burst extraction prevented</span>
+              <span className="text-[10px] text-slate-400">Auto-bans IP on repeat burst</span>
             </div>
 
-            <div className="p-3.5 rounded-xl bg-[#12192b] border border-white/5 flex flex-col justify-between">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                Honeypot Trapped
+            <div className="p-3.5 rounded-xl bg-[#12192b] border border-rose-500/20 flex flex-col justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-rose-300">
+                Permanent IP Bans
               </span>
-              <div className="text-2xl md:text-3xl font-extrabold font-mono text-purple-400 my-1">
-                {analytics?.security?.totalHoneypotTrapped || 0}
-              </div>
-              <span className="text-[10px] text-slate-400">DOM spider auto-banned</span>
-            </div>
-
-            <div className="p-3.5 rounded-xl bg-[#12192b] border border-white/5 flex flex-col justify-between">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                Active IP Bans
-              </span>
-              <div className="text-2xl md:text-3xl font-extrabold font-mono text-blue-400 my-1">
+              <div className="text-2xl md:text-3xl font-extrabold font-mono text-rose-400 my-1">
                 {analytics?.security?.activeBannedIps || 0}
               </div>
-              <span className="text-[10px] text-slate-400">24-hour scraper quarantine</span>
+              <span className="text-[10px] text-slate-400">Persistent disk IP blacklist</span>
+            </div>
+          </div>
+
+          {/* Manual Permanent IP Ban Form */}
+          <form
+            onSubmit={handleManualPermanentBan}
+            className="p-3.5 rounded-xl bg-[#11182a] border border-white/10 flex flex-col md:flex-row items-stretch md:items-center gap-2.5"
+          >
+            <div className="flex items-center gap-2 text-xs font-bold text-slate-300 shrink-0">
+              <Lock className="w-3.5 h-3.5 text-rose-400" />
+              <span>Manual Permanent IP Block:</span>
+            </div>
+            <input
+              type="text"
+              value={manualBanIp}
+              onChange={(e) => setManualBanIp(e.target.value)}
+              placeholder="IP Address (e.g. 185.220.101.4)"
+              className="px-3 py-1.5 rounded-lg bg-[#0b101e] border border-white/10 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-rose-500/50 md:w-52"
+            />
+            <input
+              type="text"
+              value={manualBanReason}
+              onChange={(e) => setManualBanReason(e.target.value)}
+              placeholder="Reason (optional — e.g. Data interception / Stream scraper)"
+              className="px-3 py-1.5 rounded-lg bg-[#0b101e] border border-white/10 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:border-rose-500/50 flex-1"
+            />
+            <button
+              type="submit"
+              disabled={banActionLoading || !manualBanIp.trim()}
+              className="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-xs font-bold transition-colors cursor-pointer shrink-0"
+            >
+              Block IP Permanently
+            </button>
+          </form>
+
+          {/* Permanently Blocked IPs Table */}
+          <div>
+            <div className="flex items-center justify-between mb-2.5 gap-2">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
+                <span>Permanently Blocked IPs ({analytics?.security?.permanentBans?.length || 0})</span>
+              </h4>
+              {analytics?.security?.permanentBans && analytics.security.permanentBans.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleUnblockAllIps}
+                  disabled={banActionLoading}
+                  className="text-[11px] font-bold text-slate-400 hover:text-white px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 transition-colors cursor-pointer"
+                >
+                  Unblock All IPs
+                </button>
+              )}
+            </div>
+
+            <div className="max-h-60 overflow-y-auto flex flex-col gap-1.5 pr-1">
+              {analytics?.security?.permanentBans && analytics.security.permanentBans.length > 0 ? (
+                analytics.security.permanentBans.map((ban) => (
+                  <div
+                    key={ban.ip}
+                    className="flex items-center justify-between p-2.5 rounded-xl bg-[#11182a] border border-rose-500/20 text-xs gap-3 flex-wrap md:flex-nowrap"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="px-2 py-0.5 rounded bg-rose-500/20 border border-rose-500/30 text-rose-300 font-mono font-bold text-[11px] shrink-0">
+                        {ban.ip}
+                      </span>
+                      <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-amber-300 font-mono text-[10px] uppercase font-bold shrink-0">
+                        {ban.category || 'scraper'}
+                      </span>
+                      <div className="truncate">
+                        <span className="text-slate-200 font-semibold">{ban.reason}</span>
+                        <span className="text-slate-500 mx-1.5">·</span>
+                        <span className="font-mono text-slate-400 text-[11px]">{ban.path}</span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-3 shrink-0 ml-auto">
+                      <span className="font-mono text-[10px] text-slate-400">
+                        {ban.blockedAttempts} {ban.blockedAttempts === 1 ? 'attempt' : 'attempts'} ·{' '}
+                        {new Date(ban.bannedAt).toLocaleDateString()} {new Date(ban.bannedAt).toLocaleTimeString()}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleUnblockIp(ban.ip)}
+                        disabled={banActionLoading}
+                        className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 font-bold text-[11px] transition-colors cursor-pointer"
+                      >
+                        Unblock
+                      </button>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="py-5 text-center text-xs text-slate-500 bg-[#11182a]/50 rounded-xl border border-white/5">
+                  No IPs are currently on the permanent blacklist. Any IP that intercepts data or scrapes content will be permanently locked here automatically.
+                </div>
+              )}
             </div>
           </div>
 
@@ -2506,7 +2685,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
           <div>
             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2.5 flex items-center gap-1.5">
               <Bug className="w-3.5 h-3.5 text-rose-400" />
-              <span>Recent Blocked Incident Log</span>
+              <span>Recent Security &amp; Interception Incident Log</span>
             </h4>
 
             <div className="max-h-56 overflow-y-auto flex flex-col gap-1.5 pr-1">
@@ -2537,7 +2716,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                 ))
               ) : (
                 <div className="py-6 text-center text-xs text-slate-500 bg-[#11182a]/50 rounded-xl border border-white/5">
-                  Shield active: No scraper attacks or malicious automated bots detected.
+                  Shield active: No scraper attacks or data interception attempts detected.
                 </div>
               )}
             </div>
