@@ -32,6 +32,7 @@ import {
   Bug,
   Zap,
   Sparkles,
+  BarChart3,
 } from 'lucide-react';
 import { smartAdController, SmartAdMetrics } from '../services/smartAdController';
 
@@ -679,6 +680,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     tmdb_embed: { loading: false },
     gateway_fallback: { loading: false },
   });
+  const [scraperLoading, setScraperLoading] = useState<boolean>(false);
   const [scraperSaving, setScraperSaving] = useState<boolean>(false);
   const [scraperIsCustom, setScraperIsCustom] = useState<boolean>(false);
   const [scraperUpdatedAt, setScraperUpdatedAt] = useState<number>(0);
@@ -829,6 +831,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
 
   const fetchAndSyncScrapers = useCallback(async () => {
     if (!token) return;
+    setScraperLoading(true);
     try {
       const res = await fetch(`/api/admin/scrapers?_cb=${Date.now()}`, {
         cache: 'no-store',
@@ -889,7 +892,11 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
           localStorage.setItem(SCRAPER_VAULT_STORAGE_KEY, JSON.stringify(serverStore));
         } catch {}
       }
-    } catch {}
+    } catch {
+      // Ignore transient network errors
+    } finally {
+      setScraperLoading(false);
+    }
   }, [token]);
 
   const handleSaveScrapers = async () => {
