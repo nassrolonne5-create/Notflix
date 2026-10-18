@@ -211,8 +211,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
   const [loginLoading, setLoginLoading] = useState<boolean>(false);
   const [loginError, setLoginError] = useState<string | null>(null);
 
-  // Analytics Dashboard State
-  const [adminView, setAdminView] = useState<'all' | 'scrapers' | 'analytics'>('all');
+  // Admin Studio Page Switcher ('analytics' = pure Analytics Page, 'scrapers' = pure Edit Scraper Page)
+  const [adminView, setAdminView] = useState<'analytics' | 'scrapers'>('analytics');
   const [dateRange, setDateRange] = useState<'today' | '7d' | '30d' | 'all'>('7d');
   const [mediaFilter, setMediaFilter] = useState<'all' | 'movie' | 'tv'>('all');
   const [analytics, setAnalytics] = useState<AnalyticsResponse | null>(null);
@@ -1162,9 +1162,9 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
       {/* =========================================================
           Top Studio Header
          ========================================================= */}
-      <header className="sticky top-0 z-40 bg-[#0c101d]/90 backdrop-blur-md border-b border-white/10 px-4 md:px-8 py-3.5 flex flex-wrap items-center justify-between gap-4">
-        {/* Brand & Live Beacon */}
-        <div className="flex items-center gap-4">
+      <header className="sticky top-0 z-40 bg-[#0c101d]/95 backdrop-blur-md border-b border-white/10 px-4 md:px-8 py-3.5 flex flex-wrap items-center justify-between gap-4">
+        {/* Brand, Primary Page Switcher & Live Beacon */}
+        <div className="flex items-center gap-3 md:gap-4 flex-wrap">
           <div className="flex items-center gap-2">
             <span className="font-display text-2xl tracking-wider text-white uppercase">
               Notflix<span className="text-blue-500">.</span>
@@ -1176,8 +1176,49 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
 
           <div className="h-5 w-px bg-white/10 hidden sm:block" />
 
+          {/* Dedicated 2-Page Switcher: Analytics Page vs Scraper Servers Page */}
+          <div className="flex items-center bg-[#131a2b] border border-white/15 rounded-xl p-1 gap-1">
+            <button
+              type="button"
+              onClick={() => {
+                setAdminView('analytics');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                adminView === 'analytics'
+                  ? 'bg-blue-600 text-white shadow-md shadow-blue-950/60'
+                  : 'text-slate-400 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <BarChart3 className="w-3.5 h-3.5" />
+              <span>Analytics Page</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setAdminView('scrapers');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                adminView === 'scrapers'
+                  ? 'bg-blue-600 text-white shadow-md shadow-blue-950/60'
+                  : 'text-slate-400 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <Server className="w-3.5 h-3.5" />
+              <span>Scraper Servers Page</span>
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  scraperIsCustom ? 'bg-amber-400' : 'bg-emerald-400'
+                }`}
+                title={scraperIsCustom ? 'Custom Scraper IPs Active' : 'Default Scraper IPs Active'}
+              />
+            </button>
+          </div>
+
           {/* Real Live Viewers Beacon */}
-          <div className="flex items-center gap-2 bg-[#12192b] border border-white/10 px-3 py-1 rounded-full">
+          <div className="hidden lg:flex items-center gap-2 bg-[#12192b] border border-white/10 px-3 py-1 rounded-full">
             <span className="relative flex h-2.5 w-2.5">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
               <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
@@ -1189,102 +1230,107 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
           </div>
         </div>
 
-        {/* Date Filters & Action Controls */}
+        {/* Context-Specific Action Controls */}
         <div className="flex items-center gap-2.5 flex-wrap">
-          {/* Segmented Date Range Picker */}
-          <div className="flex items-center bg-[#131a2b] border border-white/10 rounded-xl p-1 gap-1 text-xs">
-            {(
-              [
-                { id: 'today', label: 'Today' },
-                { id: '7d', label: 'Last 7 Days' },
-                { id: '30d', label: 'Last 30 Days' },
-                { id: 'all', label: 'All Time' },
-              ] as const
-            ).map((item) => (
+          {adminView === 'analytics' ? (
+            <>
+              {/* Segmented Date Range Picker (Analytics Page Only) */}
+              <div className="flex items-center bg-[#131a2b] border border-white/10 rounded-xl p-1 gap-1 text-xs">
+                {(
+                  [
+                    { id: 'today', label: 'Today' },
+                    { id: '7d', label: 'Last 7 Days' },
+                    { id: '30d', label: 'Last 30 Days' },
+                    { id: 'all', label: 'All Time' },
+                  ] as const
+                ).map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => setDateRange(item.id)}
+                    className={`px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer ${
+                      dateRange === item.id
+                        ? 'bg-blue-600 text-white font-bold shadow-sm'
+                        : 'text-slate-400 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Auto Refresh Toggle */}
               <button
-                key={item.id}
-                onClick={() => setDateRange(item.id)}
-                className={`px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer ${
-                  dateRange === item.id
-                    ? 'bg-blue-600 text-white font-bold shadow-sm'
-                    : 'text-slate-400 hover:text-white hover:bg-white/5'
+                onClick={() => setAutoRefresh(!autoRefresh)}
+                title="Auto-refresh every 10 seconds"
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold cursor-pointer transition-all ${
+                  autoRefresh
+                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                    : 'bg-white/5 border-white/10 text-slate-400 hover:text-white'
                 }`}
               >
-                {item.label}
+                <Activity className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Auto (10s)</span>
               </button>
-            ))}
-          </div>
 
-          {/* Auto Refresh Toggle */}
-          <button
-            onClick={() => setAutoRefresh(!autoRefresh)}
-            title="Auto-refresh every 10 seconds"
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold cursor-pointer transition-all ${
-              autoRefresh
-                ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
-                : 'bg-white/5 border-white/10 text-slate-400 hover:text-white'
-            }`}
-          >
-            <Activity className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Auto (10s)</span>
-          </button>
+              {/* Manual Refresh Button */}
+              <button
+                onClick={() => fetchAnalytics()}
+                disabled={loadingData}
+                title="Refresh analytics data"
+                className="p-2 rounded-xl bg-white/5 hover:bg-white/10 active:scale-95 text-slate-300 hover:text-white border border-white/10 transition-all cursor-pointer"
+              >
+                <RefreshCw className={`w-4 h-4 ${loadingData ? 'animate-spin text-blue-400' : ''}`} />
+              </button>
 
-          {/* Manual Refresh Button */}
-          <button
-            onClick={() => {
-              fetchAnalytics();
-              fetchAndSyncScrapers();
-            }}
-            disabled={loadingData}
-            title="Refresh analytics and scraper server config"
-            className="p-2 rounded-xl bg-white/5 hover:bg-white/10 active:scale-95 text-slate-300 hover:text-white border border-white/10 transition-all cursor-pointer"
-          >
-            <RefreshCw className={`w-4 h-4 ${loadingData ? 'animate-spin text-blue-400' : ''}`} />
-          </button>
+              {/* Export Backup Button */}
+              <button
+                onClick={handleExportBackup}
+                title="Download Analytics JSON Backup"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-xs font-semibold transition-all cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="hidden sm:inline">Backup</span>
+              </button>
 
-          {/* Export Backup Button */}
-          <button
-            onClick={handleExportBackup}
-            title="Download Analytics JSON Backup"
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-xs font-semibold transition-all cursor-pointer"
-          >
-            <Download className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="hidden sm:inline">Backup</span>
-          </button>
+              {/* Import / Restore Backup Button */}
+              <label
+                title="Restore / Import Analytics JSON Backup"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-xs font-semibold transition-all cursor-pointer"
+              >
+                <Upload className="w-3.5 h-3.5 text-blue-400" />
+                <span className="hidden sm:inline">Restore</span>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".json"
+                  onChange={handleImportBackup}
+                  className="hidden"
+                />
+              </label>
+            </>
+          ) : (
+            <>
+              {/* Scraper Page Quick Return & Refresh */}
+              <button
+                type="button"
+                onClick={() => setAdminView('analytics')}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 hover:text-white border border-white/10 text-xs font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <BarChart3 className="w-3.5 h-3.5 text-blue-400" />
+                <span>← Back to Analytics</span>
+              </button>
 
-          {/* Import / Restore Backup Button */}
-          <label
-            title="Restore / Import Analytics JSON Backup"
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-xs font-semibold transition-all cursor-pointer"
-          >
-            <Upload className="w-3.5 h-3.5 text-blue-400" />
-            <span className="hidden sm:inline">Restore</span>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".json"
-              onChange={handleImportBackup}
-              className="hidden"
-            />
-          </label>
-
-          {/* Switch to Scraper API Servers Manager */}
-          <button
-            type="button"
-            onClick={() => {
-              setAdminView((prev) => (prev === 'scrapers' ? 'all' : 'scrapers'));
-              const el = document.getElementById('scraper-servers-panel');
-              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl border text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-              adminView === 'scrapers'
-                ? 'bg-blue-600 text-white border-blue-400 shadow-lg shadow-blue-900/40'
-                : 'bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 hover:text-white border-blue-500/40'
-            }`}
-          >
-            <Server className="w-3.5 h-3.5 text-blue-300" />
-            <span>Edit Scraper APIs</span>
-          </button>
+              <button
+                type="button"
+                onClick={() => fetchAndSyncScrapers()}
+                disabled={scraperLoading}
+                title="Reload scraper server configuration"
+                className="p-2 rounded-xl bg-white/5 hover:bg-white/10 active:scale-95 text-slate-300 hover:text-white border border-white/10 transition-all cursor-pointer"
+              >
+                <RefreshCw className={`w-4 h-4 ${scraperLoading ? 'animate-spin text-blue-400' : ''}`} />
+              </button>
+            </>
+          )}
 
           {/* Back to Website */}
           <button
@@ -1307,58 +1353,9 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
       </header>
 
       {/* =========================================================
-          Main Dashboard Content
+          Main Dashboard Content (Strictly Separated Pages)
          ========================================================= */}
       <main className="flex-1 p-4 md:p-8 max-w-7xl w-full mx-auto flex flex-col gap-6">
-        {/* Top Admin Mode Switcher Bar */}
-        <div className="flex items-center justify-between flex-wrap gap-3 bg-[#0e1424] border border-white/10 rounded-2xl p-2.5">
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <button
-              type="button"
-              onClick={() => setAdminView('all')}
-              className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
-                adminView === 'all'
-                  ? 'bg-blue-600 text-white shadow-md shadow-blue-950/50'
-                  : 'text-slate-400 hover:text-white hover:bg-white/5'
-              }`}
-            >
-              <Compass className="w-3.5 h-3.5" />
-              <span>All Studio Controls (Scrapers + Analytics)</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setAdminView('scrapers')}
-              className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
-                adminView === 'scrapers'
-                  ? 'bg-blue-600 text-white shadow-md shadow-blue-950/50'
-                  : 'text-slate-400 hover:text-white hover:bg-white/5'
-              }`}
-            >
-              <Server className="w-3.5 h-3.5 text-amber-400" />
-              <span>Scraper API Servers (Edit IPs &amp; Ports)</span>
-              <span className="px-1.5 py-0.5 text-[10px] rounded bg-white/10 text-slate-200 font-mono">
-                3 Active
-              </span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setAdminView('analytics')}
-              className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
-                adminView === 'analytics'
-                  ? 'bg-blue-600 text-white shadow-md shadow-blue-950/50'
-                  : 'text-slate-400 hover:text-white hover:bg-white/5'
-              }`}
-            >
-              <Activity className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Analytics &amp; Telemetry Only</span>
-            </button>
-          </div>
-
-          <div className="text-[11px] font-mono text-slate-400 px-2 hidden md:block">
-            {scraperIsCustom ? '● Custom Scraper IPs Active' : '● Default Coolify Scraper IPs'}
-          </div>
-        </div>
-
         {/* Backup Status Banner */}
         {backupMessage && (
           <div className="p-3 rounded-xl bg-blue-500/20 border border-blue-500/40 text-blue-200 text-xs font-semibold flex items-center justify-between">
@@ -1373,9 +1370,9 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
         )}
 
         {/* =========================================================
-            Backend Scraper API & Server Configuration Manager
+            PAGE 2: Dedicated Scraper API & Server Configuration Page
            ========================================================= */}
-        {adminView !== 'analytics' && (
+        {adminView === 'scrapers' && (
         <section
           id="scraper-servers-panel"
           className="bg-[#0e1424] border border-blue-500/30 rounded-2xl p-5 md:p-6 flex flex-col gap-5 scroll-mt-20 shadow-xl shadow-blue-950/20"
@@ -1638,7 +1635,10 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
         </section>
         )}
 
-        {adminView !== 'scrapers' && (
+        {/* =========================================================
+            PAGE 1: Dedicated Analytics & Telemetry Page
+           ========================================================= */}
+        {adminView === 'analytics' && (
         <>
         {/* Top KPI Summary Cards (YouTube Studio Style) */}
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3 md:gap-4">
