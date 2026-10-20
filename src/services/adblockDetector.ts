@@ -11,6 +11,38 @@ const AD_PROBE_URLS = [
 
 const DISMISSAL_STORAGE_KEY = 'notflix_adblock_banner_dismissed_until';
 const DISMISSAL_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
+export const ADBLOCK_POLICY_CACHE_KEY = 'notflix_adblock_policy_mode_v1';
+
+export type AdBlockPopupMode = 'dismissible' | 'strict';
+
+export function getCachedAdBlockPolicyMode(): AdBlockPopupMode {
+  if (typeof window === 'undefined') return 'dismissible';
+  try {
+    const raw = localStorage.getItem(ADBLOCK_POLICY_CACHE_KEY);
+    return raw === 'strict' ? 'strict' : 'dismissible';
+  } catch {
+    return 'dismissible';
+  }
+}
+
+export async function fetchAdBlockPolicy(): Promise<AdBlockPopupMode> {
+  if (typeof window === 'undefined') return 'dismissible';
+  try {
+    const res = await fetch(`/api/adblock-policy?_cb=${Date.now()}`, {
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache' },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const mode: AdBlockPopupMode = data?.mode === 'strict' ? 'strict' : 'dismissible';
+      try {
+        localStorage.setItem(ADBLOCK_POLICY_CACHE_KEY, mode);
+      } catch {}
+      return mode;
+    }
+  } catch {}
+  return getCachedAdBlockPolicyMode();
+}
 
 export function isAdBlockBannerDismissed(): boolean {
   if (typeof window === 'undefined') return true;

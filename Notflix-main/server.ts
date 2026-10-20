@@ -3879,6 +3879,90 @@ app.post('/api/admin/scrapers/test', requireAdminAuth, async (req: Request, res:
   }
 });
 
+// ============================================================================
+// AD-BLOCKER NOTIFICATION POPUP POLICY (Admin-Controlled: Dismissible vs Strict Lock)
+// ============================================================================
+export type AdBlockPopupMode = 'dismissible' | 'strict';
+
+interface AdBlockPolicyStore {
+  mode: AdBlockPopupMode;
+  updatedAt: number;
+}
+
+const ADBLOCK_POLICY_FILE = path.join(DATA_DIR, 'adblock_policy.json');
+const ADBLOCK_POLICY_BACKUP_FILE = '/var/tmp/notflix_adblock_policy_backup.json';
+
+function loadAdBlockPolicyFromDisk(): AdBlockPolicyStore {
+  const candidates = [ADBLOCK_POLICY_FILE, ADBLOCK_POLICY_BACKUP_FILE];
+  for (const file of candidates) {
+    try {
+      if (fs.existsSync(file)) {
+        const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
+        if (parsed && (parsed.mode === 'dismissible' || parsed.mode === 'strict')) {
+          return {
+            mode: parsed.mode,
+            updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : Date.now(),
+          };
+        }
+      }
+    } catch {}
+  }
+  return {
+    mode: 'dismissible',
+    updatedAt: 0,
+  };
+}
+
+function saveAdBlockPolicyToDiskSync(store: AdBlockPolicyStore): void {
+  const payload = JSON.stringify(store, null, 2);
+  try {
+    fs.writeFileSync(ADBLOCK_POLICY_FILE, payload, 'utf-8');
+  } catch {}
+  try {
+    fs.writeFileSync(ADBLOCK_POLICY_BACKUP_FILE, payload, 'utf-8');
+  } catch {}
+}
+
+let adBlockPolicyStore: AdBlockPolicyStore = loadAdBlockPolicyFromDisk();
+
+// Public endpoint: Watchers fetch active Ad-Blocker popup policy ('dismissible' | 'strict')
+app.get('/api/adblock-policy', (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.json({
+    success: true,
+    mode: adBlockPolicyStore.mode,
+    updatedAt: adBlockPolicyStore.updatedAt,
+  });
+});
+
+// Admin endpoint: Update Ad-Blocker popup policy ('dismissible' | 'strict')
+app.post('/api/admin/adblock-policy', requireAdminAuth, (req: Request, res: Response) => {
+  try {
+    const rawMode = req.body?.mode;
+    const mode: AdBlockPopupMode = rawMode === 'strict' ? 'strict' : 'dismissible';
+    const updatedAt =
+      typeof req.body?.updatedAt === 'number' && req.body.updatedAt > 0 ? req.body.updatedAt : Date.now();
+
+    adBlockPolicyStore = { mode, updatedAt };
+    saveAdBlockPolicyToDiskSync(adBlockPolicyStore);
+
+    return res.json({
+      success: true,
+      policy: adBlockPolicyStore,
+      message:
+        mode === 'strict'
+          ? 'Strict Ad-Blocker Lock enabled: Watchers cannot close the popup until they disable their ad blocker.'
+          : 'Dismissible Ad-Blocker Notice enabled: Watchers can close the popup normally.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Failed to update Ad-Blocker policy',
+    });
+  }
+});
+
 // Deployment version & instant cache invalidation endpoint
 app.get('/api/version', (_req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, proxy-revalidate, max-age=0');

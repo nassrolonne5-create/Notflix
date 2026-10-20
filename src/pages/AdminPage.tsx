@@ -1107,6 +1107,109 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     [token]
   );
 
+  // Ad-Blocker Notification Popup Mode State ('dismissible' = Can close | 'strict' = Cannot close until ad blocker disabled)
+  const ADBLOCK_VAULT_KEY = 'notflix_admin_adblock_policy_vault_v1';
+  const [adBlockMode, setAdBlockMode] = useState<'dismissible' | 'strict'>(() => {
+    try {
+      const saved = localStorage.getItem('notflix_adblock_policy_mode_v1');
+      return saved === 'strict' ? 'strict' : 'dismissible';
+    } catch {
+      return 'dismissible';
+    }
+  });
+  const [adBlockSaving, setAdBlockSaving] = useState<boolean>(false);
+  const [adBlockStatusMsg, setAdBlockStatusMsg] = useState<string | null>(null);
+
+  const fetchAndSyncAdBlockPolicy = useCallback(async () => {
+    if (!token) return;
+    try {
+      const res = await fetch(`/api/adblock-policy?_cb=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { 'Cache-Control': 'no-cache' },
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const serverMode: 'dismissible' | 'strict' = data?.mode === 'strict' ? 'strict' : 'dismissible';
+      const serverUpdatedAt: number = typeof data?.updatedAt === 'number' ? data.updatedAt : 0;
+
+      // Auto-restore from Admin Browser Vault if container restarted and vault has a newer setting
+      try {
+        const rawVault = localStorage.getItem(ADBLOCK_VAULT_KEY);
+        if (rawVault) {
+          const parsedVault = JSON.parse(rawVault);
+          if (
+            parsedVault &&
+            (parsedVault.mode === 'strict' || parsedVault.mode === 'dismissible') &&
+            parsedVault.updatedAt > serverUpdatedAt
+          ) {
+            const restoreRes = await fetch('/api/admin/adblock-policy', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({
+                mode: parsedVault.mode,
+                updatedAt: parsedVault.updatedAt,
+              }),
+            });
+            if (restoreRes.ok) {
+              setAdBlockMode(parsedVault.mode);
+              localStorage.setItem('notflix_adblock_policy_mode_v1', parsedVault.mode);
+              return;
+            }
+          }
+        }
+      } catch {}
+
+      setAdBlockMode(serverMode);
+      try {
+        localStorage.setItem('notflix_adblock_policy_mode_v1', serverMode);
+      } catch {}
+    } catch {}
+  }, [token]);
+
+  const handleUpdateAdBlockMode = async (nextMode: 'dismissible' | 'strict') => {
+    if (!token || adBlockSaving) return;
+    setAdBlockSaving(true);
+    setAdBlockStatusMsg(null);
+    const now = Date.now();
+    try {
+      const res = await fetch('/api/admin/adblock-policy', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ mode: nextMode, updatedAt: now }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setAdBlockMode(nextMode);
+        try {
+          localStorage.setItem('notflix_adblock_policy_mode_v1', nextMode);
+          localStorage.setItem(
+            ADBLOCK_VAULT_KEY,
+            JSON.stringify({ mode: nextMode, updatedAt: now })
+          );
+          if (nextMode === 'strict') {
+            localStorage.removeItem('notflix_adblock_banner_dismissed_until');
+          }
+          window.dispatchEvent(new CustomEvent('notflix:adblock-policy-changed'));
+        } catch {}
+        setAdBlockStatusMsg(
+          nextMode === 'strict'
+            ? 'Strict Lock active: Watchers cannot close popup until Ad Blocker is disabled'
+            : 'Dismissible Mode active: Watchers can close the popup normally'
+        );
+        setTimeout(() => setAdBlockStatusMsg(null), 4000);
+      }
+    } catch {
+    } finally {
+      setAdBlockSaving(false);
+    }
+  };
+
   // Initial fetch and on dateRange change
   useEffect(() => {
     if (isAuthenticated) {
@@ -1114,13 +1217,14 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     }
   }, [isAuthenticated, dateRange, fetchAnalytics]);
 
-  // Fetch & sync scraper server config + Programmatic SEO status once authenticated
+  // Fetch & sync scraper server config + Programmatic SEO status + Ad-Blocker policy once authenticated
   useEffect(() => {
     if (isAuthenticated) {
       fetchAndSyncScrapers();
       fetchSeoStatus(false);
+      fetchAndSyncAdBlockPolicy();
     }
-  }, [isAuthenticated, fetchAndSyncScrapers, fetchSeoStatus]);
+  }, [isAuthenticated, fetchAndSyncScrapers, fetchSeoStatus, fetchAndSyncAdBlockPolicy]);
 
   // Auto-refresh timer (polls every 10 seconds for real live stream updates)
   useEffect(() => {
@@ -1959,6 +2063,92 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                   <span>
                     Ep: <strong className="text-blue-400">{Math.round((smartMetrics.effectiveCooldowns.episode || 35000) / 1000)}s</strong>
                   </span>
+                </div>
+              </div>
+            </div>
+
+            {/* 3.5. Ad-Blocker Notification Popup Control (2 Modes: Dismissible vs Strict Lock Until Disabled) */}
+            <div
+              className={`bg-[#0e1424] border rounded-xl px-4 py-3 flex items-center justify-between flex-wrap gap-3 transition-colors ${
+                adBlockMode === 'strict'
+                  ? 'border-rose-500/35 shadow-lg shadow-rose-950/10'
+                  : 'border-amber-500/25'
+              }`}
+            >
+              <div className="flex items-center gap-2.5 flex-wrap">
+                <div
+                  className={`w-8 h-8 rounded-lg border flex items-center justify-center shrink-0 ${
+                    adBlockMode === 'strict'
+                      ? 'bg-rose-500/15 border-rose-500/35 text-rose-400'
+                      : 'bg-amber-500/15 border-amber-500/35 text-amber-400'
+                  }`}
+                >
+                  {adBlockMode === 'strict' ? (
+                    <Lock className="w-4 h-4" />
+                  ) : (
+                    <ShieldAlert className="w-4 h-4" />
+                  )}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-bold text-white uppercase tracking-wider">
+                      Ad-Blocker Detection Popup Control
+                    </span>
+                    <span
+                      className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase tracking-wider border ${
+                        adBlockMode === 'strict'
+                          ? 'bg-rose-500/20 border-rose-500/40 text-rose-300'
+                          : 'bg-emerald-500/15 border-emerald-500/35 text-emerald-300'
+                      }`}
+                    >
+                      {adBlockMode === 'strict'
+                        ? 'Mode 2: Locked Until Ad Blocker Disabled'
+                        : 'Mode 1: Normal (Can Close)'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    {adBlockMode === 'strict'
+                      ? 'Strict Lock: The "Support Free Streaming" popup cannot be closed or removed until the watcher disables their ad blocker.'
+                      : 'Dismissible Mode: Watchers see the "Support Free Streaming" popup and can close it with X or "Later".'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                {adBlockStatusMsg && (
+                  <span className="text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-1 rounded-lg">
+                    {adBlockStatusMsg}
+                  </span>
+                )}
+
+                <div className="flex items-center bg-[#090d18] border border-white/10 rounded-xl p-1 gap-1">
+                  <button
+                    type="button"
+                    disabled={adBlockSaving}
+                    onClick={() => handleUpdateAdBlockMode('dismissible')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                      adBlockMode === 'dismissible'
+                        ? 'bg-emerald-600 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Can Close Popup (Normal)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={adBlockSaving}
+                    onClick={() => handleUpdateAdBlockMode('strict')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                      adBlockMode === 'strict'
+                        ? 'bg-rose-600 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    <Lock className="w-3.5 h-3.5" />
+                    <span>Cannot Close Until Disabled</span>
+                  </button>
                 </div>
               </div>
             </div>
