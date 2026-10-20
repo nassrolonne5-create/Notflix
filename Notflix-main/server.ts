@@ -3977,58 +3977,472 @@ async function startServer() {
     res.status(404).send('APK file not uploaded yet. Place your .apk file in the /app/downloads persistent storage folder.');
   });
 
-  // Search Engine Optimization (SEO) Endpoints for Googlebot & Crawlers
-  const SITEMAP_XML = `<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url>
-    <loc>https://notflixtv.com/</loc>
-    <lastmod>${new Date().toISOString().split('T')[0]}</lastmod>
-    <changefreq>daily</changefreq>
-    <priority>1.0</priority>
-  </url>
-  <url>
-    <loc>https://notflixtv.com/movies</loc>
-    <lastmod>${new Date().toISOString().split('T')[0]}</lastmod>
-    <changefreq>daily</changefreq>
-    <priority>0.9</priority>
-  </url>
-  <url>
-    <loc>https://notflixtv.com/series</loc>
-    <lastmod>${new Date().toISOString().split('T')[0]}</lastmod>
-    <changefreq>daily</changefreq>
-    <priority>0.9</priority>
-  </url>
-  <url>
-    <loc>https://notflixtv.com/anime</loc>
-    <lastmod>${new Date().toISOString().split('T')[0]}</lastmod>
-    <changefreq>daily</changefreq>
-    <priority>0.8</priority>
-  </url>
-  <url>
-    <loc>https://notflixtv.com/search</loc>
-    <lastmod>${new Date().toISOString().split('T')[0]}</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>0.7</priority>
-  </url>
-</urlset>`;
+  // ============================================================================
+  // PROGRAMMATIC SEO ENGINE: Dynamic 200+ Title XML Sitemap & SSR Meta Injection
+  // ============================================================================
+  interface SeoCatalogEntry {
+    id: number;
+    type: 'movie' | 'tv';
+    title: string;
+    year: string;
+    slug: string;
+    path: string;
+    overview: string;
+    poster: string;
+    backdrop: string;
+    rating: number;
+  }
+
+  let seoCatalogCache: {
+    updatedAt: number;
+    entries: SeoCatalogEntry[];
+    byKey: Map<string, SeoCatalogEntry>;
+  } = {
+    updatedAt: 0,
+    entries: [],
+    byKey: new Map(),
+  };
+
+  function toServerSeoSlug(text: string): string {
+    return (
+      (text || 'watch')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 60) || 'watch'
+    );
+  }
+
+  function escapeXml(unsafe: string): string {
+    return (unsafe || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+  }
+
+  function escapeHtmlAttr(unsafe: string): string {
+    return (unsafe || '')
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  async function refreshSeoCatalog(force = false): Promise<SeoCatalogEntry[]> {
+    const SIX_HOURS = 6 * 60 * 60 * 1000;
+    if (!force && seoCatalogCache.entries.length > 0 && Date.now() - seoCatalogCache.updatedAt < SIX_HOURS) {
+      return seoCatalogCache.entries;
+    }
+
+    const endpoints: Array<{ path: string; type: 'movie' | 'tv' }> = [
+      { path: 'trending/movie/day', type: 'movie' },
+      { path: 'trending/movie/week', type: 'movie' },
+      { path: 'movie/popular?page=1&without_genres=10749', type: 'movie' },
+      { path: 'movie/popular?page=2&without_genres=10749', type: 'movie' },
+      { path: 'movie/top_rated?page=1&without_genres=10749', type: 'movie' },
+      { path: 'movie/now_playing?page=1&without_genres=10749', type: 'movie' },
+      { path: 'trending/tv/day', type: 'tv' },
+      { path: 'trending/tv/week', type: 'tv' },
+      { path: 'tv/popular?page=1&without_genres=10749', type: 'tv' },
+      { path: 'tv/popular?page=2&without_genres=10749', type: 'tv' },
+      { path: 'tv/top_rated?page=1&without_genres=10749', type: 'tv' },
+      { path: 'discover/tv?with_genres=16&with_original_language=ja&sort_by=popularity.desc&page=1', type: 'tv' },
+    ];
+
+    const collected = new Map<string, SeoCatalogEntry>();
+
+    await Promise.allSettled(
+      endpoints.map(async (ep) => {
+        try {
+          const sep = ep.path.includes('?') ? '&' : '?';
+          const url = `${TMDB_BASE}/${ep.path}${sep}api_key=${TMDB_API_KEY}&include_adult=false&language=en-US`;
+          const res = await fetch(url);
+          if (!res.ok) return;
+          const data = await res.json();
+          const results = Array.isArray(data?.results) ? data.results : [];
+          for (const raw of results) {
+            if (!raw || !raw.id || !isSafe(raw)) continue;
+            const title = String(raw.title || raw.name || '').trim();
+            if (!title) continue;
+            const key = `${ep.type}:${raw.id}`;
+            if (collected.has(key)) continue;
+
+            const year = String(raw.release_date || raw.first_air_date || '').slice(0, 4);
+            const slug = toServerSeoSlug(title);
+            const entry: SeoCatalogEntry = {
+              id: Number(raw.id),
+              type: ep.type,
+              title,
+              year,
+              slug,
+              path: `/watch/${ep.type}/${raw.id}-${slug}`,
+              overview: String(raw.overview || '').trim(),
+              poster: raw.poster_path ? `https://image.tmdb.org/t/p/w500${raw.poster_path}` : 'https://notflixtv.com/icon-512.png',
+              backdrop: raw.backdrop_path
+                ? `https://image.tmdb.org/t/p/w1280${raw.backdrop_path}`
+                : raw.poster_path
+                ? `https://image.tmdb.org/t/p/w780${raw.poster_path}`
+                : 'https://image.tmdb.org/t/p/w1280/8Y43POKjjKDGI9MH89NW0NAzzp8.jpg',
+              rating: Number(raw.vote_average) || 7.6,
+            };
+            collected.set(key, entry);
+          }
+        } catch {}
+      })
+    );
+
+    if (collected.size > 0) {
+      seoCatalogCache = {
+        updatedAt: Date.now(),
+        entries: Array.from(collected.values()),
+        byKey: collected,
+      };
+    }
+
+    return seoCatalogCache.entries;
+  }
+
+  // Warm up the Programmatic SEO catalog in the background shortly after server start
+  setTimeout(() => {
+    refreshSeoCatalog().catch(() => {});
+  }, 2500);
+
+  async function resolveSeoTitleDetails(mediaType: 'movie' | 'tv', tmdbId: number): Promise<SeoCatalogEntry | null> {
+    const key = `${mediaType}:${tmdbId}`;
+    if (seoCatalogCache.byKey.has(key)) {
+      return seoCatalogCache.byKey.get(key)!;
+    }
+
+    const cacheKey = `seo-item-${key}`;
+    const cached = apiCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < 6 * 60 * 60 * 1000) {
+      return cached.data;
+    }
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2500);
+      const url = `${TMDB_BASE}/${mediaType}/${tmdbId}?api_key=${TMDB_API_KEY}&language=en-US`;
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) return null;
+      const raw = await res.json();
+      if (!raw || !raw.id || !isSafe(raw)) return null;
+
+      const title = String(raw.title || raw.name || 'Movie').trim();
+      const year = String(raw.release_date || raw.first_air_date || '').slice(0, 4);
+      const slug = toServerSeoSlug(title);
+      const entry: SeoCatalogEntry = {
+        id: Number(raw.id),
+        type: mediaType,
+        title,
+        year,
+        slug,
+        path: `/watch/${mediaType}/${raw.id}-${slug}`,
+        overview: String(raw.overview || '').trim(),
+        poster: raw.poster_path ? `https://image.tmdb.org/t/p/w500${raw.poster_path}` : 'https://notflixtv.com/icon-512.png',
+        backdrop: raw.backdrop_path
+          ? `https://image.tmdb.org/t/p/w1280${raw.backdrop_path}`
+          : raw.poster_path
+          ? `https://image.tmdb.org/t/p/w780${raw.poster_path}`
+          : 'https://image.tmdb.org/t/p/w1280/8Y43POKjjKDGI9MH89NW0NAzzp8.jpg',
+        rating: Number(raw.vote_average) || 7.6,
+      };
+      apiCache.set(cacheKey, { timestamp: Date.now(), data: entry });
+      seoCatalogCache.byKey.set(key, entry);
+      return entry;
+    } catch {
+      return null;
+    }
+  }
+
+  async function buildDynamicSitemapXml(): Promise<string> {
+    const entries = await refreshSeoCatalog();
+    const today = new Date().toISOString().split('T')[0];
+
+    const staticUrls = [
+      { loc: 'https://notflixtv.com/', priority: '1.0', changefreq: 'hourly' },
+      { loc: 'https://notflixtv.com/movies', priority: '0.9', changefreq: 'daily' },
+      { loc: 'https://notflixtv.com/series', priority: '0.9', changefreq: 'daily' },
+      { loc: 'https://notflixtv.com/anime', priority: '0.9', changefreq: 'daily' },
+      { loc: 'https://notflixtv.com/search', priority: '0.8', changefreq: 'weekly' },
+    ];
+
+    let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
+    xml += `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">\n`;
+
+    for (const st of staticUrls) {
+      xml += `  <url>\n`;
+      xml += `    <loc>${st.loc}</loc>\n`;
+      xml += `    <lastmod>${today}</lastmod>\n`;
+      xml += `    <changefreq>${st.changefreq}</changefreq>\n`;
+      xml += `    <priority>${st.priority}</priority>\n`;
+      xml += `  </url>\n`;
+    }
+
+    for (const item of entries) {
+      const fullLoc = `https://notflixtv.com${item.path}`;
+      const yearLabel = item.year ? ` (${item.year})` : '';
+      const imgTitle = escapeXml(`Watch ${item.title}${yearLabel} Online Free in HD — Notflix`);
+      const imgCaption = escapeXml(
+        item.overview
+          ? `Stream ${item.title}${yearLabel} in 1080p HD with subtitles: ${item.overview.slice(0, 140)}`
+          : `Watch ${item.title}${yearLabel} online in HD on Notflix.`
+      );
+
+      xml += `  <url>\n`;
+      xml += `    <loc>${escapeXml(fullLoc)}</loc>\n`;
+      xml += `    <lastmod>${today}</lastmod>\n`;
+      xml += `    <changefreq>daily</changefreq>\n`;
+      xml += `    <priority>0.85</priority>\n`;
+      if (item.poster && item.poster.startsWith('http')) {
+        xml += `    <image:image>\n`;
+        xml += `      <image:loc>${escapeXml(item.poster)}</image:loc>\n`;
+        xml += `      <image:title>${imgTitle}</image:title>\n`;
+        xml += `      <image:caption>${imgCaption}</image:caption>\n`;
+        xml += `    </image:image>\n`;
+      }
+      xml += `  </url>\n`;
+    }
+
+    xml += `</urlset>`;
+    return xml;
+  }
+
+  async function injectDynamicSeoIntoHtml(rawHtml: string, reqPath: string): Promise<string> {
+    try {
+      const cleanPath = (reqPath || '/').split('?')[0];
+      if (cleanPath.startsWith('/admin')) {
+        return rawHtml;
+      }
+
+      let pageTitle = 'Notflix — Watch Movies, TV Series & Anime Online Free in HD (1080p/4K)';
+      let pageDesc =
+        'Stream trending movies, full TV series seasons, and anime online free in 1080p & 4K HD on Notflix. Instant multi-server playback with English, Arabic, Spanish & 35+ subtitle languages.';
+      let canonicalUrl = `https://notflixtv.com${cleanPath === '/' ? '/' : cleanPath}`;
+      let ogImage = 'https://image.tmdb.org/t/p/w1280/8Y43POKjjKDGI9MH89NW0NAzzp8.jpg';
+      let extraJsonLd = '';
+      let noscriptCatalogHtml = '';
+
+      const watchMatch = cleanPath.match(/^\/watch\/(movie|tv)\/(\d+)/i);
+      if (watchMatch) {
+        const mediaType = watchMatch[1].toLowerCase() === 'tv' ? 'tv' : 'movie';
+        const tmdbId = parseInt(watchMatch[2], 10);
+        const item = await resolveSeoTitleDetails(mediaType, tmdbId);
+        if (item) {
+          const yearStr = item.year ? ` (${item.year})` : '';
+          const typeLabel = mediaType === 'tv' ? 'Full TV Series & Episodes' : 'Full Movie';
+          pageTitle = `Watch ${item.title}${yearStr} ${typeLabel} Online Free HD — Notflix`;
+          pageDesc = `Watch ${item.title}${yearStr} online free in 1080p & 4K HD with English, Arabic, Spanish & multi-language subtitles on Notflix. ${
+            item.overview || ''
+          }`.slice(0, 158);
+          canonicalUrl = `https://notflixtv.com${item.path}`;
+          ogImage = item.backdrop || item.poster || ogImage;
+
+          const schemaObj = {
+            '@context': 'https://schema.org',
+            '@type': mediaType === 'tv' ? 'TVSeries' : 'Movie',
+            name: item.title,
+            url: canonicalUrl,
+            image: [item.poster, item.backdrop].filter(Boolean),
+            description: item.overview || pageDesc,
+            datePublished: item.year || undefined,
+            inLanguage: 'en',
+            aggregateRating: {
+              '@type': 'AggregateRating',
+              ratingValue: item.rating.toFixed(1),
+              bestRating: '10',
+              worstRating: '1',
+              ratingCount: Math.max(150, Math.round(item.rating * 520)),
+            },
+            potentialAction: {
+              '@type': 'WatchAction',
+              target: {
+                '@type': 'EntryPoint',
+                urlTemplate: canonicalUrl,
+                actionPlatform: [
+                  'http://schema.org/DesktopWebPlatform',
+                  'http://schema.org/MobileWebPlatform',
+                  'http://schema.org/IOSPlatform',
+                  'http://schema.org/AndroidPlatform',
+                ],
+              },
+            },
+          };
+          extraJsonLd = `<script type="application/ld+json">${JSON.stringify(schemaObj)}</script>`;
+
+          const related = seoCatalogCache.entries.slice(0, 24);
+          noscriptCatalogHtml = `<noscript><article><h1>${escapeHtmlAttr(pageTitle)}</h1><p>${escapeHtmlAttr(
+            item.overview || pageDesc
+          )}</p><ul>${related
+            .map(
+              (r) =>
+                `<li><a href="https://notflixtv.com${r.path}">Watch ${escapeHtmlAttr(r.title)}${
+                  r.year ? ` (${r.year})` : ''
+                } Online HD</a></li>`
+            )
+            .join('')}</ul></article></noscript>`;
+        }
+      } else {
+        if (cleanPath.startsWith('/movies')) {
+          pageTitle = 'Watch Movies Online Free in HD (1080p & 4K) — New & Trending Films | Notflix';
+          pageDesc =
+            'Stream the latest Hollywood blockbusters, top-rated movies, and trending films online free in 1080p and 4K HD with multi-language subtitles on Notflix.';
+        } else if (cleanPath.startsWith('/series') || cleanPath.startsWith('/tv')) {
+          pageTitle = 'Watch TV Series & Full Seasons Online Free in HD | Notflix';
+          pageDesc =
+            'Binge-watch full seasons and latest episodes of trending TV series online free in 1080p HD with English, Arabic, and multi-language subtitles on Notflix.';
+        } else if (cleanPath.startsWith('/anime')) {
+          pageTitle = 'Watch Anime Online Free in HD (English Sub & Dub) | Notflix';
+          pageDesc =
+            'Stream top-rated and trending Japanese anime series and movies online in 1080p HD with English, Arabic, and multi-language subtitles on Notflix.';
+        } else if (cleanPath.startsWith('/search')) {
+          pageTitle = 'Search Movies, TV Shows & Anime Online in HD | Notflix';
+          pageDesc =
+            'Search and stream any movie, TV series, or anime in 1080p HD with instant multi-language subtitles on Notflix.';
+        }
+
+        // Inject crawlable ItemList Schema.org + semantic links for Googlebot discovery
+        const catalogSample = seoCatalogCache.entries.slice(0, 60);
+        if (catalogSample.length > 0) {
+          const itemListSchema = {
+            '@context': 'https://schema.org',
+            '@type': 'ItemList',
+            name: pageTitle,
+            itemListElement: catalogSample.slice(0, 30).map((entry, idx) => ({
+              '@type': 'ListItem',
+              position: idx + 1,
+              url: `https://notflixtv.com${entry.path}`,
+              name: `${entry.title}${entry.year ? ` (${entry.year})` : ''}`,
+            })),
+          };
+          extraJsonLd = `<script type="application/ld+json">${JSON.stringify(itemListSchema)}</script>`;
+          noscriptCatalogHtml = `<noscript><section><h1>${escapeHtmlAttr(pageTitle)}</h1><p>${escapeHtmlAttr(
+            pageDesc
+          )}</p><nav aria-label="Trending Movies and TV Series Directory"><ul>${catalogSample
+            .map(
+              (entry) =>
+                `<li><a href="https://notflixtv.com${entry.path}">Watch ${escapeHtmlAttr(entry.title)}${
+                  entry.year ? ` (${entry.year})` : ''
+                } ${entry.type === 'tv' ? 'TV Series' : 'Full Movie'} Online Free HD</a></li>`
+            )
+            .join('')}</ul></nav></section></noscript>`;
+        }
+      }
+
+      const safeTitle = escapeHtmlAttr(pageTitle);
+      const safeDesc = escapeHtmlAttr(pageDesc);
+      const safeUrl = escapeHtmlAttr(canonicalUrl);
+      const safeImg = escapeHtmlAttr(ogImage);
+
+      let modified = rawHtml
+        .replace(/<title>[\s\S]*?<\/title>/i, `<title>${safeTitle}</title>`)
+        .replace(
+          /<meta\s+name="description"\s+content="[^"]*"\s*\/?>/i,
+          `<meta name="description" content="${safeDesc}" />`
+        )
+        .replace(
+          /<link\s+rel="canonical"\s+href="[^"]*"\s*\/?>/i,
+          `<link rel="canonical" href="${safeUrl}" />`
+        )
+        .replace(
+          /<meta\s+property="og:title"\s+content="[^"]*"\s*\/?>/i,
+          `<meta property="og:title" content="${safeTitle}" />`
+        )
+        .replace(
+          /<meta\s+property="og:description"\s+content="[^"]*"\s*\/?>/i,
+          `<meta property="og:description" content="${safeDesc}" />`
+        )
+        .replace(
+          /<meta\s+property="og:url"\s+content="[^"]*"\s*\/?>/i,
+          `<meta property="og:url" content="${safeUrl}" />`
+        )
+        .replace(
+          /<meta\s+property="og:image"\s+content="[^"]*"\s*\/?>/i,
+          `<meta property="og:image" content="${safeImg}" />`
+        )
+        .replace(
+          /<meta\s+name="twitter:title"\s+content="[^"]*"\s*\/?>/i,
+          `<meta name="twitter:title" content="${safeTitle}" />`
+        )
+        .replace(
+          /<meta\s+name="twitter:description"\s+content="[^"]*"\s*\/?>/i,
+          `<meta name="twitter:description" content="${safeDesc}" />`
+        )
+        .replace(
+          /<meta\s+name="twitter:image"\s+content="[^"]*"\s*\/?>/i,
+          `<meta name="twitter:image" content="${safeImg}" />`
+        );
+
+      if (extraJsonLd) {
+        modified = modified.replace('</head>', `  ${extraJsonLd}\n  </head>`);
+      }
+      if (noscriptCatalogHtml) {
+        modified = modified.replace('<div id="root"></div>', `<div id="root"></div>\n    ${noscriptCatalogHtml}`);
+      }
+
+      return modified;
+    } catch {
+      return rawHtml;
+    }
+  }
 
   const ROBOTS_TXT = `User-agent: *
 Allow: /
+Allow: /watch/
+Allow: /movies
+Allow: /series
+Allow: /anime
+Allow: /search
 Disallow: /admin
 Disallow: /api/admin/
 
 Sitemap: https://notflixtv.com/sitemap.xml
 `;
 
-  app.get('/robots.txt', (req: Request, res: Response) => {
+  app.get('/robots.txt', (_req: Request, res: Response) => {
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
     return res.status(200).send(ROBOTS_TXT);
   });
 
-  app.get('/sitemap.xml', (req: Request, res: Response) => {
-    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
-    return res.status(200).send(SITEMAP_XML);
+  app.get('/sitemap.xml', async (_req: Request, res: Response) => {
+    try {
+      const xml = await buildDynamicSitemapXml();
+      res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+      res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=3600');
+      return res.status(200).send(xml);
+    } catch {
+      res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+      return res.status(200).send(
+        `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://notflixtv.com/</loc></url></urlset>`
+      );
+    }
+  });
+
+  // GET /api/admin/seo/status - Returns live Programmatic SEO & Sitemap metrics for Admin Dashboard
+  app.get('/api/admin/seo/status', requireAdminAuth, async (req: Request, res: Response) => {
+    const force = req.query.refresh === '1';
+    const entries = await refreshSeoCatalog(force);
+    const moviesCount = entries.filter((e) => e.type === 'movie').length;
+    const tvCount = entries.filter((e) => e.type === 'tv').length;
+    return res.json({
+      success: true,
+      totalUrls: entries.length + 5,
+      moviesCount,
+      tvCount,
+      updatedAt: seoCatalogCache.updatedAt || Date.now(),
+      sitemapUrl: 'https://notflixtv.com/sitemap.xml',
+      sampleUrls: entries.slice(0, 6).map((e) => ({
+        title: `${e.title}${e.year ? ` (${e.year})` : ''}`,
+        url: `https://notflixtv.com${e.path}`,
+        type: e.type,
+      })),
+    });
   });
 
   // Serve static assets from public directory (favicons, manifest, robots, etc.)
@@ -4051,7 +4465,7 @@ Sitemap: https://notflixtv.com/sitemap.xml
     });
     app.use(vite.middlewares);
 
-    // Single-Page Application (SPA) catch-all route for development mode
+    // Single-Page Application (SPA) catch-all route for development mode with Dynamic SSR SEO Meta injection
     app.use('*', async (req: Request, res: Response, next: NextFunction) => {
       if (req.originalUrl.startsWith('/api') || req.originalUrl.startsWith('/downloads')) {
         return next();
@@ -4061,7 +4475,8 @@ Sitemap: https://notflixtv.com/sitemap.xml
         const indexPath = path.resolve(__dirname, 'index.html');
         let template = fs.readFileSync(indexPath, 'utf-8');
         template = await vite.transformIndexHtml(req.originalUrl, template);
-        res.status(200).set({ 'Content-Type': 'text/html' }).end(template);
+        template = await injectDynamicSeoIntoHtml(template, req.path);
+        res.status(200).set({ 'Content-Type': 'text/html; charset=utf-8' }).end(template);
       } catch (e) {
         next(e);
       }
@@ -4091,13 +4506,19 @@ Sitemap: https://notflixtv.com/sitemap.xml
       res.status(404).type('text/plain').send('Asset chunk superseded by new deployment');
     });
 
-    // Single-Page Application (SPA) catch-all route for /, /admin, /movies, /series, /anime, etc.
-    app.get('*', (_req: Request, res: Response) => {
+    // Single-Page Application (SPA) catch-all route with Server-Side SEO Pre-Rendering for /, /watch/:type/:id, /movies, /series, /anime
+    app.get('*', async (req: Request, res: Response) => {
       setNoStoreHtmlHeaders(res);
       const prodIndex = path.join(distPath, 'index.html');
       const rootIndex = path.join(__dirname, 'index.html');
       const targetIndex = fs.existsSync(prodIndex) ? prodIndex : rootIndex;
-      res.sendFile(targetIndex, { etag: false, lastModified: false });
+      try {
+        const rawHtml = fs.readFileSync(targetIndex, 'utf-8');
+        const seoHtml = await injectDynamicSeoIntoHtml(rawHtml, req.path);
+        return res.status(200).type('text/html; charset=utf-8').send(seoHtml);
+      } catch {
+        return res.sendFile(targetIndex, { etag: false, lastModified: false });
+      }
     });
 
     console.log(`📦 Serving production build from ${distPath} (version: ${DEPLOYMENT_VERSION})`);

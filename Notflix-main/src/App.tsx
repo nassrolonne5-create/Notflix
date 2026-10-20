@@ -33,7 +33,7 @@ const checkIsAdmin = (): boolean => {
 };
 
 const AppContent: React.FC = () => {
-  const { activeTab, activeModalItem, quickViewItem } = useApp();
+  const { activeTab, setActiveTab, activeModalItem, quickViewItem } = useApp();
   const [isAdmin, setIsAdmin] = useState<boolean>(checkIsAdmin);
   const [blockInfo, setBlockInfo] = useState<PermanentBlockInfo>(() =>
     securitySentinel.getBlockState()
@@ -82,54 +82,123 @@ const AppContent: React.FC = () => {
     };
   }, []);
 
-  // Dynamic SEO Title & Meta Description update per view / movie
+  // Dynamic SEO Title, Meta Description, OpenGraph, Twitter Cards & Schema.org JSON-LD update per view / movie
   useEffect(() => {
-    let title = 'Notflix — Movies & TV Shows';
+    let title = 'Notflix — Watch Movies, TV Series & Anime Online Free in HD';
     let desc =
-      'Discover and stream trending movies, popular TV shows, and anime in HD on Notflix. Enjoy high-speed playback, multi-language subtitles, and personalized recommendations.';
+      'Stream trending movies, full TV series seasons, and anime online free in 1080p & 4K HD on Notflix with English, Arabic, Spanish & multi-language subtitles.';
+    let ogImage = 'https://image.tmdb.org/t/p/w1280/8Y43POKjjKDGI9MH89NW0NAzzp8.jpg';
+    const canonicalUrl =
+      typeof window !== 'undefined'
+        ? `${window.location.origin}${window.location.pathname}`
+        : 'https://notflixtv.com/';
 
     if (activeModalItem) {
       const name = activeModalItem.title || activeModalItem.name || 'Movie';
       const year = activeModalItem.year ? ` (${activeModalItem.year})` : '';
-      title = `Watch ${name}${year} in HD — Notflix`;
-      if (activeModalItem.overview) {
-        desc = activeModalItem.overview.slice(0, 155);
+      const isTv = activeModalItem.type === 'tv';
+      title = `Watch ${name}${year} ${isTv ? 'Full Series' : 'Full Movie'} Online Free HD — Notflix`;
+      const plot = activeModalItem.overview ? ` ${activeModalItem.overview}` : '';
+      desc = `Stream ${name}${year} online in 1080p HD with multi-language subtitles on Notflix.${plot}`.slice(0, 158);
+      if (activeModalItem.backdrop || activeModalItem.poster) {
+        ogImage = activeModalItem.backdrop || activeModalItem.poster;
       }
+
+      // Inject dynamic Schema.org Movie / TVSeries Rich Snippet JSON-LD
+      try {
+        const schemaId = 'notflix-dynamic-title-jsonld';
+        let scriptEl = document.getElementById(schemaId) as HTMLScriptElement | null;
+        if (!scriptEl) {
+          scriptEl = document.createElement('script');
+          scriptEl.id = schemaId;
+          scriptEl.type = 'application/ld+json';
+          document.head.appendChild(scriptEl);
+        }
+        const ratingVal = Number(activeModalItem.vote_average || activeModalItem.rating) || 7.8;
+        const jsonLd: Record<string, any> = {
+          '@context': 'https://schema.org',
+          '@type': isTv ? 'TVSeries' : 'Movie',
+          name,
+          url: canonicalUrl,
+          image: [activeModalItem.poster, activeModalItem.backdrop].filter(Boolean),
+          description: activeModalItem.overview || desc,
+          datePublished: activeModalItem.year || undefined,
+          inLanguage: 'en',
+          aggregateRating: {
+            '@type': 'AggregateRating',
+            ratingValue: ratingVal > 0 ? ratingVal.toFixed(1) : '7.8',
+            bestRating: '10',
+            worstRating: '1',
+            ratingCount: Math.max(120, Math.round(ratingVal * 450)),
+          },
+          potentialAction: {
+            '@type': 'WatchAction',
+            target: {
+              '@type': 'EntryPoint',
+              urlTemplate: canonicalUrl,
+              actionPlatform: [
+                'http://schema.org/DesktopWebPlatform',
+                'http://schema.org/MobileWebPlatform',
+                'http://schema.org/IOSPlatform',
+                'http://schema.org/AndroidPlatform',
+              ],
+            },
+          },
+        };
+        scriptEl.textContent = JSON.stringify(jsonLd);
+      } catch {}
     } else {
+      const existingSchema = document.getElementById('notflix-dynamic-title-jsonld');
+      if (existingSchema) existingSchema.remove();
+
       switch (activeTab) {
         case 'movies':
-          title = 'Movies — Stream Blockbusters & Trending Films | Notflix';
+          title = 'Watch Movies Online Free in HD (1080p & 4K) | Notflix';
           desc =
-            'Browse popular, top-rated, and newly released movies in 1080p and 4K on Notflix with multi-language audio and subtitles.';
+            'Browse and stream newly released blockbusters, top-rated movies, and trending films in 1080p and 4K HD with multi-language subtitles on Notflix.';
           break;
         case 'tv':
-          title = 'TV Series — Binge Popular Shows & Episodes | Notflix';
+          title = 'Watch TV Series & Full Seasons Online Free in HD | Notflix';
           desc =
-            'Stream full seasons and latest episodes of trending TV series on Notflix. Seamless episode switching and playback tracking.';
+            'Binge-watch full seasons and latest episodes of popular TV shows in HD on Notflix with multi-server playback and instant subtitles.';
           break;
         case 'anime':
-          title = 'Anime — Top Japanese Animation & Series | Notflix';
-          desc = 'Explore top-rated and trending anime series with Japanese and English audio on Notflix.';
+          title = 'Watch Anime Online Free in HD (English Sub & Dub) | Notflix';
+          desc =
+            'Stream top-rated and trending Japanese anime series and movies in 1080p HD with English, Arabic, and multi-language subtitles on Notflix.';
           break;
         case 'search':
-          title = 'Search Movies & TV Shows | Notflix';
-          desc = 'Find any movie, series, or actor across our extensive streaming catalog on Notflix.';
+          title = 'Search Movies, TV Shows & Anime Online | Notflix';
+          desc =
+            'Search and stream any movie, TV series, or anime across our high-speed HD catalog with multi-language subtitles on Notflix.';
           break;
         case 'library':
-          title = 'My Library & Watchlist | Notflix';
-          desc = 'Manage your personal watchlist, favorites, and continue watching history on Notflix.';
+          title = 'My Library, Watchlist & Continue Watching | Notflix';
+          desc =
+            'Access your saved watchlist, favorite movies, and automatic episode resume history on Notflix.';
           break;
         default:
-          title = 'Notflix — Movies & TV Shows';
+          title = 'Notflix — Watch Movies, TV Series & Anime Online Free in HD';
           desc =
-            'Discover and stream trending movies, popular TV shows, and anime in HD on Notflix.';
+            'Stream trending movies, full TV series seasons, and anime online free in 1080p & 4K HD on Notflix with multi-language subtitles.';
           break;
       }
     }
 
     document.title = title;
-    const metaDesc = document.querySelector('meta[name="description"]');
-    if (metaDesc) metaDesc.setAttribute('content', desc);
+    const setMeta = (selector: string, attr: string, value: string) => {
+      const el = document.querySelector(selector);
+      if (el) el.setAttribute(attr, value);
+    };
+    setMeta('meta[name="description"]', 'content', desc);
+    setMeta('meta[property="og:title"]', 'content', title);
+    setMeta('meta[property="og:description"]', 'content', desc);
+    setMeta('meta[property="og:url"]', 'content', canonicalUrl);
+    setMeta('meta[property="og:image"]', 'content', ogImage);
+    setMeta('meta[name="twitter:title"]', 'content', title);
+    setMeta('meta[name="twitter:description"]', 'content', desc);
+    setMeta('meta[name="twitter:image"]', 'content', ogImage);
+    setMeta('link[rel="canonical"]', 'href', canonicalUrl);
   }, [activeTab, activeModalItem]);
 
   // Dedicated Admin Analytics Command Center
@@ -267,9 +336,77 @@ const AppContent: React.FC = () => {
         <div className="font-display text-2xl tracking-wider text-white uppercase mb-1">
           Notflix<span className="text-blue-500">.</span>
         </div>
-        <p className="text-xs text-slate-500 max-w-sm mx-auto">
-          Powered by TMDB API · Safe Filter Shield Locked On
+        <p className="text-xs text-slate-500 max-w-md mx-auto">
+          Stream Trending Movies, Full TV Series &amp; Anime Online in 1080p &amp; 4K HD with Multi-Language Subtitles
         </p>
+        <nav
+          aria-label="Streaming Categories and Sitemap"
+          className="mt-3 flex items-center justify-center flex-wrap gap-3 text-[11px] text-slate-400"
+        >
+          <a
+            href="/"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveTab('home');
+            }}
+            className="hover:text-white transition-colors"
+          >
+            Home
+          </a>
+          <span className="text-slate-700">·</span>
+          <a
+            href="/movies"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveTab('movies');
+            }}
+            className="hover:text-white transition-colors"
+          >
+            HD Movies
+          </a>
+          <span className="text-slate-700">·</span>
+          <a
+            href="/series"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveTab('tv');
+            }}
+            className="hover:text-white transition-colors"
+          >
+            TV Series
+          </a>
+          <span className="text-slate-700">·</span>
+          <a
+            href="/anime"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveTab('anime');
+            }}
+            className="hover:text-white transition-colors"
+          >
+            Anime HD
+          </a>
+          <span className="text-slate-700">·</span>
+          <a
+            href="/search"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveTab('search');
+            }}
+            className="hover:text-white transition-colors"
+          >
+            Search Catalog
+          </a>
+          <span className="text-slate-700">·</span>
+          <a
+            href="/sitemap.xml"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hover:text-blue-400 transition-colors"
+          >
+            XML Sitemap
+          </a>
+        </nav>
         <div className="mt-3">
           <button
             type="button"

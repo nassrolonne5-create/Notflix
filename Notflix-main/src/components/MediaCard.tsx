@@ -1,7 +1,7 @@
 import React from 'react';
 import { Play, Heart } from 'lucide-react';
 import { MediaItem } from '../types';
-import { useApp } from '../context/AppContext';
+import { useApp, buildSeoWatchPath } from '../context/AppContext';
 import { GENRE_ID_TO_NAME } from '../data/genres';
 import { isSafe } from '../services/api';
 
@@ -19,22 +19,19 @@ export const MediaCard: React.FC<MediaCardProps> = ({ item }) => {
   const percent = vote > 0 ? Math.round(vote * 10) : 0;
   const ratingText = vote > 0 ? vote.toFixed(1) : '—';
   const yearText = item.year || '';
-  const typeText = item.type === 'tv' ? 'Series' : 'Movie';
+  const typeText = item.type === 'tv' ? 'TV Series' : 'Full Movie';
+  const displayTitle = item.title || item.name || 'Stream';
+  const seoHref = buildSeoWatchPath(item);
+  const seoAlt = `Watch ${displayTitle}${yearText ? ` (${yearText})` : ''} ${typeText} Online Free HD — Notflix`;
 
   // Primary Genre name
   const firstGenreId = item.genre_ids?.[0];
   const genreLabel = firstGenreId ? GENRE_ID_TO_NAME[firstGenreId] : undefined;
 
-  // Rate badge color
-  let rateBg = 'bg-emerald-500';
-  if (percent > 0 && percent < 50) rateBg = 'bg-rose-500';
-  else if (percent >= 50 && percent < 70) rateBg = 'bg-amber-500';
-
   // Playback Progress
   const trackKey = `${item.type}-${item.id}`;
   const pobj = userData.playbackPosition[trackKey];
   let progressPct = 0;
-  let progressLabel = '';
 
   if (pobj) {
     let ct = 0;
@@ -46,36 +43,37 @@ export const MediaCard: React.FC<MediaCardProps> = ({ item }) => {
       dur = pobj[`duration_${s}_${e}`] || 0;
       if (dur > 0) {
         progressPct = Math.min((ct / dur) * 100, 100);
-        const rem = Math.max(0, dur - ct);
-        const mins = Math.floor(rem / 60);
-        progressLabel = `S${s}:E${e} · ${mins}m left`;
       }
     } else {
       ct = pobj.time || 0;
       dur = pobj.duration || 0;
       if (dur > 0) {
         progressPct = Math.min((ct / dur) * 100, 100);
-        const rem = Math.max(0, dur - ct);
-        const mins = Math.floor(rem / 60);
-        progressLabel = `${mins}m left`;
       }
     }
   }
 
-  const handleClick = () => {
+  const handleClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    // Allow Ctrl/Cmd/Middle-click to open deep link in a new tab naturally
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) {
+      return;
+    }
+    e.preventDefault();
     openPlayer(item);
   };
 
   return (
-    <div
+    <a
+      href={seoHref}
       onClick={handleClick}
-      className="group flex flex-col w-full cursor-pointer select-none"
+      title={`Watch ${displayTitle}${yearText ? ` (${yearText})` : ''} Online in HD`}
+      className="group flex flex-col w-full cursor-pointer select-none no-underline"
     >
       {/* Poster Image Container */}
       <div className="relative aspect-[2/3] w-full rounded-2xl overflow-hidden bg-[#10141f] border border-white/[0.08] group-hover:border-white/20 shadow-md group-hover:shadow-2xl transition-all duration-300 transform group-hover:scale-[1.02]">
         <img
           src={item.poster}
-          alt={item.title || item.name || 'Poster'}
+          alt={seoAlt}
           loading="lazy"
           className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
           onError={(e) => {
@@ -85,7 +83,9 @@ export const MediaCard: React.FC<MediaCardProps> = ({ item }) => {
 
         {/* Favorite Heart Button (Top-Right) */}
         <button
+          type="button"
           onClick={(e) => {
+            e.preventDefault();
             e.stopPropagation();
             toggleFavorite(item);
           }}
@@ -117,10 +117,10 @@ export const MediaCard: React.FC<MediaCardProps> = ({ item }) => {
         )}
       </div>
 
-      {/* Metadata Details Below Poster (Matches Screenshots) */}
+      {/* Metadata Details Below Poster */}
       <div className="mt-1.5 px-0.5">
         <h3 className="font-bold text-xs sm:text-sm text-white truncate group-hover:text-red-400 transition-colors">
-          {item.title || item.name}
+          {displayTitle}
         </h3>
         <div className="flex items-center gap-1.5 text-[11px] text-slate-400 mt-0.5 truncate">
           <span className="text-amber-400 font-bold flex items-center gap-0.5">
@@ -132,6 +132,6 @@ export const MediaCard: React.FC<MediaCardProps> = ({ item }) => {
           </span>
         </div>
       </div>
-    </div>
+    </a>
   );
 };
