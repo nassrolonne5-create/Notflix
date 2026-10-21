@@ -34,9 +34,9 @@ export const Header: React.FC = () => {
 
   return (
     <header className="fixed top-0 left-0 right-0 z-50 h-16 md:h-18 px-4 md:px-8 flex items-center justify-between bg-gradient-to-b from-[#0b0f19]/95 via-[#0b0f19]/80 to-transparent backdrop-blur-md border-b border-white/[0.04] transition-all">
-      {/* Zone 1: 3D Flipping Brand / Official Telegram Channel Slot */}
+      {/* Zone 1: Smooth Vertical Slot-Reel Slide + Blur-Morph Brand / Telegram Switcher */}
       <div
-        className="relative min-h-[44px] w-[142px] sm:w-[162px] md:w-[178px] shrink-0 flex items-center select-none [perspective:700px]"
+        className="relative min-h-[44px] h-11 w-[148px] sm:w-[168px] md:w-[184px] shrink-0 flex items-center overflow-hidden select-none"
         onMouseEnter={() => setIsFlipPaused(true)}
         onMouseLeave={() => setIsFlipPaused(false)}
         onTouchStart={() => setIsFlipPaused(true)}
@@ -44,21 +44,23 @@ export const Header: React.FC = () => {
           window.setTimeout(() => setIsFlipPaused(false), 1500);
         }}
       >
-        {/* Face A: NOTFLIX Brand Logo (Clicks to Home) */}
+        {/* State A: NOTFLIX Brand Logo (Slides cleanly in/out vertically with soft motion blur) */}
         <button
           type="button"
           onClick={() => setActiveTab('home')}
           aria-hidden={showTelegram}
           tabIndex={showTelegram ? -1 : 0}
           title="Notflix Home"
-          className={`absolute inset-0 flex items-center gap-2 cursor-pointer group text-left whitespace-nowrap transition-all duration-300 ease-out [backface-visibility:hidden] ${
+          className={`absolute inset-0 flex items-center gap-2 cursor-pointer group text-left whitespace-nowrap transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] ${
             showTelegram
-              ? 'opacity-0 pointer-events-none [transform:rotateX(90deg)_scale(0.95)]'
-              : 'opacity-100 pointer-events-auto [transform:rotateX(0deg)_scale(1)]'
+              ? '-translate-y-6 opacity-0 blur-[3px] scale-95 pointer-events-none'
+              : 'translate-y-0 opacity-100 blur-0 scale-100 pointer-events-auto'
           }`}
         >
           <svg
-            className="w-6 h-6 md:w-7 md:h-7 shrink-0 transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
+            className={`w-6 h-6 md:w-7 md:h-7 shrink-0 transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:scale-105 group-active:scale-95 ${
+              showTelegram ? 'scale-75 -rotate-12' : 'scale-100 rotate-0'
+            }`}
             viewBox="0 0 24 24"
             fill="none"
             xmlns="http://www.w3.org/2000/svg"
@@ -70,7 +72,7 @@ export const Header: React.FC = () => {
           </span>
         </button>
 
-        {/* Face B: Official Telegram Channel Link (Clicks to https://t.me/Notflix_tv) */}
+        {/* State B: Official Telegram Channel Link (Glides up from below with staggered icon pop) */}
         <a
           href={TELEGRAM_CHANNEL_URL}
           target="_blank"
@@ -78,24 +80,29 @@ export const Header: React.FC = () => {
           aria-hidden={!showTelegram}
           tabIndex={showTelegram ? 0 : -1}
           title="Join Notflix Official Telegram Channel (@Notflix_tv)"
-          className={`absolute inset-0 flex items-center gap-2 cursor-pointer group no-underline whitespace-nowrap transition-all duration-300 ease-out [backface-visibility:hidden] ${
+          className={`absolute inset-0 flex items-center gap-2 cursor-pointer group no-underline whitespace-nowrap transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] ${
             showTelegram
-              ? 'opacity-100 pointer-events-auto [transform:rotateX(0deg)_scale(1)]'
-              : 'opacity-0 pointer-events-none [transform:rotateX(-90deg)_scale(0.95)]'
+              ? 'translate-y-0 opacity-100 blur-0 scale-100 pointer-events-auto'
+              : 'translate-y-6 opacity-0 blur-[3px] scale-95 pointer-events-none'
           }`}
         >
-          <svg
-            className="w-6 h-6 md:w-7 md:h-7 shrink-0 transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
-            viewBox="0 0 24 24"
-            fill="none"
-            xmlns="http://www.w3.org/2000/svg"
-          >
-            <circle cx="12" cy="12" r="11" fill="#2AABEE" />
-            <path
-              d="M16.95 7.45L15.12 16.52C14.98 17.16 14.59 17.31 14.06 17.01L11.12 14.84L9.7 16.21C9.54 16.37 9.41 16.5 9.1 16.5L9.31 13.51L14.76 8.59C15 8.38 14.71 8.26 14.39 8.47L7.66 12.71L4.76 11.8C4.13 11.6 4.12 11.17 4.89 10.87L16.22 6.5C16.75 6.31 17.21 6.62 16.95 7.45Z"
-              fill="#FFFFFF"
-            />
-          </svg>
+          <div className="relative flex items-center justify-center shrink-0">
+            <span className="absolute inset-0 rounded-full bg-[#2AABEE]/30 blur-sm group-hover:bg-[#2AABEE]/50 transition-colors" />
+            <svg
+              className={`relative w-6 h-6 md:w-7 md:h-7 shrink-0 transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:scale-105 group-active:scale-95 ${
+                showTelegram ? 'scale-100 rotate-0' : 'scale-75 rotate-12'
+              }`}
+              viewBox="0 0 24 24"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <circle cx="12" cy="12" r="11" fill="#2AABEE" />
+              <path
+                d="M16.95 7.45L15.12 16.52C14.98 17.16 14.59 17.31 14.06 17.01L11.12 14.84L9.7 16.21C9.54 16.37 9.41 16.5 9.1 16.5L9.31 13.51L14.76 8.59C15 8.38 14.71 8.26 14.39 8.47L7.66 12.71L4.76 11.8C4.13 11.6 4.12 11.17 4.89 10.87L16.22 6.5C16.75 6.31 17.21 6.62 16.95 7.45Z"
+                fill="#FFFFFF"
+              />
+            </svg>
+          </div>
           <span className="font-display text-xl sm:text-2xl md:text-[26px] tracking-wider text-[#2AABEE] group-hover:text-sky-300 uppercase leading-none transition-colors">
             Join Telegram
           </span>
