@@ -406,6 +406,15 @@ const AppContent: React.FC = () => {
           >
             XML Sitemap
           </a>
+          <span className="text-slate-700">·</span>
+          <a
+            href="https://t.me/Notflix_tv"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[#2AABEE] hover:text-sky-300 font-semibold transition-colors"
+          >
+            Telegram Channel
+          </a>
         </nav>
         <div className="mt-3">
           <button

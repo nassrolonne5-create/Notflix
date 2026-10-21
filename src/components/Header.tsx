@@ -1,6 +1,8 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Search, SlidersHorizontal } from 'lucide-react';
 import { useApp } from '../context/AppContext';
+
+const TELEGRAM_CHANNEL_URL = 'https://t.me/Notflix_tv';
 
 export const Header: React.FC = () => {
   const {
@@ -11,6 +13,18 @@ export const Header: React.FC = () => {
     setSearchQuery,
   } = useApp();
 
+  const [showTelegram, setShowTelegram] = useState<boolean>(false);
+  const [isFlipPaused, setIsFlipPaused] = useState<boolean>(false);
+
+  // Flip between Notflix and Join Telegram every 4 seconds (pauses on hover/touch)
+  useEffect(() => {
+    if (isFlipPaused) return;
+    const interval = window.setInterval(() => {
+      setShowTelegram((prev) => !prev);
+    }, 4000);
+    return () => window.clearInterval(interval);
+  }, [isFlipPaused]);
+
   const handleSearchChange = (val: string) => {
     setSearchQuery(val);
     if (activeTab !== 'search' && val.trim().length > 0) {
@@ -20,22 +34,72 @@ export const Header: React.FC = () => {
 
   return (
     <header className="fixed top-0 left-0 right-0 z-50 h-16 md:h-18 px-4 md:px-8 flex items-center justify-between bg-gradient-to-b from-[#0b0f19]/95 via-[#0b0f19]/80 to-transparent backdrop-blur-md border-b border-white/[0.04] transition-all">
-      {/* Brand Logo */}
+      {/* Zone 1: 3D Flipping Brand / Official Telegram Channel Slot */}
       <div
-        onClick={() => setActiveTab('home')}
-        className="flex items-center gap-2 cursor-pointer select-none group"
+        className="relative min-h-[44px] w-[142px] sm:w-[162px] md:w-[178px] shrink-0 flex items-center select-none [perspective:700px]"
+        onMouseEnter={() => setIsFlipPaused(true)}
+        onMouseLeave={() => setIsFlipPaused(false)}
+        onTouchStart={() => setIsFlipPaused(true)}
+        onTouchEnd={() => {
+          window.setTimeout(() => setIsFlipPaused(false), 1500);
+        }}
       >
-        <svg
-          className="w-6 h-6 md:w-7 md:h-7 transition-transform group-hover:scale-105 group-active:scale-95"
-          viewBox="0 0 24 24"
-          fill="none"
-          xmlns="http://www.w3.org/2000/svg"
+        {/* Face A: NOTFLIX Brand Logo (Clicks to Home) */}
+        <button
+          type="button"
+          onClick={() => setActiveTab('home')}
+          aria-hidden={showTelegram}
+          tabIndex={showTelegram ? -1 : 0}
+          title="Notflix Home"
+          className={`absolute inset-0 flex items-center gap-2 cursor-pointer group text-left whitespace-nowrap transition-all duration-300 ease-out [backface-visibility:hidden] ${
+            showTelegram
+              ? 'opacity-0 pointer-events-none [transform:rotateX(90deg)_scale(0.95)]'
+              : 'opacity-100 pointer-events-auto [transform:rotateX(0deg)_scale(1)]'
+          }`}
         >
-          <path d="M4,2 L8,2 L16,14 L16,2 L20,2 L20,22 L16,22 L8,10 L8,22 L4,22 Z" fill="#E50914" />
-        </svg>
-        <span className="font-display text-2xl md:text-3xl tracking-wider text-slate-100 uppercase">
-          Notflix<span className="text-[#E50914]">.</span>
-        </span>
+          <svg
+            className="w-6 h-6 md:w-7 md:h-7 shrink-0 transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
+            viewBox="0 0 24 24"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <path d="M4,2 L8,2 L16,14 L16,2 L20,2 L20,22 L16,22 L8,10 L8,22 L4,22 Z" fill="#E50914" />
+          </svg>
+          <span className="font-display text-2xl md:text-3xl tracking-wider text-slate-100 uppercase leading-none">
+            Notflix<span className="text-[#E50914]">.</span>
+          </span>
+        </button>
+
+        {/* Face B: Official Telegram Channel Link (Clicks to https://t.me/Notflix_tv) */}
+        <a
+          href={TELEGRAM_CHANNEL_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-hidden={!showTelegram}
+          tabIndex={showTelegram ? 0 : -1}
+          title="Join Notflix Official Telegram Channel (@Notflix_tv)"
+          className={`absolute inset-0 flex items-center gap-2 cursor-pointer group no-underline whitespace-nowrap transition-all duration-300 ease-out [backface-visibility:hidden] ${
+            showTelegram
+              ? 'opacity-100 pointer-events-auto [transform:rotateX(0deg)_scale(1)]'
+              : 'opacity-0 pointer-events-none [transform:rotateX(-90deg)_scale(0.95)]'
+          }`}
+        >
+          <svg
+            className="w-6 h-6 md:w-7 md:h-7 shrink-0 transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
+            viewBox="0 0 24 24"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <circle cx="12" cy="12" r="11" fill="#2AABEE" />
+            <path
+              d="M16.95 7.45L15.12 16.52C14.98 17.16 14.59 17.31 14.06 17.01L11.12 14.84L9.7 16.21C9.54 16.37 9.41 16.5 9.1 16.5L9.31 13.51L14.76 8.59C15 8.38 14.71 8.26 14.39 8.47L7.66 12.71L4.76 11.8C4.13 11.6 4.12 11.17 4.89 10.87L16.22 6.5C16.75 6.31 17.21 6.62 16.95 7.45Z"
+              fill="#FFFFFF"
+            />
+          </svg>
+          <span className="font-display text-xl sm:text-2xl md:text-[26px] tracking-wider text-[#2AABEE] group-hover:text-sky-300 uppercase leading-none transition-colors">
+            Join Telegram
+          </span>
+        </a>
       </div>
 
       {/* Global Quick Search - Hidden when on Search page to avoid duplicate search bars */}
