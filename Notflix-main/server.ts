@@ -5,6 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import zlib from 'zlib';
+import { Readable } from 'stream';
 import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
@@ -758,6 +759,8 @@ const globalSecurityShieldMiddleware = (req: Request, res: Response, next: NextF
   if (
     req.path.startsWith('/api/') &&
     !req.path.startsWith('/api/proxy/') &&
+    !req.path.startsWith('/api/live/') &&
+    !req.path.startsWith('/v1/live/') &&
     !req.path.startsWith('/api/subtitles/') &&
     !req.path.startsWith('/api/analytics/') &&
     !req.path.startsWith('/api/user/') &&
@@ -2863,6 +2866,1854 @@ app.options('/v1/proxy', (req: Request, res: Response) => {
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
   res.sendStatus(204);
+});
+
+// ============================================================================
+// 4B. CINEPRO LIVE IPTV CHANNELS & LIVE SPORTS EVENTS PROXY SUBSYSTEM
+// ============================================================================
+const LIVE_LANG_ENGLISH_MAP: Record<string, string> = {
+  ar: 'Arabic',
+  en: 'English',
+  fr: 'French',
+  es: 'Spanish',
+  tr: 'Turkish',
+  de: 'German',
+  pt: 'Portuguese',
+  it: 'Italian',
+  nl: 'Dutch',
+  ru: 'Russian',
+};
+
+function toCleanEnglishLanguage(langCode?: string, fallbackLabel?: string): string {
+  const code = String(langCode || '').trim().toLowerCase();
+  if (LIVE_LANG_ENGLISH_MAP[code]) return LIVE_LANG_ENGLISH_MAP[code];
+  const raw = String(fallbackLabel || '').trim();
+  const parenMatch = raw.match(/\(([A-Za-z]+)\)/);
+  if (parenMatch && parenMatch[1]) return parenMatch[1];
+  const asciiOnly = raw.replace(/[^\x20-\x7E]/g, '').trim();
+  return asciiOnly || 'International';
+}
+
+function extractRawUrlFromProxyLink(urlOrProxy: string): string {
+  if (!urlOrProxy || typeof urlOrProxy !== 'string') return '';
+  try {
+    const qIdx = urlOrProxy.indexOf('?');
+    if (qIdx !== -1) {
+      const qs = new URLSearchParams(urlOrProxy.slice(qIdx + 1));
+      const dataParam = qs.get('data');
+      if (dataParam) {
+        const parsed = JSON.parse(dataParam);
+        if (parsed && typeof parsed.url === 'string') return parsed.url;
+      }
+      const uParam = qs.get('url');
+      if (uParam) return uParam;
+    }
+  } catch {
+    // ignore
+  }
+  return urlOrProxy;
+}
+
+function buildLocalLiveProxyUrl(
+  targetUrl: string,
+  headers: Record<string, string> = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+  isManifest = true
+): string {
+  const endpoint = isManifest ? 'manifest.m3u8' : 'segment.ts';
+  const payload = JSON.stringify({ url: targetUrl, headers });
+  return `/api/live/proxy/${endpoint}?data=${encodeURIComponent(payload)}`;
+}
+
+function rewriteCineproLiveProxyUrl(rawUrl: string): string {
+  if (!rawUrl || typeof rawUrl !== 'string') return '';
+  let cleaned = rawUrl.trim();
+  cleaned = cleaned.replace(/^https?:\/\/[^/\s"']+\/v1\/live\/proxy\//i, '/api/live/proxy/');
+  cleaned = cleaned.replace(/^\/v1\/live\/proxy\//i, '/api/live/proxy/');
+  return cleaned;
+}
+
+let cachedLiveEventsPayload: { data: any; timestamp: number } | null = null;
+let cachedLiveChannelsPayload: { data: any; timestamp: number } | null = null;
+
+interface ChannelMetaEntry {
+  channelId: string;
+  name: string;
+  language: string;
+  languageLabel: string;
+  logo?: string;
+}
+
+const TV_LOGO_REPO = 'https://raw.githubusercontent.com/tv-logo/tv-logos/main';
+
+function makeSvgChannelBadge(
+  bgStart: string,
+  bgEnd: string,
+  accentColor: string,
+  topText: string,
+  mainText: string,
+  subText = ''
+): string {
+  const mainFontSize = mainText.length > 8 ? 22 : mainText.length > 5 ? 28 : 34;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="160" height="160">
+    <defs>
+      <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="${bgStart}"/>
+        <stop offset="100%" stop-color="${bgEnd}"/>
+      </linearGradient>
+    </defs>
+    <rect width="160" height="160" rx="26" fill="url(#g)"/>
+    <rect x="8" y="8" width="144" height="144" rx="20" fill="none" stroke="${accentColor}" stroke-width="3" stroke-opacity="0.45"/>
+    <text x="80" y="${subText ? 46 : 54}" text-anchor="middle" font-family="Arial, sans-serif" font-weight="800" font-size="18" fill="${accentColor}" letter-spacing="1.5">${topText}</text>
+    <text x="80" y="${subText ? 96 : 108}" text-anchor="middle" font-family="Arial, sans-serif" font-weight="900" font-size="${mainFontSize}" fill="#ffffff" letter-spacing="0.5">${mainText}</text>
+    ${
+      subText
+        ? `<rect x="24" y="114" width="112" height="24" rx="12" fill="${accentColor}" fill-opacity="0.22"/>
+           <text x="80" y="131" text-anchor="middle" font-family="Arial, sans-serif" font-weight="800" font-size="13" fill="${accentColor}" letter-spacing="1">${subText}</text>`
+        : ''
+    }
+  </svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg.replace(/\s+/g, ' ').trim())}`;
+}
+
+const LIVE_CHANNEL_DIRECTORY: Record<string, ChannelMetaEntry> = {
+  // beIN Sports MENA (Arabic)
+  'bein-sports-1-ar': { channelId: 'bein-sports-1-ar', name: 'beIN Sports 1 HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: 'https://i.imgur.com/Vtk2cGI.png' },
+  'bein-sports-2-ar': { channelId: 'bein-sports-2-ar', name: 'beIN Sports 2 HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: 'https://i.imgur.com/vUJZSvs.png' },
+  'bein-sports-3-ar': { channelId: 'bein-sports-3-ar', name: 'beIN Sports 3 HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: 'https://i.imgur.com/UYSMao3.png' },
+  'bein-sports-4-ar': { channelId: 'bein-sports-4-ar', name: 'beIN Sports 4 HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: 'https://i.imgur.com/vwAgJNi.png' },
+  'bein-sports-5-ar': { channelId: 'bein-sports-5-ar', name: 'beIN Sports 5 HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: 'https://i.imgur.com/2Rha5aY.png' },
+  'bein-sports-6-ar': { channelId: 'bein-sports-6-ar', name: 'beIN Sports 6 HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: 'https://i.imgur.com/0wBdLYb.png' },
+  'bein-sports-7-ar': { channelId: 'bein-sports-7-ar', name: 'beIN Sports 7 HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: 'https://i.imgur.com/iODFwZi.png' },
+  'bein-sports-8-ar': { channelId: 'bein-sports-8-ar', name: 'beIN Sports 8 HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: 'https://i.imgur.com/CaFEyVn.png' },
+  'bein-sports-9-ar': { channelId: 'bein-sports-9-ar', name: 'beIN Sports 9 HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: 'https://assets.bein.com/mena/sites/3/2023/09/logos-_beINSPORTS9.png' },
+  'bein-sports-open-ar': { channelId: 'bein-sports-open-ar', name: 'beIN Sports Open HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: `${TV_LOGO_REPO}/countries/world-middle-east/bein-sports/bein-sports-mea.png` },
+  'bein-sports-premium-1-ar': { channelId: 'bein-sports-premium-1-ar', name: 'beIN Sports Premium 1 HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: `${TV_LOGO_REPO}/countries/world-middle-east/bein-sports/bein-sports-1-premium-mea.png` },
+  'bein-sports-premium-2-ar': { channelId: 'bein-sports-premium-2-ar', name: 'beIN Sports Premium 2 HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: `${TV_LOGO_REPO}/countries/world-middle-east/bein-sports/bein-sports-2-premium-mea.png` },
+  'bein-sports-premium-3-ar': { channelId: 'bein-sports-premium-3-ar', name: 'beIN Sports Premium 3 HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: `${TV_LOGO_REPO}/countries/world-middle-east/bein-sports/bein-sports-3-premium-mea.png` },
+
+  // beIN Sports English / French / Turkish / Spanish
+  'bein-sports-xtra-en': { channelId: 'bein-sports-xtra-en', name: 'beIN SPORTS XTRA HD (English)', language: 'en', languageLabel: 'English', logo: 'https://i.ibb.co/HT49GPmB/XTRA-2.png' },
+  'bein-sports-en-1': { channelId: 'bein-sports-en-1', name: 'beIN Sports 1 English HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/world-middle-east/bein-sports/bein-sports-1-english-mea.png` },
+  'bein-sports-en-2': { channelId: 'bein-sports-en-2', name: 'beIN Sports 2 English HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/world-middle-east/bein-sports/bein-sports-2-english-mea.png` },
+  'bein-sports-en-3': { channelId: 'bein-sports-en-3', name: 'beIN Sports 3 English HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/world-middle-east/bein-sports/bein-sports-3-english-mea.png` },
+  'bein-sports-fr-1': { channelId: 'bein-sports-fr-1', name: 'beIN Sports 1 France HD (FR)', language: 'fr', languageLabel: 'French', logo: `${TV_LOGO_REPO}/countries/france/bein-sports-1-french-fr.png` },
+  'bein-sports-fr-2': { channelId: 'bein-sports-fr-2', name: 'beIN Sports 2 France HD (FR)', language: 'fr', languageLabel: 'French', logo: `${TV_LOGO_REPO}/countries/france/bein-sports-2-french-fr.png` },
+  'bein-sports-fr-3': { channelId: 'bein-sports-fr-3', name: 'beIN Sports 3 France HD (FR)', language: 'fr', languageLabel: 'French', logo: `${TV_LOGO_REPO}/countries/france/bein-sports-3-french-fr.png` },
+  'bein-sports-max-4-fr': { channelId: 'bein-sports-max-4-fr', name: 'beIN Sports MAX 4 France HD (FR)', language: 'fr', languageLabel: 'French', logo: `${TV_LOGO_REPO}/countries/world-middle-east/bein-sports/bein-sports-4-max-mea.png` },
+  'bein-sports-max-5-fr': { channelId: 'bein-sports-max-5-fr', name: 'beIN Sports MAX 5 France HD (FR)', language: 'fr', languageLabel: 'French', logo: `${TV_LOGO_REPO}/countries/world-middle-east/bein-sports/bein-sports-5-max-mea.png` },
+  'bein-sports-max-6-fr': { channelId: 'bein-sports-max-6-fr', name: 'beIN Sports MAX 6 France HD (FR)', language: 'fr', languageLabel: 'French', logo: `${TV_LOGO_REPO}/countries/world-middle-east/bein-sports/bein-sports-6-max-mea.png` },
+  'bein-sports-max-7-fr': { channelId: 'bein-sports-max-7-fr', name: 'beIN Sports MAX 7 France HD (FR)', language: 'fr', languageLabel: 'French', logo: makeSvgChannelBadge('#3b0764', '#581c87', '#e9d5ff', 'beIN SPORTS', 'MAX 7', 'FRANCE HD') },
+  'bein-sports-max-9-fr': { channelId: 'bein-sports-max-9-fr', name: 'beIN Sports MAX 9 France HD (FR)', language: 'fr', languageLabel: 'French', logo: makeSvgChannelBadge('#3b0764', '#581c87', '#e9d5ff', 'beIN SPORTS', 'MAX 9', 'FRANCE HD') },
+  'bein-sports-max-10-fr': { channelId: 'bein-sports-max-10-fr', name: 'beIN Sports MAX 10 France HD (FR)', language: 'fr', languageLabel: 'French', logo: makeSvgChannelBadge('#3b0764', '#581c87', '#e9d5ff', 'beIN SPORTS', 'MAX 10', 'FRANCE HD') },
+  'bein-sports-1-tr': { channelId: 'bein-sports-1-tr', name: 'beIN Sports 1 Türkiye HD', language: 'tr', languageLabel: 'Turkish', logo: 'https://i.imgur.com/Vtk2cGI.png' },
+  'bein-sports-2-tr': { channelId: 'bein-sports-2-tr', name: 'beIN Sports 2 Türkiye HD', language: 'tr', languageLabel: 'Turkish', logo: 'https://i.imgur.com/vUJZSvs.png' },
+  'bein-sports-3-tr': { channelId: 'bein-sports-3-tr', name: 'beIN Sports 3 Türkiye HD', language: 'tr', languageLabel: 'Turkish', logo: 'https://i.imgur.com/UYSMao3.png' },
+  'bein-sports-4-tr': { channelId: 'bein-sports-4-tr', name: 'beIN Sports 4 Türkiye HD', language: 'tr', languageLabel: 'Turkish', logo: 'https://i.imgur.com/vwAgJNi.png' },
+  'bein-sports-5-tr': { channelId: 'bein-sports-5-tr', name: 'beIN Sports 5 Türkiye HD', language: 'tr', languageLabel: 'Turkish', logo: 'https://i.imgur.com/2Rha5aY.png' },
+  'bein-sports-haber-tr': { channelId: 'bein-sports-haber-tr', name: 'beIN Sports Haber HD (TR)', language: 'tr', languageLabel: 'Turkish', logo: `${TV_LOGO_REPO}/countries/turkey/bein-sports-haber-tr.png` },
+  'bein-sports-xtra-es': { channelId: 'bein-sports-xtra-es', name: 'beIN SPORTS XTRA en Español', language: 'es', languageLabel: 'Spanish', logo: 'https://i.imgur.com/V562tpO.png' },
+
+  // MENA Sports (SSC, Alkass, Abu Dhabi, Dubai, Kuwait, Arryadia)
+  'ssc-sport-1-ar': { channelId: 'ssc-sport-1-ar', name: 'SSC Sport 1 / Extra 1 HD (Saudi Sports)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#064e3b', '#022c22', '#fbbf24', 'SAUDI SPORTS', 'SSC 1', 'HD LIVE') },
+  'ssc-sport-2-ar': { channelId: 'ssc-sport-2-ar', name: 'SSC Sport 2 / Extra 2 HD (Saudi Sports)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#064e3b', '#022c22', '#fbbf24', 'SAUDI SPORTS', 'SSC 2', 'HD LIVE') },
+  'ssc-sport-3-ar': { channelId: 'ssc-sport-3-ar', name: 'SSC Sport 3 / Extra 3 HD (Saudi Sports)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#064e3b', '#022c22', '#fbbf24', 'SAUDI SPORTS', 'SSC 3', 'HD LIVE') },
+  'ssc-extra-1-ar': { channelId: 'ssc-extra-1-ar', name: 'SSC Sport Extra 1 HD (Saudi Sports)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#0f172a', '#064e3b', '#34d399', 'SSC EXTRA', 'EXTRA 1', 'SAUDI HD') },
+  'ssc-extra-2-ar': { channelId: 'ssc-extra-2-ar', name: 'SSC Sport Extra 2 HD (Saudi Sports)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#0f172a', '#064e3b', '#34d399', 'SSC EXTRA', 'EXTRA 2', 'SAUDI HD') },
+  'ssc-extra-3-ar': { channelId: 'ssc-extra-3-ar', name: 'SSC Sport Extra 3 HD (Saudi Sports)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#0f172a', '#064e3b', '#34d399', 'SSC EXTRA', 'EXTRA 3', 'SAUDI HD') },
+  'alkass-1-ar': { channelId: 'alkass-1-ar', name: 'Alkass Sports HD 1 / 2 (Qatar)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#7f1d1d', '#450a0a', '#fcd34d', 'QATAR SPORTS', 'ALKASS 1', 'الكأس HD') },
+  'alkass-2-ar': { channelId: 'alkass-2-ar', name: 'Alkass Sports HD 3 (Qatar)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#7f1d1d', '#450a0a', '#fcd34d', 'QATAR SPORTS', 'ALKASS 3', 'الكأس HD') },
+  'alkass-3-ar': { channelId: 'alkass-3-ar', name: 'Alkass Sports HD 4 (Qatar)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#7f1d1d', '#450a0a', '#fcd34d', 'QATAR SPORTS', 'ALKASS 4', 'الكأس HD') },
+  'ad-sports-1-ar': { channelId: 'ad-sports-1-ar', name: 'Abu Dhabi Sports 1 & Premium 1 HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: `${TV_LOGO_REPO}/countries/united-arab-emirates/abu-dhabi-sports-tv-ae.png` },
+  'ad-sports-2-ar': { channelId: 'ad-sports-2-ar', name: 'Abu Dhabi Sports 2 Premium HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: `${TV_LOGO_REPO}/countries/united-arab-emirates/abu-dhabi-sports-tv-ae.png` },
+  'dubai-sports-1-ar': { channelId: 'dubai-sports-1-ar', name: 'Dubai Sports 1 HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: `${TV_LOGO_REPO}/countries/united-arab-emirates/dubai-sports-tv-ae.png` },
+  'ktv-sport-ar': { channelId: 'ktv-sport-ar', name: 'Kuwait TV Sport HD (KTV Sport)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#0369a1', '#0c4a6e', '#38bdf8', 'KUWAIT TV', 'KTV SPORT', 'الكويت الرياضية') },
+  'arryadia-ar': { channelId: 'arryadia-ar', name: 'Arryadia Morocco Sports HD', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#991b1b', '#14532d', '#4ade80', 'SNRT MOROCCO', 'ARRYADIA', 'الرياضية TNT') },
+
+  // Movies & Cinema (12 Channels)
+  'bein-movies-premiere-en': { channelId: 'bein-movies-premiere-en', name: 'beIN / Sky Cinema Premiere HD (Movies)', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/world-middle-east/bein-movies-1-premiere-mea.png` },
+  'bein-movies-action-en': { channelId: 'bein-movies-action-en', name: 'beIN / Sky Cinema Action HD (Movies)', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/world-middle-east/bein-movies-2-action-mea.png` },
+  'bein-movies-hits-en': { channelId: 'bein-movies-hits-en', name: 'beIN / Sky Cinema Hits HD (Movies)', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/turkey/bein-movies-stars-hd-tr.png` },
+  'bein-movies-drama-en': { channelId: 'bein-movies-drama-en', name: 'beIN / Sky Cinema Drama HD (Movies)', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/world-middle-east/bein-movies-3-drama-mea.png` },
+  'hbo-hd': { channelId: 'hbo-hd', name: 'HBO Movies & Series HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-states/hbo-us.png` },
+  'showtime-hd': { channelId: 'showtime-hd', name: 'Showtime Movies & Series HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-states/showtime-us.png` },
+  'starz-hd': { channelId: 'starz-hd', name: 'Starz Movies HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-states/starz-us.png` },
+  'cinemax-hd': { channelId: 'cinemax-hd', name: 'Cinemax Action Movies HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-states/cinemax-us.png` },
+  'bein-movies-action-ar': { channelId: 'bein-movies-action-ar', name: 'Shahid / MENA Movies Action HD (أفلام أكشن)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#0f172a', '#1e293b', '#10b981', 'SHAHID VIP', 'ACTION', 'أفلام أكشن') },
+  'bein-movies-thriller-ar': { channelId: 'bein-movies-thriller-ar', name: 'Shahid / MENA Movies Thriller HD (أفلام إثارة)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#0f172a', '#31102f', '#f43f5e', 'SHAHID VIP', 'THRILLER', 'أفلام إثارة') },
+  'bein-aflam-ar': { channelId: 'bein-aflam-ar', name: 'Shahid Aflam HD (أفلام عربية)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#042f2e', '#0f172a', '#2dd4bf', 'SHAHID VIP', 'AFLAM', 'أفلام عربية') },
+  'rotana-cinema-ar': { channelId: 'rotana-cinema-ar', name: 'Rotana Cinema HD (روتانا سينما)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#065f46', '#022c22', '#fbbf24', 'ROTANA', 'CINEMA', 'روتانا سينما') },
+
+  // Entertainment & MBC / Rotana / Spacetoon (10 Channels)
+  'rotana-drama-ar': { channelId: 'rotana-drama-ar', name: 'Rotana Drama HD (روتانا دراما)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#581c87', '#2e1065', '#f59e0b', 'ROTANA', 'DRAMA', 'روتانا دراما') },
+  'rotana-comedy-ar': { channelId: 'rotana-comedy-ar', name: 'Rotana Comedy HD (روتانا كوميدي)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#9a3412', '#431407', '#fde047', 'ROTANA', 'COMEDY', 'روتانا كوميدي') },
+  'mbc-1-ar': { channelId: 'mbc-1-ar', name: 'MBC 1 HD (إم بي سي 1)', language: 'ar', languageLabel: 'Arabic', logo: `${TV_LOGO_REPO}/countries/united-arab-emirates/mbc-1-ae.png` },
+  'mbc-4-ar': { channelId: 'mbc-4-ar', name: 'MBC 4 Series & Entertainment HD (إم بي سي 4)', language: 'ar', languageLabel: 'Arabic', logo: `${TV_LOGO_REPO}/countries/united-arab-emirates/mbc-4-ae.png` },
+  'mbc-5-ar': { channelId: 'mbc-5-ar', name: 'MBC 5 Maghreb HD (إم بي سي 5)', language: 'ar', languageLabel: 'Arabic', logo: `${TV_LOGO_REPO}/countries/united-arab-emirates/mbc-5-ae.png` },
+  'mbc-drama-ar': { channelId: 'mbc-drama-ar', name: 'MBC Drama & MBC+ Drama HD (إم بي سي دراما)', language: 'ar', languageLabel: 'Arabic', logo: `${TV_LOGO_REPO}/countries/united-arab-emirates/mbc-drama-ae.png` },
+  'mbc-masr-ar': { channelId: 'mbc-masr-ar', name: 'MBC Masr 1 & 2 HD (إم بي سي مصر)', language: 'ar', languageLabel: 'Arabic', logo: `${TV_LOGO_REPO}/countries/united-arab-emirates/mbc-maser-ae.png` },
+  'mbc-iraq-ar': { channelId: 'mbc-iraq-ar', name: 'MBC Iraq HD (إم بي سي العراق)', language: 'ar', languageLabel: 'Arabic', logo: `${TV_LOGO_REPO}/countries/united-arab-emirates/mbc-iraq-ae.png` },
+  'bab-al-hara-ar': { channelId: 'bab-al-hara-ar', name: 'Bab Al Hara Series 24/7 HD (باب الحارة)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#78350f', '#451a03', '#fbbf24', 'SHAHID 24/7', 'BAB AL HARA', 'باب الحارة') },
+  'spacetoon-ar': { channelId: 'spacetoon-ar', name: 'Spacetoon Arabic HD (سبيستون)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#1e3a8a', '#172554', '#facc15', 'ANIME & KIDS', 'SPACETOON', 'سبيستون') },
+
+  // UK & European Sports
+  'sky-sports-main-event': { channelId: 'sky-sports-main-event', name: 'Sky Sports Main Event UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/sky-sports-main-event-uk.png` },
+  'sky-sports-premier-league': { channelId: 'sky-sports-premier-league', name: 'Sky Sports Premier League UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/sky-sports-premier-league-uk.png` },
+  'sky-sports-football': { channelId: 'sky-sports-football', name: 'Sky Sports Football UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/sky-sports-football-uk.png` },
+  'sky-sports-f1': { channelId: 'sky-sports-f1', name: 'Sky Sports F1 UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/sky-sports-f1-uk.png` },
+  'tnt-sports-1': { channelId: 'tnt-sports-1', name: 'TNT Sports 1 UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/hd/tnt-sports-1-hd-uk.png` },
+  'tnt-sports-2': { channelId: 'tnt-sports-2', name: 'TNT Sports 2 UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/hd/tnt-sports-2-hd-uk.png` },
+  'tnt-sports-3': { channelId: 'tnt-sports-3', name: 'TNT Sports 3 UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/hd/tnt-sports-3-hd-uk.png` },
+  'tnt-sports-4': { channelId: 'tnt-sports-4', name: 'TNT Sports 4 UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/hd/tnt-sports-4-hd-uk.png` },
+
+  // US Sports (Fox, ESPN, CBS, NBC, NBA, NFL, NHL, MLB)
+  'fox-sports-1': { channelId: 'fox-sports-1', name: 'Fox Sports 1 (FS1 HD)', language: 'en', languageLabel: 'English', logo: makeSvgChannelBadge('#0c4a6e', '#082f49', '#38bdf8', 'FOX SPORTS', 'FS1', 'HD LIVE') },
+  'fox-sports-2': { channelId: 'fox-sports-2', name: 'Fox Sports 2 (FS2 HD)', language: 'en', languageLabel: 'English', logo: makeSvgChannelBadge('#1e3a8a', '#172554', '#ef4444', 'FOX SPORTS', 'FS2', 'HD LIVE') },
+  'fox-sports-news': { channelId: 'fox-sports-news', name: 'Fox Sports News (1080p)', language: 'en', languageLabel: 'English', logo: 'https://i.imgur.com/O9BapV9.png' },
+  'espn-hd': { channelId: 'espn-hd', name: 'ESPN HD (United States)', language: 'en', languageLabel: 'English', logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/2/2f/ESPN_wordmark.svg/960px-ESPN_wordmark.svg.png' },
+  'espn-2-hd': { channelId: 'espn-2-hd', name: 'ESPN 2 HD (United States)', language: 'en', languageLabel: 'English', logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/bf/ESPN2_logo.svg/960px-ESPN2_logo.svg.png' },
+  'espnu-hd': { channelId: 'espnu-hd', name: 'ESPNU HD', language: 'en', languageLabel: 'English', logo: 'https://i.imgur.com/HiBrysh.png' },
+  'cbs-sports-golazo': { channelId: 'cbs-sports-golazo', name: 'CBS Sports Golazo Network', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-states/cbs-sports-golazo-network-us.png` },
+  'nbc-sports-now': { channelId: 'nbc-sports-now', name: 'NBC Sports NOW HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-states/nbc-sports-engine-us.png` },
+  'nba-tv': { channelId: 'nba-tv', name: 'NBA TV HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-states/nba-tv-icon-us.png` },
+  'nfl-network': { channelId: 'nfl-network', name: 'NFL Network HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-states/nfl-network-us.png` },
+  'nhl-network': { channelId: 'nhl-network', name: 'NHL Network (1080p)', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-states/nhl-network-us.png` },
+  'mlb-network': { channelId: 'mlb-network', name: 'MLB Network HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-states/mlb-network-us.png` },
+
+  // Europe / International Sports
+  'eurosport-1': { channelId: 'eurosport-1', name: 'Eurosport 1 HD', language: 'en', languageLabel: 'English', logo: 'https://i.imgur.com/olQJgm7.png' },
+  'eurosport-2': { channelId: 'eurosport-2', name: 'Eurosport 2 HD', language: 'en', languageLabel: 'English', logo: 'https://i.imgur.com/f56dHgR.png' },
+  'canal-plus-foot-fr': { channelId: 'canal-plus-foot-fr', name: 'Canal+ Foot France HD', language: 'fr', languageLabel: 'French', logo: `${TV_LOGO_REPO}/countries/france/canal-plus-foot-fr.png` },
+  'rmc-sport-1-fr': { channelId: 'rmc-sport-1-fr', name: 'RMC Sport 1 France HD', language: 'fr', languageLabel: 'French', logo: `${TV_LOGO_REPO}/countries/france/rmc-sport-1-fr.png` },
+  'lequipe-fr': { channelId: 'lequipe-fr', name: "L'Équipe TV France (1080p)", language: 'fr', languageLabel: 'French', logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/3/32/L%27%C3%89quipe_wordmark.svg/512px-L%27%C3%89quipe_wordmark.svg.png' },
+  'fifa-plus-fr': { channelId: 'fifa-plus-fr', name: 'FIFA+ France (FR)', language: 'fr', languageLabel: 'French', logo: makeSvgChannelBadge('#0f172a', '#1e3a8a', '#38bdf8', 'OFFICIAL STREAM', 'FIFA+', 'FRANCE HD') },
+  'fifa-plus-en': { channelId: 'fifa-plus-en', name: 'FIFA+ Global (English)', language: 'en', languageLabel: 'English', logo: makeSvgChannelBadge('#0f172a', '#1e3a8a', '#38bdf8', 'OFFICIAL STREAM', 'FIFA+', 'GLOBAL HD') },
+  'premier-sports-1': { channelId: 'premier-sports-1', name: 'Premier Sports 1 UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/premier-sports-1-uk.png` },
+  'premier-sports-2': { channelId: 'premier-sports-2', name: 'Premier Sports 2 UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/premier-sports-2-uk.png` },
+  'real-madrid-tv': { channelId: 'real-madrid-tv', name: 'Real Madrid TV HD', language: 'es', languageLabel: 'Spanish', logo: `${TV_LOGO_REPO}/countries/spain/real-madrid-tv-es.png` },
+  'dazn-combat': { channelId: 'dazn-combat', name: 'DAZN Combat & Boxing HD', language: 'en', languageLabel: 'English', logo: 'https://i.postimg.cc/VsW3Jsrz/logo-DAZN-Combat.png' },
+  'red-bull-tv': { channelId: 'red-bull-tv', name: 'Red Bull TV Motorsports (1080p)', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/international/red-bull-tv-int.png` },
+  'tennis-channel': { channelId: 'tennis-channel', name: 'Tennis Channel HD (1080p)', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-states/tennis-channel-us.png` },
+};
+
+const GENERIC_PLACEHOLDER_LOGOS = new Set([
+  'https://i.imgur.com/Vtk2cGI.png',
+  'https://i.imgur.com/vUJZSvs.png',
+  'https://i.imgur.com/UYSMao3.png',
+  'https://i.imgur.com/vwAgJNi.png',
+  'https://i.imgur.com/2Rha5aY.png',
+  'https://i.imgur.com/0wBdLYb.png',
+  'https://i.imgur.com/iODFwZi.png',
+  'https://i.imgur.com/O9BapV9.png',
+]);
+
+function resolveChannelLogo(channelId: string, upstreamLogo?: string, channelName?: string): string {
+  const curated = LIVE_CHANNEL_DIRECTORY[channelId]?.logo;
+  if (curated) return curated;
+
+  const cleanUpstream = String(upstreamLogo || '').trim();
+  const isBeinChannel = channelId.startsWith('bein-sports-');
+  const isFoxChannel = channelId.startsWith('fox-sports-');
+
+  if (cleanUpstream && (!GENERIC_PLACEHOLDER_LOGOS.has(cleanUpstream) || isBeinChannel || isFoxChannel)) {
+    return cleanUpstream;
+  }
+
+  // Fallback custom badge for any newly added non-beIN channel whose upstream logo is a generic placeholder
+  const label = (channelName || channelId.replace(/-/g, ' ')).replace(/\s*\([^)]*\)/g, '').trim().toUpperCase();
+  const words = label.split(/\s+/);
+  const top = words[0] || 'LIVE TV';
+  const main = words.slice(1, 3).join(' ') || top;
+  return makeSvgChannelBadge('#0f172a', '#1e293b', '#38bdf8', top.slice(0, 12), main.slice(0, 10), 'LIVE HD');
+}
+
+function buildRecommendedChannelItem(channelId: string): {
+  channelId: string;
+  name: string;
+  language: string;
+  languageLabel: string;
+  logo?: string;
+  streamEndpoint: string;
+} {
+  const cachedList = Array.isArray(cachedLiveChannelsPayload?.data?.channels)
+    ? cachedLiveChannelsPayload!.data.channels
+    : [];
+  const fromCache = cachedList.find((c: any) => c?.id === channelId);
+  const meta = LIVE_CHANNEL_DIRECTORY[channelId];
+  const lang = fromCache?.language || meta?.language || 'en';
+  const name = fromCache?.name || meta?.name || channelId.replace(/-/g, ' ').toUpperCase();
+  return {
+    channelId,
+    name,
+    language: lang,
+    languageLabel: toCleanEnglishLanguage(lang, fromCache?.languageLabel || meta?.languageLabel),
+    logo: resolveChannelLogo(channelId, fromCache?.logo || meta?.logo, name),
+    streamEndpoint: `/api/live/stream/${encodeURIComponent(channelId)}`,
+  };
+}
+
+// Official competition broadcast pools so simultaneous matches in the same time slot map to their real broadcasters
+const UEFA_ARABIC_POOL = [
+  'bein-sports-1-ar',
+  'bein-sports-2-ar',
+  'bein-sports-3-ar',
+  'bein-sports-4-ar',
+  'bein-sports-5-ar',
+  'bein-sports-6-ar',
+  'bein-sports-7-ar',
+  'bein-sports-8-ar',
+  'bein-sports-9-ar',
+];
+
+const UEFA_UK_TNT_POOL = [
+  'tnt-sports-1',
+  'tnt-sports-2',
+  'tnt-sports-3',
+  'tnt-sports-4',
+];
+
+const UEFA_EN_BEIN_POOL = [
+  'bein-sports-en-1',
+  'bein-sports-en-2',
+  'bein-sports-en-3',
+];
+
+const UEFA_FR_POOL = [
+  'canal-plus-foot-fr',
+  'bein-sports-fr-1',
+  'bein-sports-fr-2',
+  'bein-sports-fr-3',
+  'rmc-sport-1-fr',
+  'bein-sports-max-4-fr',
+  'bein-sports-max-5-fr',
+  'bein-sports-max-6-fr',
+  'bein-sports-max-7-fr',
+  'bein-sports-max-9-fr',
+  'bein-sports-max-10-fr',
+];
+
+const UEFA_OFFICIAL_PRIMARY_POOL = [
+  'bein-sports-1-ar',
+  'bein-sports-2-ar',
+  'bein-sports-3-ar',
+  'bein-sports-4-ar',
+  'bein-sports-5-ar',
+  'bein-sports-6-ar',
+  'bein-sports-7-ar',
+  'bein-sports-8-ar',
+  'bein-sports-9-ar',
+  'tnt-sports-1',
+  'tnt-sports-2',
+  'tnt-sports-3',
+  'tnt-sports-4',
+  'bein-sports-en-1',
+  'bein-sports-en-2',
+  'bein-sports-en-3',
+  'canal-plus-foot-fr',
+  'bein-sports-fr-1',
+  'bein-sports-fr-2',
+  'bein-sports-fr-3',
+  'cbs-sports-golazo',
+  'rmc-sport-1-fr',
+  'bein-sports-max-4-fr',
+  'bein-sports-max-5-fr',
+  'bein-sports-max-6-fr',
+  'bein-sports-max-7-fr',
+  'bein-sports-max-9-fr',
+  'bein-sports-max-10-fr',
+];
+
+const MENA_SAUDI_MULTIPLEX_POOL = [
+  'ssc-sport-1-ar',
+  'ssc-sport-2-ar',
+  'ssc-sport-3-ar',
+  'ssc-extra-1-ar',
+  'ssc-extra-2-ar',
+  'ssc-extra-3-ar',
+  'alkass-1-ar',
+  'alkass-2-ar',
+  'alkass-3-ar',
+  'ad-sports-1-ar',
+  'ad-sports-2-ar',
+  'dubai-sports-1-ar',
+];
+
+function assignSmartChannelsForEvent(
+  ev: any,
+  slotIndex: number,
+  usedPrimaryInSlot: Set<string>
+): Array<{
+  channelId: string;
+  name: string;
+  language: string;
+  languageLabel: string;
+  logo?: string;
+  streamEndpoint: string;
+}> {
+  const sport = String(ev?.sport || '').toLowerCase();
+  const league = String(ev?.league || '').toLowerCase();
+  const leagueSlug = String(ev?.leagueSlug || '').toLowerCase();
+  const home = String(ev?.homeTeam?.name || '').toLowerCase();
+  const away = String(ev?.awayTeam?.name || '').toLowerCase();
+  const teamsText = `${home} ${away}`;
+  const broadcastsText = Array.isArray(ev?.broadcasts) ? ev.broadcasts.join(' ').toLowerCase() : '';
+
+  const candidateIds: string[] = [];
+  const pushUnique = (...ids: string[]) => {
+    for (const id of ids) {
+      if (id && LIVE_CHANNEL_DIRECTORY[id] && !candidateIds.includes(id)) {
+        candidateIds.push(id);
+      }
+    }
+  };
+
+  // 1. NBA / Basketball (Official rights: ESPN, TNT Sports, NBA TV, beIN Sports EN/FR)
+  if (sport.includes('basketball') || league.includes('nba') || leagueSlug === 'nba') {
+    if (broadcastsText.includes('tnt')) {
+      pushUnique('tnt-sports-1', 'nba-tv', 'espn-hd', 'bein-sports-en-1', 'bein-sports-fr-1');
+    } else if (broadcastsText.includes('espn') || broadcastsText.includes('abc')) {
+      const espnPrimary = slotIndex % 2 === 0 ? 'espn-hd' : 'espn-2-hd';
+      pushUnique(espnPrimary, 'nba-tv', 'espn-hd', 'espn-2-hd', 'bein-sports-en-1', 'bein-sports-fr-1');
+    } else {
+      const nbaPool = ['nba-tv', 'espn-hd', 'espn-2-hd', 'tnt-sports-1', 'bein-sports-en-1', 'bein-sports-fr-1'];
+      pushUnique(nbaPool[slotIndex % nbaPool.length], ...nbaPool);
+    }
+  }
+  // 2. NFL / American Football (Official rights: NFL Network, Fox Sports, CBS, NBC, ESPN, Sky Sports Main Event)
+  else if (
+    sport === 'football' ||
+    sport === 'nfl' ||
+    sport === 'american-football' ||
+    league.includes('nfl') ||
+    leagueSlug === 'nfl'
+  ) {
+    if (broadcastsText.includes('nbc') || broadcastsText.includes('peacock')) {
+      pushUnique('nbc-sports-now', 'nfl-network', 'sky-sports-main-event', 'fox-sports-1', 'espn-hd');
+    } else if (broadcastsText.includes('espn') || broadcastsText.includes('abc')) {
+      pushUnique('espn-hd', 'espn-2-hd', 'nfl-network', 'sky-sports-main-event', 'fox-sports-1');
+    } else if (broadcastsText.includes('cbs') || broadcastsText.includes('paramount')) {
+      pushUnique('cbs-sports-golazo', 'nfl-network', 'fox-sports-1', 'sky-sports-main-event', 'espn-hd');
+    } else if (broadcastsText.includes('fox')) {
+      const foxPrimary = slotIndex % 2 === 0 ? 'fox-sports-1' : 'fox-sports-2';
+      pushUnique(foxPrimary, 'fox-sports-1', 'fox-sports-2', 'nfl-network', 'sky-sports-main-event', 'espn-hd');
+    } else {
+      // Prime Video / NFL Network / Thursday Night Football
+      pushUnique('nfl-network', 'fox-sports-1', 'sky-sports-main-event', 'cbs-sports-golazo', 'espn-hd');
+    }
+  }
+  // 3. UFC / MMA / Boxing (Official rights: ESPN, TNT Sports UK, RMC Sport FR, DAZN Combat)
+  else if (sport.includes('mma') || sport.includes('ufc') || sport.includes('boxing') || league.includes('ufc')) {
+    const combatPool = ['espn-hd', 'dazn-combat', 'tnt-sports-1', 'rmc-sport-1-fr', 'fox-sports-2'];
+    pushUnique(combatPool[slotIndex % combatPool.length], ...combatPool);
+  }
+  // 4. Formula 1 / Motorsport (Official rights: Sky Sports F1, ESPN 2, beIN Sports 8, Canal+)
+  else if (sport.includes('motor') || sport.includes('f1') || sport.includes('racing') || league.includes('formula')) {
+    pushUnique('sky-sports-f1', 'espn-2-hd', 'bein-sports-8-ar', 'canal-plus-foot-fr', 'red-bull-tv');
+  }
+  // 5. Tennis (ATP / WTA)
+  else if (sport.includes('tennis') || league.includes('atp') || league.includes('wta')) {
+    const tennisPool = ['tennis-channel', 'eurosport-1', 'eurosport-2', 'bein-sports-7-ar', 'sky-sports-main-event'];
+    pushUnique(tennisPool[slotIndex % tennisPool.length], ...tennisPool);
+  }
+  // 6. NHL / Ice Hockey
+  else if (sport.includes('hockey') || league.includes('nhl') || leagueSlug === 'nhl') {
+    const nhlPool = ['nhl-network', 'espn-hd', 'espn-2-hd', 'fox-sports-2', 'premier-sports-1'];
+    pushUnique(nhlPool[slotIndex % nhlPool.length], ...nhlPool);
+  }
+  // 7. MLB / Baseball
+  else if (sport.includes('baseball') || league.includes('mlb') || leagueSlug === 'mlb') {
+    const mlbPool = ['mlb-network', 'fox-sports-1', 'espn-hd', 'fox-sports-2', 'espn-2-hd'];
+    pushUnique(mlbPool[slotIndex % mlbPool.length], ...mlbPool);
+  }
+  // 8. Football / Soccer — STRICT COMPETITION-FIRST BROADCAST RIGHTS
+  else {
+    const isUefaCompetition =
+      leagueSlug.includes('uefa') ||
+      league.includes('uefa') ||
+      league.includes('champions league') ||
+      league.includes('europa league') ||
+      league.includes('conference league');
+
+    // 8A. UEFA Champions League, UEFA Europa League, UEFA Conference League
+    // Official Rights ONLY: beIN Sports 1-9 HD (AR), TNT Sports 1-4 (UK), beIN Sports EN 1-3, Canal+ / beIN FR, CBS Sports Golazo (US)
+    if (isUefaCompetition && !leagueSlug.includes('afc') && !league.includes('afc')) {
+      const arChannel = UEFA_ARABIC_POOL[slotIndex % UEFA_ARABIC_POOL.length];
+      const ukTntChannel = UEFA_UK_TNT_POOL[slotIndex % UEFA_UK_TNT_POOL.length];
+      const enBeinChannel = UEFA_EN_BEIN_POOL[slotIndex % UEFA_EN_BEIN_POOL.length];
+      const frChannel = UEFA_FR_POOL[slotIndex % UEFA_FR_POOL.length];
+
+      const hasBritishClub =
+        /\b(arsenal|aston villa|bournemouth|brentford|brighton|chelsea|crystal palace|everton|fulham|ipswich|leicester|liverpool|manchester city|manchester united|newcastle|nottingham forest|southampton|sunderland|tottenham|west ham|wolves|wolverhampton|celtic|rangers|heart of midlothian|hearts|aberdeen|hibernian)\b/i.test(
+          teamsText
+        );
+      const hasTurkishClub =
+        /\b(galatasaray|fenerbahce|fenerbahçe|besiktas|beşiktaş|trabzonspor|basaksehir|başakşehir|samsunspor)\b/i.test(
+          teamsText
+        );
+      const hasFrenchClub =
+        /\b(paris saint-germain|psg|marseille|lyon|monaco|lille|lens|stade rennais|rennes|nice|brest|strasbourg)\b/i.test(
+          teamsText
+        );
+      const hasRealMadrid = /\b(real madrid)\b/i.test(teamsText);
+
+      // Primary channel rotation stays strictly on official UEFA broadcasters
+      if (hasTurkishClub) {
+        const trCh = `bein-sports-${(slotIndex % 3) + 1}-tr`;
+        pushUnique(arChannel, ukTntChannel, trCh, enBeinChannel, 'cbs-sports-golazo', frChannel);
+      } else if (hasBritishClub) {
+        pushUnique(arChannel, ukTntChannel, enBeinChannel, 'cbs-sports-golazo', frChannel);
+      } else if (hasFrenchClub) {
+        pushUnique(arChannel, frChannel, ukTntChannel, enBeinChannel, 'cbs-sports-golazo');
+      } else if (hasRealMadrid) {
+        pushUnique('bein-sports-1-ar', 'tnt-sports-1', 'bein-sports-en-1', 'cbs-sports-golazo', 'real-madrid-tv');
+      } else {
+        pushUnique(arChannel, enBeinChannel, ukTntChannel, frChannel, 'cbs-sports-golazo');
+      }
+
+      pushUnique(...UEFA_OFFICIAL_PRIMARY_POOL);
+    }
+    // 8B. Saudi Pro League & AFC Champions League Elite
+    else if (
+      leagueSlug.includes('ksa') ||
+      league.includes('saudi') ||
+      leagueSlug.includes('afc') ||
+      league.includes('afc') ||
+      /\b(al hilal|al nassr|al ahli|al ittihad|al shabab|al fateh|al fayha|al hazem|al khaleej|al ettifaq|al taawoun|al qadsiah|al riyadh|al wehda|al raed|damac|al ain|al sadd|al gharafa|al rayyan|al wasl)\b/i.test(
+        teamsText
+      )
+    ) {
+      const primarySsc = MENA_SAUDI_MULTIPLEX_POOL[slotIndex % 5]; // ssc-sport-1..3, ssc-extra-1..2
+      pushUnique(
+        primarySsc,
+        'ssc-sport-1-ar',
+        'ssc-sport-2-ar',
+        'ssc-sport-3-ar',
+        'alkass-1-ar',
+        'fox-sports-2'
+      );
+    }
+    // 8C. English Premier League / FA Cup / EFL Cup
+    else if (
+      leagueSlug.includes('eng') ||
+      league.includes('premier league') ||
+      league.includes('fa cup') ||
+      league.includes('efl') ||
+      league.includes('carabao')
+    ) {
+      if (broadcastsText.includes('tnt')) {
+        pushUnique('tnt-sports-1', 'bein-sports-1-ar', 'sky-sports-premier-league', 'bein-sports-en-1', 'nbc-sports-now');
+      } else {
+        const eplPool = [
+          'bein-sports-1-ar',
+          'sky-sports-premier-league',
+          'sky-sports-main-event',
+          'tnt-sports-1',
+          'bein-sports-en-1',
+          'nbc-sports-now',
+          'bein-sports-2-ar',
+          'canal-plus-foot-fr',
+        ];
+        pushUnique(eplPool[slotIndex % 3], ...eplPool);
+      }
+    }
+    // 8D. Spanish LaLiga / Copa del Rey
+    else if (leagueSlug.includes('esp') || league.includes('laliga') || league.includes('copa del rey')) {
+      const hasRealMadrid = /\b(real madrid)\b/i.test(teamsText);
+      const laligaPool = [
+        'bein-sports-3-ar',
+        'espn-hd',
+        'premier-sports-1',
+        'bein-sports-xtra-es',
+        'bein-sports-en-1',
+        'bein-sports-fr-1',
+        ...(hasRealMadrid ? ['real-madrid-tv'] : []),
+      ];
+      pushUnique(laligaPool[slotIndex % 2], ...laligaPool);
+    }
+    // 8E. Italian Serie A / Coppa Italia (Official MENA rights: Abu Dhabi Sports 1/2 + CBS Golazo US + TNT Sports UK)
+    else if (leagueSlug.includes('ita') || league.includes('serie a') || league.includes('coppa italia')) {
+      const serieAPool = [
+        'ad-sports-1-ar',
+        'cbs-sports-golazo',
+        'tnt-sports-2',
+        'bein-sports-4-ar',
+        'bein-sports-fr-2',
+        'ad-sports-2-ar',
+      ];
+      pushUnique(serieAPool[slotIndex % 2], ...serieAPool);
+    }
+    // 8F. German Bundesliga / DFB-Pokal
+    else if (leagueSlug.includes('ger') || league.includes('bundesliga')) {
+      const bundesligaPool = [
+        'bein-sports-5-ar',
+        'sky-sports-football',
+        'espn-2-hd',
+        'bein-sports-fr-2',
+        'espn-hd',
+      ];
+      pushUnique(bundesligaPool[slotIndex % 2], ...bundesligaPool);
+    }
+    // 8G. French Ligue 1
+    else if (leagueSlug.includes('fra') || league.includes('ligue 1')) {
+      const ligue1Pool = [
+        'bein-sports-6-ar',
+        'bein-sports-fr-1',
+        'canal-plus-foot-fr',
+        'bein-sports-en-2',
+        'rmc-sport-1-fr',
+      ];
+      pushUnique(ligue1Pool[slotIndex % 2], ...ligue1Pool);
+    }
+    // 8H. Turkish Süper Lig
+    else if (leagueSlug.includes('tur') || league.includes('türkiye') || league.includes('super lig')) {
+      const trPool = [
+        'bein-sports-1-tr',
+        'bein-sports-2-tr',
+        'bein-sports-3-tr',
+        'bein-sports-4-tr',
+        'bein-sports-5-tr',
+      ];
+      pushUnique(trPool[slotIndex % trPool.length], ...trPool, 'bein-sports-5-ar');
+    }
+    // 8I. Moroccan Botola / CAF
+    else if (
+      leagueSlug.includes('mar') ||
+      /\b(wydad|raja|far rabat|berkane|morocco|fath union|hassania|maghreb)\b/i.test(teamsText)
+    ) {
+      pushUnique('arryadia-ar', 'bein-sports-5-ar', 'bein-sports-fr-1', 'bein-sports-en-1');
+    }
+    // 8J. CONMEBOL Libertadores / Sudamericana / Liga MX / MLS / Americas
+    else if (
+      leagueSlug.includes('conmebol') ||
+      league.includes('libertadores') ||
+      league.includes('sudamericana') ||
+      leagueSlug.includes('mex') ||
+      league.includes('liga mx') ||
+      leagueSlug.includes('usa') ||
+      league.includes('mls')
+    ) {
+      const americasPool = [
+        'bein-sports-en-1',
+        'bein-sports-xtra-es',
+        'bein-sports-3-ar',
+        'fox-sports-1',
+        'espn-hd',
+        'bein-sports-en-2',
+      ];
+      pushUnique(americasPool[slotIndex % 3], ...americasPool);
+    }
+    // 8K. Default International Football
+    else {
+      const defaultSoccerPool = [
+        'bein-sports-1-ar',
+        'bein-sports-2-ar',
+        'bein-sports-en-1',
+        'tnt-sports-1',
+        'cbs-sports-golazo',
+        'bein-sports-fr-1',
+      ];
+      pushUnique(defaultSoccerPool[slotIndex % defaultSoccerPool.length], ...defaultSoccerPool);
+    }
+  }
+
+  // Pick a unique primary channel ONLY from this event's legitimate candidate broadcasters
+  let primaryChannelId = candidateIds.find((id) => !usedPrimaryInSlot.has(id)) || candidateIds[0] || 'bein-sports-1-ar';
+  usedPrimaryInSlot.add(primaryChannelId);
+
+  // Build 5-channel lineup strictly from the event's legitimate candidate broadcasters
+  const finalChannelIds: string[] = [primaryChannelId];
+  for (const id of candidateIds) {
+    if (finalChannelIds.length >= 5) break;
+    if (!finalChannelIds.includes(id)) {
+      finalChannelIds.push(id);
+    }
+  }
+
+  return finalChannelIds.map((id) => buildRecommendedChannelItem(id));
+}
+
+function parseEspnEventToLiveSportEvent(
+  ev: any,
+  sportType: string,
+  defaultLeagueName: string,
+  leagueSlug: string,
+  leagueLogoUrl?: string
+): any[] {
+  if (!ev || !ev.id) return [];
+  const competitions = Array.isArray(ev.competitions) ? ev.competitions : [];
+  if (competitions.length === 0) return [];
+
+  // For UFC / MMA events that have multiple bouts, pick the main event (last competition) and co-main
+  if (sportType === 'mma' && competitions.length > 1) {
+    const mainBouts = competitions.slice(-3).reverse();
+    return mainBouts
+      .map((comp: any, idx: number) => {
+        const competitors = Array.isArray(comp?.competitors) ? comp.competitors : [];
+        const c1 = competitors[0];
+        const c2 = competitors[1];
+        const name1 = c1?.athlete?.displayName || c1?.athlete?.fullName || c1?.team?.displayName || 'Fighter 1';
+        const name2 = c2?.athlete?.displayName || c2?.athlete?.fullName || c2?.team?.displayName || 'Fighter 2';
+        if (name1 === 'Fighter 1' && name2 === 'Fighter 2') return null;
+
+        const rawState = String(comp?.status?.type?.state || ev?.status?.type?.state || 'pre').toLowerCase();
+        const status = rawState === 'in' ? 'LIVE' : rawState === 'post' ? 'FINISHED' : 'UPCOMING';
+        return {
+          id: `${ev.id}-bout-${comp.id || idx}`,
+          title: `${name1} vs ${name2}`,
+          shortTitle: ev.shortName || 'UFC',
+          sport: 'mma',
+          league: ev.name || defaultLeagueName || 'UFC / MMA',
+          leagueSlug: 'ufc',
+          leagueLogo: leagueLogoUrl || 'https://a.espncdn.com/i/leaguelogos/mma/500/ufc.png',
+          startTime: comp?.date || ev.date,
+          status,
+          statusDetail: comp?.status?.type?.shortDetail || ev?.status?.type?.shortDetail || 'Main Card',
+          homeTeam: {
+            name: name1,
+            shortName: c1?.athlete?.shortName || name1.slice(0, 3).toUpperCase(),
+            logo: c1?.athlete?.headshot?.href || c1?.athlete?.flag?.href,
+            score: c1?.score ?? '0',
+          },
+          awayTeam: {
+            name: name2,
+            shortName: c2?.athlete?.shortName || name2.slice(0, 3).toUpperCase(),
+            logo: c2?.athlete?.headshot?.href || c2?.athlete?.flag?.href,
+            score: c2?.score ?? '0',
+          },
+          broadcasts: ['ESPN+ PPV', 'TNT Sports', 'DAZN'],
+          recommendedChannels: [],
+        };
+      })
+      .filter(Boolean);
+  }
+
+  // For Formula 1 / Motorsport events
+  if (sportType === 'motorsport') {
+    const comp = competitions[0];
+    const rawState = String(comp?.status?.type?.state || ev?.status?.type?.state || 'pre').toLowerCase();
+    const status = rawState === 'in' ? 'LIVE' : rawState === 'post' ? 'FINISHED' : 'UPCOMING';
+    return [
+      {
+        id: String(ev.id),
+        title: ev.name || 'Formula 1 Grand Prix',
+        shortTitle: ev.shortName || 'F1 GP',
+        sport: 'motorsport',
+        league: defaultLeagueName || 'Formula 1',
+        leagueSlug: 'f1',
+        leagueLogo: leagueLogoUrl || 'https://a.espncdn.com/i/leaguelogos/racing/500/f1.png',
+        startTime: comp?.date || ev.date,
+        status,
+        statusDetail: comp?.status?.type?.shortDetail || ev?.status?.type?.shortDetail || 'Grand Prix',
+        homeTeam: {
+          name: ev.shortName || ev.name || 'Formula 1',
+          shortName: 'F1',
+          logo: 'https://a.espncdn.com/i/leaguelogos/racing/500/f1.png',
+          score: '',
+        },
+        awayTeam: {
+          name: 'Race Session',
+          shortName: 'GP',
+          logo: 'https://a.espncdn.com/i/leaguelogos/racing/500/f1.png',
+          score: '',
+        },
+        broadcasts: ['Sky Sports F1', 'ESPN'],
+        recommendedChannels: [],
+      },
+    ];
+  }
+
+  const comp = competitions[0];
+  const competitors = Array.isArray(comp?.competitors) ? comp.competitors : [];
+  if (competitors.length < 2) return [];
+
+  const homeComp = competitors.find((c: any) => c.homeAway === 'home') || competitors[0];
+  const awayComp = competitors.find((c: any) => c.homeAway === 'away') || competitors[1];
+
+  const homeName =
+    homeComp?.team?.displayName ||
+    homeComp?.team?.name ||
+    homeComp?.athlete?.displayName ||
+    'Home';
+  const awayName =
+    awayComp?.team?.displayName ||
+    awayComp?.team?.name ||
+    awayComp?.athlete?.displayName ||
+    'Away';
+
+  if (homeName === 'Home' && awayName === 'Away') return [];
+
+  const rawState = String(comp?.status?.type?.state || ev?.status?.type?.state || 'pre').toLowerCase();
+  let status = rawState === 'in' ? 'LIVE' : rawState === 'post' ? 'FINISHED' : 'UPCOMING';
+  let statusDetail = comp?.status?.type?.shortDetail || ev?.status?.type?.shortDetail || 'Scheduled';
+
+  // If a soccer match kickoff is currently in-window (started within last 110 mins) and still marked UPCOMING, promote to LIVE
+  const startMs = Date.parse(comp?.date || ev.date || '');
+  const nowMs = Date.now();
+  if (
+    status === 'UPCOMING' &&
+    !Number.isNaN(startMs) &&
+    nowMs >= startMs &&
+    nowMs - startMs <= 110 * 60 * 1000
+  ) {
+    status = 'LIVE';
+    const elapsedMins = Math.max(1, Math.min(90, Math.floor((nowMs - startMs) / 60000)));
+    statusDetail = elapsedMins >= 45 && elapsedMins <= 58 ? 'HT' : `${elapsedMins}'`;
+  }
+
+  const broadcasts: string[] = [];
+  if (Array.isArray(comp?.broadcasts)) {
+    comp.broadcasts.forEach((b: any) => {
+      if (Array.isArray(b?.names)) {
+        b.names.forEach((n: string) => {
+          if (n && !broadcasts.includes(n)) broadcasts.push(n);
+        });
+      }
+    });
+  }
+  if (Array.isArray(comp?.geoBroadcasts)) {
+    comp.geoBroadcasts.forEach((g: any) => {
+      const sName = g?.media?.shortName;
+      if (sName && !broadcasts.includes(sName)) broadcasts.push(sName);
+    });
+  }
+
+  const homeAbbr = homeComp?.team?.abbreviation || homeName.slice(0, 3).toUpperCase();
+  const awayAbbr = awayComp?.team?.abbreviation || awayName.slice(0, 3).toUpperCase();
+
+  return [
+    {
+      id: String(ev.id),
+      title: `${homeName} vs ${awayName}`,
+      shortTitle: `${homeAbbr} vs ${awayAbbr}`,
+      sport: sportType,
+      league: defaultLeagueName,
+      leagueSlug,
+      leagueLogo: leagueLogoUrl,
+      startTime: comp?.date || ev.date,
+      status,
+      statusDetail,
+      homeTeam: {
+        name: homeName,
+        shortName: homeAbbr,
+        logo: homeComp?.team?.logo || homeComp?.athlete?.flag?.href,
+        score: homeComp?.score ?? '0',
+      },
+      awayTeam: {
+        name: awayName,
+        shortName: awayAbbr,
+        logo: awayComp?.team?.logo || awayComp?.athlete?.flag?.href,
+        score: awayComp?.score ?? '0',
+      },
+      broadcasts,
+      recommendedChannels: [],
+    },
+  ];
+}
+
+// 1. GET ALL LIVE SPORTS EVENTS & MATCH SCHEDULE (REAL-TIME TODAY & LIVE AGGREGATION + COMPETITION-FIRST CHANNEL ROUTING)
+app.get(['/api/live/events', '/v1/live/events'], async (req: Request, res: Response) => {
+  try {
+    const sportFilterParam = req.query.sport ? String(req.query.sport).toLowerCase() : 'all';
+    const statusFilterParam = req.query.status ? String(req.query.status).toLowerCase() : 'all';
+
+    if (
+      sportFilterParam === 'all' &&
+      statusFilterParam === 'all' &&
+      cachedLiveEventsPayload &&
+      Date.now() - cachedLiveEventsPayload.timestamp < 12000
+    ) {
+      return res.json(cachedLiveEventsPayload.data);
+    }
+
+    const nowMs = Date.now();
+    const todayIso = new Date(nowMs).toISOString().slice(0, 10).replace(/-/g, '');
+    const tomorrowIso = new Date(nowMs + 86400000).toISOString().slice(0, 10).replace(/-/g, '');
+
+    const espnFeeds: Array<{ url: string; sport: string; league: string; slug: string }> = [
+      // Today's active football/soccer competitions
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'UEFA Champions League', slug: 'uefa.champions' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.europa/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'UEFA Europa League', slug: 'uefa.europa' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.europa.conf/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'UEFA Conference League', slug: 'uefa.europa.conf' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/ksa.1/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'Saudi Pro League', slug: 'ksa.1' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'English Premier League', slug: 'eng.1' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'Spanish LaLiga', slug: 'esp.1' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'Italian Serie A', slug: 'ita.1' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'German Bundesliga', slug: 'ger.1' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'French Ligue 1', slug: 'fra.1' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/afc.champions/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'AFC Champions League Elite', slug: 'afc.champions' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/conmebol.libertadores/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'CONMEBOL Libertadores', slug: 'conmebol.libertadores' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/mex.1/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'Liga MX', slug: 'mex.1' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'Major League Soccer', slug: 'usa.1' },
+      // Tomorrow's major European football fixtures (next 24h)
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?dates=${tomorrowIso}`, sport: 'soccer', league: 'English Premier League', slug: 'eng.1' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard?dates=${tomorrowIso}`, sport: 'soccer', league: 'Spanish LaLiga', slug: 'esp.1' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard?dates=${tomorrowIso}`, sport: 'soccer', league: 'Italian Serie A', slug: 'ita.1' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard?dates=${tomorrowIso}`, sport: 'soccer', league: 'German Bundesliga', slug: 'ger.1' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard?dates=${tomorrowIso}`, sport: 'soccer', league: 'French Ligue 1', slug: 'fra.1' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/ksa.1/scoreboard?dates=${tomorrowIso}`, sport: 'soccer', league: 'Saudi Pro League', slug: 'ksa.1' },
+      // Today's US & Global Sports (NBA, NFL, NHL, UFC, F1, Tennis)
+      { url: `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${todayIso}`, sport: 'basketball', league: 'NBA Basketball', slug: 'nba' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${todayIso}`, sport: 'football', league: 'NFL Football', slug: 'nfl' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard?dates=${todayIso}`, sport: 'hockey', league: 'NHL Hockey', slug: 'nhl' },
+      { url: 'https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard', sport: 'mma', league: 'UFC / MMA', slug: 'ufc' },
+      { url: 'https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard', sport: 'motorsport', league: 'Formula 1', slug: 'f1' },
+      { url: 'https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard', sport: 'tennis', league: 'ATP Tour Tennis', slug: 'atp' },
+    ];
+
+    const fetchJsonFast = async (url: string, timeoutMs = 4500): Promise<any> => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const r = await fetch(url, {
+          signal: controller.signal,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36',
+            Accept: 'application/json',
+          },
+        });
+        if (!r.ok) return null;
+        return await r.json();
+      } catch {
+        return null;
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+
+    const [cineproRaw, ...espnResults] = await Promise.all([
+      fetchJsonFast(`${getCineproUrl()}/v1/live/events`, 5500),
+      ...espnFeeds.map((f) => fetchJsonFast(f.url, 4200)),
+    ]);
+
+    const eventsMap = new Map<string, any>();
+
+    const isLiveState = (s?: string) => {
+      const u = String(s || '').toUpperCase();
+      return u === 'LIVE' || u === 'IN' || u === 'IN_PROGRESS' || u === 'HT' || u === '1H' || u === '2H';
+    };
+    const isFinishedState = (s?: string) => {
+      const u = String(s || '').toUpperCase();
+      return u === 'FINISHED' || u === 'POST' || u === 'FINAL' || u === 'FT';
+    };
+
+    // Helper to keep only relevant Today/Live/Next-30h events (plus UFC/F1 weekend headliners)
+    const shouldKeepEventInWindow = (ev: any): boolean => {
+      if (!ev) return false;
+      if (isLiveState(ev.status)) return true;
+      const startMs = Date.parse(ev.startTime || '');
+      if (Number.isNaN(startMs)) return true;
+
+      const diffHours = (startMs - nowMs) / (1000 * 60 * 60);
+      if (isFinishedState(ev.status)) {
+        // Keep only matches that finished TODAY (within the last 16 hours), never yesterday's stale results
+        return diffHours >= -16 && diffHours <= 2;
+      }
+      // For UPCOMING events: keep matches starting within the next 30 hours (or up to 54h for weekend UFC/F1 cards)
+      const isSpecialWeekendCard = ev.sport === 'mma' || ev.sport === 'motorsport';
+      const maxFutureHours = isSpecialWeekendCard ? 54 : 30;
+      return diffHours >= -2.5 && diffHours <= maxFutureHours;
+    };
+
+    // 1. Ingest rich multi-league ESPN live & today events first
+    espnResults.forEach((data, idx) => {
+      if (!data || !Array.isArray(data.events)) return;
+      const feedMeta = espnFeeds[idx];
+      const leagueObj = Array.isArray(data.leagues) ? data.leagues[0] : null;
+      const leagueLogo =
+        leagueObj?.logos?.[0]?.href ||
+        (feedMeta.sport === 'soccer'
+          ? 'https://a.espncdn.com/i/leaguelogos/soccer/500/2310.png'
+          : undefined);
+      const leagueName = feedMeta.league || leagueObj?.name || 'International';
+
+      // Limit NHL to top 4 games so hockey doesn't overwhelm football
+      const rawEventsList = feedMeta.slug === 'nhl' ? data.events.slice(0, 4) : data.events;
+
+      for (const rawEv of rawEventsList) {
+        const parsedList = parseEspnEventToLiveSportEvent(
+          rawEv,
+          feedMeta.sport,
+          leagueName,
+          feedMeta.slug,
+          leagueLogo
+        );
+        for (const item of parsedList) {
+          if (item && item.id && shouldKeepEventInWindow(item) && !eventsMap.has(String(item.id))) {
+            eventsMap.set(String(item.id), item);
+          }
+        }
+      }
+    });
+
+    // 2. Merge any additional today/live events from CinePro /v1/live/events (skipping placeholder "Home vs Away" entries and stale/distant games)
+    const cineproEvents = Array.isArray(cineproRaw?.events) ? cineproRaw.events : [];
+    for (const ev of cineproEvents) {
+      if (!ev || !ev.id) continue;
+      if (ev.homeTeam?.name === 'Home' && ev.awayTeam?.name === 'Away') continue;
+      const idStr = String(ev.id);
+      if (!eventsMap.has(idStr)) {
+        let status = ev.status || 'UPCOMING';
+        let statusDetail = ev.statusDetail || 'Scheduled';
+        const startMs = Date.parse(ev.startTime || '');
+        if (
+          status === 'UPCOMING' &&
+          !Number.isNaN(startMs) &&
+          nowMs >= startMs &&
+          nowMs - startMs <= 110 * 60 * 1000
+        ) {
+          status = 'LIVE';
+          const elapsedMins = Math.max(1, Math.min(90, Math.floor((nowMs - startMs) / 60000)));
+          statusDetail = elapsedMins >= 45 && elapsedMins <= 58 ? 'HT' : `${elapsedMins}'`;
+        } else if (
+          (status === 'LIVE' || status === 'UPCOMING') &&
+          !Number.isNaN(startMs) &&
+          nowMs - startMs > 135 * 60 * 1000
+        ) {
+          status = 'FINISHED';
+          statusDetail = 'FT';
+        }
+
+        const candidateEv = {
+          ...ev,
+          title:
+            ev.homeTeam?.name && ev.awayTeam?.name
+              ? `${ev.homeTeam.name} vs ${ev.awayTeam.name}`
+              : ev.title,
+          status,
+          statusDetail,
+        };
+        if (shouldKeepEventInWindow(candidateEv)) {
+          eventsMap.set(idStr, candidateEv);
+        }
+      }
+    }
+
+    // 3. Sort events: LIVE first, then UPCOMING by kickoff time ascending, then FINISHED by kickoff time descending
+    const allEvents = Array.from(eventsMap.values()).sort((a, b) => {
+      const aLive = isLiveState(a.status);
+      const bLive = isLiveState(b.status);
+      if (aLive !== bLive) return aLive ? -1 : 1;
+
+      const aFin = isFinishedState(a.status);
+      const bFin = isFinishedState(b.status);
+      if (aFin !== bFin) return aFin ? 1 : -1;
+
+      const tA = Date.parse(a.startTime || '') || 0;
+      const tB = Date.parse(b.startTime || '') || 0;
+      return aFin ? tB - tA : tA - tB;
+    });
+
+    // 4. Assign accurate per-match broadcast channels grouped by simultaneous kickoff time slot & broadcast pool
+    const slotCounters = new Map<string, number>();
+    const slotUsedPrimary = new Map<string, Set<string>>();
+
+    const normalizedEvents = allEvents.map((ev: any) => {
+      const lgSlug = String(ev.leagueSlug || ev.league || 'general').toLowerCase();
+      const broadcasterPoolGroup = lgSlug.includes('uefa')
+        ? 'uefa'
+        : lgSlug.includes('ksa') || lgSlug.includes('afc')
+          ? 'mena'
+          : lgSlug;
+      const timeSlotKey = isLiveState(ev.status)
+        ? 'LIVE_NOW'
+        : `${ev.status}_${String(ev.startTime || '').slice(0, 16)}`;
+      const fullSlotKey = `${broadcasterPoolGroup}__${timeSlotKey}`;
+
+      const idxInSlot = slotCounters.get(fullSlotKey) || 0;
+      slotCounters.set(fullSlotKey, idxInSlot + 1);
+
+      let usedSet = slotUsedPrimary.get(fullSlotKey);
+      if (!usedSet) {
+        usedSet = new Set<string>();
+        slotUsedPrimary.set(fullSlotKey, usedSet);
+      }
+
+      const recChannels = assignSmartChannelsForEvent(ev, idxInSlot, usedSet);
+      return {
+        ...ev,
+        recommendedChannels: recChannels,
+      };
+    });
+
+    const fullPayload = {
+      status: 'ok',
+      updatedAt: new Date().toISOString(),
+      count: normalizedEvents.length,
+      events: normalizedEvents,
+    };
+
+    if (normalizedEvents.length > 0) {
+      cachedLiveEventsPayload = { data: fullPayload, timestamp: Date.now() };
+    }
+
+    // Apply optional sport/status query filters if requested
+    let filtered = normalizedEvents;
+    if (sportFilterParam !== 'all') {
+      filtered = filtered.filter((e) => String(e.sport || '').toLowerCase().includes(sportFilterParam));
+    }
+    if (statusFilterParam !== 'all') {
+      filtered = filtered.filter((e) => String(e.status || '').toLowerCase() === statusFilterParam);
+    }
+
+    return res.json({
+      ...fullPayload,
+      count: filtered.length,
+      events: filtered,
+    });
+  } catch (err: any) {
+    console.warn('[Live Events Proxy] Error:', err?.message || err);
+    if (cachedLiveEventsPayload) return res.json(cachedLiveEventsPayload.data);
+    return res.json({ status: 'error', count: 0, events: [] });
+  }
+});
+
+// 2. GET ALL LIVE IPTV SPORTS CHANNELS (STRICTLY FROM CINEPRO API)
+app.get(['/api/live/channels', '/v1/live/channels'], async (req: Request, res: Response) => {
+  try {
+    const params = new URLSearchParams();
+    if (req.query.lang && String(req.query.lang) !== 'all') {
+      params.set('lang', String(req.query.lang));
+    }
+    if (req.query.category && String(req.query.category) !== 'all') {
+      params.set('category', String(req.query.category));
+    }
+    if (req.query.q && String(req.query.q).trim()) {
+      params.set('q', String(req.query.q).trim());
+    }
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    const isUnfiltered = !qs;
+
+    if (
+      isUnfiltered &&
+      cachedLiveChannelsPayload &&
+      Date.now() - cachedLiveChannelsPayload.timestamp < 30000
+    ) {
+      return res.json(cachedLiveChannelsPayload.data);
+    }
+
+    const targetUrl = `${getCineproUrl()}/v1/live/channels${qs}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 9000);
+    let upstream: globalThis.Response;
+    try {
+      upstream = await fetch(targetUrl, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36',
+          Accept: 'application/json',
+        },
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!upstream.ok) {
+      if (cachedLiveChannelsPayload) return res.json(cachedLiveChannelsPayload.data);
+      return res.status(upstream.status).json({ status: 'error', count: 0, channels: [] });
+    }
+
+    const rawData: any = await upstream.json();
+    const rawChannels = Array.isArray(rawData?.channels) ? rawData.channels : [];
+
+    const normalizedChannels = rawChannels.map((ch: any) => {
+      const cleanLang = toCleanEnglishLanguage(ch?.language, ch?.languageLabel);
+      const validStreams: any[] = [];
+
+      if (Array.isArray(ch?.streams)) {
+        ch.streams.forEach((st: any, idx: number) => {
+          const rawStreamUrl = String(st?.url || '').trim();
+          const underlyingUrl = extractRawUrlFromProxyLink(rawStreamUrl);
+          if (!underlyingUrl) return;
+
+          const proxiedUrl = rawStreamUrl.includes('/v1/live/proxy/')
+            ? rewriteCineproLiveProxyUrl(rawStreamUrl)
+            : buildLocalLiveProxyUrl(underlyingUrl, st?.headers || undefined, true);
+
+          validStreams.push({
+            ...st,
+            id: `${ch.id}-s${idx + 1}`,
+            languageLabel: cleanLang,
+            url: proxiedUrl,
+            rawUrl: underlyingUrl,
+          });
+        });
+      }
+
+      // Inject automatic high-availability sibling failover streams for channels whose primary edge stream is offline
+      const DEMBED_HEADERS = {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        Origin: 'https://dembed.st',
+        Referer: 'https://dembed.st/',
+      };
+      const CHANNEL_FAILOVER_RAW_URLS: Record<string, { url: string; label: string; headers?: Record<string, string> }[]> = {
+        'bein-sports-8-ar': [
+          {
+            url: 'https://edge.cowedd4855ws.sbs/premium97/index.m3u8',
+            label: 'beIN Sports HD Failover 1 (AR)',
+            headers: DEMBED_HEADERS,
+          },
+          {
+            url: 'https://edge.cowedd4855ws.sbs/premium99/index.m3u8',
+            label: 'beIN Sports HD Failover 2 (AR)',
+            headers: DEMBED_HEADERS,
+          },
+        ],
+        'ssc-extra-1-ar': [
+          {
+            url: 'https://edge.cowedd4855ws.sbs/premium620/index.m3u8',
+            label: 'SSC EXTRA HD Failover 1 (AR)',
+            headers: DEMBED_HEADERS,
+          },
+          {
+            url: 'https://edge.cowedd4855ws.sbs/premium616/index.m3u8',
+            label: 'SSC Sports HD Failover 2 (AR)',
+            headers: DEMBED_HEADERS,
+          },
+        ],
+      };
+
+      const failovers = CHANNEL_FAILOVER_RAW_URLS[ch?.id];
+      if (failovers && failovers.length > 0) {
+        const failoverStreams = failovers.map((fo, idx) => ({
+          id: `${ch.id}-fo${idx + 1}`,
+          label: fo.label,
+          quality: ch?.quality || '1080p',
+          language: ch?.language || 'ar',
+          languageLabel: cleanLang,
+          url: buildLocalLiveProxyUrl(fo.url, fo.headers, true),
+          rawUrl: fo.url,
+          headers: fo.headers,
+        }));
+        validStreams.unshift(...failoverStreams);
+      }
+
+      const cleanDefaultProxyUrl =
+        failovers && failovers.length > 0
+          ? validStreams[0]?.url || ''
+          : ch?.defaultProxyUrl
+            ? rewriteCineproLiveProxyUrl(String(ch.defaultProxyUrl))
+            : validStreams[0]?.url || '';
+
+      return {
+        ...ch,
+        logo: resolveChannelLogo(ch?.id, ch?.logo, ch?.name),
+        languageLabel: cleanLang,
+        defaultProxyUrl: cleanDefaultProxyUrl,
+        streams: validStreams,
+      };
+    });
+
+    const payload = {
+      status: 'ok',
+      count: normalizedChannels.length,
+      categories: rawData?.categories || [
+        'bein',
+        'mena',
+        'movies',
+        'entertainment',
+        'sky',
+        'europe',
+        'usa',
+        'espn',
+        'fox',
+        'motorsport',
+        'combat',
+      ],
+      languages: rawData?.languages || ['ar', 'en', 'fr', 'es', 'tr', 'de', 'pt'],
+      channels: normalizedChannels,
+    };
+
+    if (isUnfiltered && normalizedChannels.length > 0) {
+      cachedLiveChannelsPayload = { data: payload, timestamp: Date.now() };
+    }
+
+    return res.json(payload);
+  } catch (err: any) {
+    console.warn('[Live Channels Proxy] Error:', err?.message || err);
+    if (cachedLiveChannelsPayload) return res.json(cachedLiveChannelsPayload.data);
+    return res.json({ status: 'error', count: 0, channels: [] });
+  }
+});
+
+// 2B. GET STREAM MIRRORS FOR A SPECIFIC LIVE EVENT (RESOLVES EVENT RECOMMENDED CHANNELS IN PRIORITY ORDER)
+app.get(['/api/live/stream/event/:eventId', '/v1/live/stream/event/:eventId'], async (req: Request, res: Response) => {
+  const eventId = String(req.params.eventId || '').trim();
+  const preferredChannelId = req.query.channelId ? String(req.query.channelId).trim() : '';
+
+  const eventsList = Array.isArray(cachedLiveEventsPayload?.data?.events)
+    ? cachedLiveEventsPayload!.data.events
+    : [];
+  const matchedEvent = eventsList.find((e: any) => String(e?.id) === eventId);
+
+  const recChannels: Array<{ channelId: string; name?: string; language?: string; languageLabel?: string; logo?: string }> =
+    Array.isArray(matchedEvent?.recommendedChannels) && matchedEvent.recommendedChannels.length > 0
+      ? matchedEvent.recommendedChannels
+      : [{ channelId: preferredChannelId || 'bein-sports-1-ar' }];
+
+  const orderedChannelIds = [
+    ...(preferredChannelId ? [preferredChannelId] : []),
+    ...recChannels.map((r) => r.channelId).filter((id) => id && id !== preferredChannelId),
+  ];
+
+  const primaryChannelId = orderedChannelIds[0] || 'bein-sports-1-ar';
+  const cachedChannelsList = Array.isArray(cachedLiveChannelsPayload?.data?.channels)
+    ? cachedLiveChannelsPayload!.data.channels
+    : [];
+
+  const aggregatedSources: any[] = [];
+  for (const chId of orderedChannelIds) {
+    const chObj = cachedChannelsList.find((c: any) => c?.id === chId);
+    const meta = LIVE_CHANNEL_DIRECTORY[chId];
+    const chName = chObj?.name || meta?.name || chId;
+    const chLang = toCleanEnglishLanguage(chObj?.language || meta?.language || 'en', chObj?.languageLabel || meta?.languageLabel);
+    if (Array.isArray(chObj?.streams)) {
+      chObj.streams.forEach((st: any, idx: number) => {
+        if (!st?.url) return;
+        if (aggregatedSources.some((existing) => existing.url === st.url)) return;
+        aggregatedSources.push({
+          id: `${chId}-evsrc-${idx + 1}`,
+          channelId: chId,
+          server: `${chName.replace(/\s*\([^)]*\)/g, '').trim()} (${chLang})`,
+          url: st.url,
+          rawUrl: st.rawUrl,
+          quality: st.quality || chObj?.quality || '1080p',
+          type: 'hls',
+          language: chLang,
+          languageLabel: chLang,
+          verified: chId === primaryChannelId && idx === 0,
+        });
+      });
+    }
+  }
+
+  // If cache didn't have streams yet, fetch the primary channel's stream directly
+  if (aggregatedSources.length === 0) {
+    try {
+      const targetUrl = `${getCineproUrl()}/v1/live/stream/${encodeURIComponent(primaryChannelId)}`;
+      const upstream = await fetch(targetUrl, { headers: { Accept: 'application/json' } });
+      if (upstream.ok) {
+        const rawData: any = await upstream.json();
+        const rawSources = Array.isArray(rawData?.sources) ? rawData.sources : [];
+        rawSources.forEach((s: any, idx: number) => {
+          const proxiedUrl = s?.url ? rewriteCineproLiveProxyUrl(String(s.url)) : '';
+          if (proxiedUrl) {
+            aggregatedSources.push({
+              ...s,
+              id: `${primaryChannelId}-evsrc-${idx + 1}`,
+              channelId: primaryChannelId,
+              url: proxiedUrl,
+            });
+          }
+        });
+      }
+    } catch {}
+  }
+
+  const primaryMeta = LIVE_CHANNEL_DIRECTORY[primaryChannelId];
+  return res.json({
+    status: 'ok',
+    eventId,
+    event: matchedEvent || null,
+    channel: {
+      id: primaryChannelId,
+      name: primaryMeta?.name || primaryChannelId,
+      logo: resolveChannelLogo(primaryChannelId, primaryMeta?.logo, primaryMeta?.name),
+      language: primaryMeta?.language || 'en',
+      languageLabel: primaryMeta?.languageLabel || 'English',
+    },
+    count: aggregatedSources.length,
+    sources: aggregatedSources,
+  });
+});
+
+// 3. GET STREAM MIRRORS FOR A SPECIFIC CHANNEL (STRICTLY FROM CINEPRO API + CACHED CHANNEL STREAM FALLBACK)
+app.get(['/api/live/stream/:channelId', '/v1/live/stream/:channelId'], async (req: Request, res: Response) => {
+  const channelId = String(req.params.channelId || '').trim();
+  if (!channelId) {
+    return res.status(400).json({ status: 'error', message: 'Missing channelId' });
+  }
+
+  let rawData: any = null;
+  try {
+    const targetUrl = `${getCineproUrl()}/v1/live/stream/${encodeURIComponent(channelId)}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 9000);
+    try {
+      const upstream = await fetch(targetUrl, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36',
+          Accept: 'application/json',
+        },
+      });
+      if (upstream.ok) {
+        rawData = await upstream.json();
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (err: any) {
+    console.warn(`[Live Stream Channel Proxy] Upstream probe warning for ${channelId}:`, err?.message || err);
+  }
+
+  const cachedChannelsList = Array.isArray(cachedLiveChannelsPayload?.data?.channels)
+    ? cachedLiveChannelsPayload!.data.channels
+    : [];
+  const cachedChannelObj = cachedChannelsList.find((c: any) => c?.id === channelId);
+  const directoryMeta = LIVE_CHANNEL_DIRECTORY[channelId];
+
+  const rawSources = Array.isArray(rawData?.sources) ? rawData.sources : [];
+  const inferredLangCode =
+    directoryMeta?.language ||
+    (channelId.endsWith('-ar')
+      ? 'ar'
+      : channelId.endsWith('-fr')
+        ? 'fr'
+        : channelId.endsWith('-es')
+          ? 'es'
+          : channelId.endsWith('-tr')
+            ? 'tr'
+            : 'en');
+  const cleanChannelLang = toCleanEnglishLanguage(
+    rawData?.channel?.languageCode || rawData?.channel?.language || cachedChannelObj?.language || inferredLangCode,
+    rawData?.channel?.languageLabel || rawData?.channel?.language || cachedChannelObj?.languageLabel || directoryMeta?.languageLabel
+  );
+  const channelName =
+    rawData?.channel?.name ||
+    cachedChannelObj?.name ||
+    directoryMeta?.name ||
+    channelId.replace(/-/g, ' ').toUpperCase();
+
+  const cineproSources: any[] = [];
+
+  // Prepend verified high-availability sibling failover streams for channels whose primary upstream node is down
+  const DEMBED_STREAM_HEADERS = {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+    Origin: 'https://dembed.st',
+    Referer: 'https://dembed.st/',
+  };
+  const STREAM_FAILOVER_MAP: Record<string, { url: string; server: string; headers?: Record<string, string> }[]> = {
+    'bein-sports-8-ar': [
+      {
+        url: 'https://edge.cowedd4855ws.sbs/premium97/index.m3u8',
+        server: 'beIN Sports 8 HD Primary Failover (AR)',
+        headers: DEMBED_STREAM_HEADERS,
+      },
+      {
+        url: 'https://edge.cowedd4855ws.sbs/premium99/index.m3u8',
+        server: 'beIN Sports 8 HD Backup Mirror (AR)',
+        headers: DEMBED_STREAM_HEADERS,
+      },
+    ],
+    'ssc-extra-1-ar': [
+      {
+        url: 'https://edge.cowedd4855ws.sbs/premium620/index.m3u8',
+        server: 'SSC EXTRA 1 HD Primary Failover (AR)',
+        headers: DEMBED_STREAM_HEADERS,
+      },
+      {
+        url: 'https://edge.cowedd4855ws.sbs/premium616/index.m3u8',
+        server: 'SSC Sports HD Backup Mirror (AR)',
+        headers: DEMBED_STREAM_HEADERS,
+      },
+    ],
+  };
+
+  const failoverList = STREAM_FAILOVER_MAP[channelId];
+  if (failoverList && failoverList.length > 0) {
+    failoverList.forEach((fo, idx) => {
+      cineproSources.push({
+        id: `${channelId}-failover-${idx + 1}`,
+        server: fo.server,
+        url: buildLocalLiveProxyUrl(fo.url, fo.headers, true),
+        rawUrl: fo.url,
+        quality: '1080p',
+        type: 'hls',
+        language: cleanChannelLang,
+        languageLabel: cleanChannelLang,
+        verified: true,
+      });
+    });
+  }
+
+  rawSources.forEach((s: any, idx: number) => {
+    const rawUrl = String(s?.rawUrl || extractRawUrlFromProxyLink(String(s?.url || ''))).trim();
+    if (!rawUrl && !s?.url) return;
+
+    const proxiedUrl = s?.url
+      ? rewriteCineproLiveProxyUrl(String(s.url))
+      : buildLocalLiveProxyUrl(rawUrl, undefined, true);
+
+    cineproSources.push({
+      ...s,
+      id: s?.id || `${channelId}-src-${idx + 1}`,
+      url: proxiedUrl,
+      rawUrl,
+      language: cleanChannelLang,
+      languageLabel: cleanChannelLang,
+      verified: failoverList ? false : Boolean(s?.verified),
+    });
+  });
+
+  // Also include any streams defined on rawData.channel.streams or cachedChannelObj.streams if not already in sources
+  const extraChannelStreams = [
+    ...(Array.isArray(rawData?.channel?.streams) ? rawData.channel.streams : []),
+    ...(Array.isArray(cachedChannelObj?.streams) ? cachedChannelObj.streams : []),
+  ];
+  extraChannelStreams.forEach((st: any, idx: number) => {
+    const rawStreamUrl = String(st?.url || '').trim();
+    const underlyingUrl = st?.rawUrl || extractRawUrlFromProxyLink(rawStreamUrl);
+    if (!underlyingUrl) return;
+    if (cineproSources.some((cs) => cs.rawUrl === underlyingUrl || cs.url === rawStreamUrl)) return;
+
+    const proxiedUrl =
+      rawStreamUrl.startsWith('/api/live/proxy/') || rawStreamUrl.includes('/v1/live/proxy/')
+        ? rewriteCineproLiveProxyUrl(rawStreamUrl)
+        : buildLocalLiveProxyUrl(underlyingUrl, st?.headers || undefined, true);
+
+    cineproSources.push({
+      id: `${channelId}-chstream-${idx + 1}`,
+      server: st?.label || `${channelName} Mirror ${idx + 1}`,
+      url: proxiedUrl,
+      rawUrl: underlyingUrl,
+      quality: st?.quality || rawData?.channel?.quality || cachedChannelObj?.quality || '1080p',
+      type: 'hls',
+      language: cleanChannelLang,
+      languageLabel: cleanChannelLang,
+      verified: cineproSources.length === 0,
+    });
+  });
+
+  // Keep verified sources first while preserving all mirrors in order
+  cineproSources.sort((a, b) => Number(Boolean(b.verified)) - Number(Boolean(a.verified)));
+
+  return res.json({
+    status: rawData?.status || 'ok',
+    channel: rawData?.channel
+      ? {
+          ...rawData.channel,
+          logo: resolveChannelLogo(channelId, rawData.channel.logo, channelName),
+          language: cleanChannelLang,
+          languageLabel: cleanChannelLang,
+        }
+      : {
+          id: channelId,
+          name: channelName,
+          logo: resolveChannelLogo(channelId, cachedChannelObj?.logo, channelName),
+          language: cleanChannelLang,
+          languageLabel: cleanChannelLang,
+        },
+    count: cineproSources.length,
+    sources: cineproSources,
+  });
+});
+
+// 4. REAL-TIME PROGRESSIVE SSE STREAM FOR A CHANNEL
+app.get(['/api/live/stream/:channelId/sse', '/v1/live/stream/:channelId/sse'], async (req: Request, res: Response) => {
+  const channelId = String(req.params.channelId || '').trim();
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  const controller = new AbortController();
+  req.on('close', () => controller.abort());
+
+  try {
+    const targetUrl = `${getCineproUrl()}/v1/live/stream/${encodeURIComponent(channelId)}/sse`;
+    const upstream = await fetch(targetUrl, {
+      signal: controller.signal,
+      headers: { Accept: 'text/event-stream' },
+    });
+
+    if (!upstream.ok || !upstream.body) {
+      res.write(`event: done\ndata: {"count":0}\n\n`);
+      return res.end();
+    }
+
+    const reader = upstream.body.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      let chunk = decoder.decode(value, { stream: true });
+      chunk = chunk.replace(/https?:\/\/[^/\s"']+\/v1\/live\/proxy\//gi, '/api/live/proxy/');
+      res.write(chunk);
+    }
+    return res.end();
+  } catch {
+    if (!res.writableEnded) {
+      res.write(`event: done\ndata: {"count":0}\n\n`);
+      res.end();
+    }
+  }
+});
+
+// 5. FULL M3U8 IPTV PLAYLIST GENERATOR
+app.get(['/api/live/playlist.m3u8', '/v1/live/playlist.m3u8'], async (req: Request, res: Response) => {
+  try {
+    const params = new URLSearchParams();
+    params.set('proxy', 'true');
+    if (req.query.lang) params.set('lang', String(req.query.lang));
+    if (req.query.category) params.set('category', String(req.query.category));
+
+    const targetUrl = `${getCineproUrl()}/v1/live/playlist.m3u8?${params.toString()}`;
+    const upstream = await fetch(targetUrl);
+    if (!upstream.ok) {
+      return res.status(upstream.status).send('#EXTM3U\n');
+    }
+    let text = await upstream.text();
+    const hostOrigin = `${req.protocol}://${req.get('host')}`;
+    text = text.replace(/https?:\/\/[^/\s"']+\/v1\/live\/proxy\//gi, `${hostOrigin}/api/live/proxy/`);
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+    res.setHeader('Content-Disposition', 'inline; filename="notflix-live-iptv.m3u8"');
+    return res.send(text);
+  } catch (err) {
+    return res.status(502).send('#EXTM3U\n');
+  }
+});
+
+// 6. BUILT-IN CORS-FREE HLS MANIFEST & SEGMENT PROXY RELAY (CINEPRO-FIRST FOR PNG/TIKTIKPX UNWRAPPING)
+app.all(['/api/live/proxy/:endpoint', '/v1/live/proxy/:endpoint'], async (req: Request, res: Response) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Headers', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
+  try {
+    const endpoint = String(req.params.endpoint || 'manifest.m3u8');
+    const queryString = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+
+    let directUrl = '';
+    let customHeaders: Record<string, string> = {};
+    const dataParam = typeof req.query.data === 'string' ? req.query.data : '';
+    const urlParam = typeof req.query.url === 'string' ? req.query.url : '';
+
+    if (dataParam) {
+      try {
+        const parsed = JSON.parse(dataParam);
+        if (parsed && typeof parsed.url === 'string') {
+          directUrl = parsed.url.trim();
+        }
+        if (parsed && parsed.headers && typeof parsed.headers === 'object') {
+          customHeaders = parsed.headers;
+        }
+      } catch {
+        // Fallback if data isn't plain JSON
+      }
+    } else if (urlParam) {
+      directUrl = urlParam.trim();
+    }
+
+    const cineproProxyHeaders: Record<string, string> = {
+      Accept: '*/*',
+    };
+    if (req.headers.range) {
+      cineproProxyHeaders['Range'] = req.headers.range as string;
+    }
+
+    let upstream: globalThis.Response | null = null;
+    let fetchedDirectly = false;
+
+    // Fast-path direct fetch for public CDNs that block datacenter scraper IPs (Rotana HibridCDN, Amagi, RMTV Akamai)
+    const preferDirectFetch =
+      Boolean(directUrl) &&
+      /(hibridcdn\.net|amagi\.tv|rmtv\.akamaized\.net|turner\.com|cbsi\.live\.ott\.irdeto\.com)/i.test(directUrl);
+
+    if (!preferDirectFetch) {
+      // 1. Fetch from CinePro's /v1/live/proxy/:endpoint FIRST so CinePro's
+      //    built-in PNG/TIKTIKPX/gzip segment unwrapper and IP-bound session headers are used.
+      const cineproProxyUrl = `${getCineproUrl()}/v1/live/proxy/${endpoint}${queryString}`;
+      const cpController = new AbortController();
+      const cpTimeout = setTimeout(() => cpController.abort(), 14000);
+      try {
+        const resp = await fetch(cineproProxyUrl, {
+          headers: cineproProxyHeaders,
+          signal: cpController.signal,
+          redirect: 'follow',
+        });
+        clearTimeout(cpTimeout);
+        if (resp.ok || resp.status === 206) {
+          upstream = resp;
+        }
+      } catch {
+        clearTimeout(cpTimeout);
+      }
+    }
+
+    // 2. Fall back to direct fetch (or run first for preferDirectFetch CDNs)
+    if (!upstream && directUrl && /^https?:\/\//i.test(directUrl)) {
+      const requestHeaders: Record<string, string> = {
+        'User-Agent':
+          customHeaders['User-Agent'] ||
+          customHeaders['user-agent'] ||
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        Accept: '*/*',
+      };
+      if (customHeaders['Referer'] || customHeaders['referer']) {
+        requestHeaders['Referer'] = customHeaders['Referer'] || customHeaders['referer'];
+      }
+      if (customHeaders['Origin'] || customHeaders['origin']) {
+        requestHeaders['Origin'] = customHeaders['Origin'] || customHeaders['origin'];
+      }
+      if (req.headers.range) {
+        requestHeaders['Range'] = req.headers.range as string;
+      }
+
+      const directController = new AbortController();
+      const directTimeout = setTimeout(() => directController.abort(), 10000);
+      try {
+        const resp = await fetch(directUrl, {
+          headers: requestHeaders,
+          signal: directController.signal,
+          redirect: 'follow',
+        });
+        clearTimeout(directTimeout);
+        if (resp.ok || resp.status === 206) {
+          upstream = resp;
+          fetchedDirectly = true;
+        }
+      } catch {
+        clearTimeout(directTimeout);
+      }
+    }
+
+    if (!upstream || (!upstream.ok && upstream.status !== 206)) {
+      return res.status(upstream?.status || 502).send(`Upstream returned ${upstream?.status || 502}`);
+    }
+
+    const contentType = (upstream.headers.get('content-type') || '').toLowerCase();
+    const effectiveUrl = fetchedDirectly ? upstream.url || directUrl || '' : directUrl || '';
+    const looksLikeM3u8 =
+      endpoint.endsWith('.m3u8') ||
+      contentType.includes('mpegurl') ||
+      contentType.includes('x-mpegurl');
+
+    // Fast-path: stream binary .ts/.m4s/.aac segments directly ONLY when already unwrapped by CinePro
+    if (!looksLikeM3u8 && !fetchedDirectly && !contentType.includes('image/') && upstream.body) {
+      res.setHeader('Content-Type', 'video/mp2t');
+      if (upstream.headers.get('content-length')) {
+        res.setHeader('Content-Length', upstream.headers.get('content-length')!);
+      }
+      if (upstream.headers.get('content-range')) {
+        res.setHeader('Content-Range', upstream.headers.get('content-range')!);
+      }
+      res.setHeader('Cache-Control', 'public, max-age=10');
+      res.status(upstream.status);
+
+      const nodeStream = Readable.fromWeb(upstream.body as any);
+      req.on('close', () => {
+        nodeStream.destroy();
+      });
+      return nodeStream.pipe(res);
+    }
+
+    const arrayBuffer = await upstream.arrayBuffer();
+    let buffer = Buffer.from(arrayBuffer);
+    const headerPrefix = buffer.subarray(0, 16).toString('utf8').trimStart();
+    const isM3u8Content = headerPrefix.startsWith('#EXTM3U') || headerPrefix.startsWith('#EXT');
+
+    if (isM3u8Content && buffer.length > 0) {
+      let text = buffer.toString('utf8');
+
+      // First rewrite any CinePro proxy URLs to our local /api/live/proxy/ endpoint
+      text = text.replace(/https?:\/\/[^/\s"']+\/v1\/live\/proxy\//gi, '/api/live/proxy/');
+      text = text.replace(/\/v1\/live\/proxy\//gi, '/api/live/proxy/');
+      text = text.replace(/([^\r\n"'])(\/api\/live\/proxy\/)/g, '$1\n$2');
+
+      // Also rewrite any remaining unproxied relative/absolute URLs inside the manifest
+      if (effectiveUrl) {
+        const lines = text.split(/\r?\n/);
+        let expectVariantStream = false;
+
+        const rewrittenLines = lines.map((line) => {
+          const trimmed = line.trim();
+          if (!trimmed) return line;
+
+          if (trimmed.startsWith('#')) {
+            if (trimmed.startsWith('#EXT-X-STREAM-INF')) {
+              expectVariantStream = true;
+            }
+            if (trimmed.includes('URI="')) {
+              const isPlaylistUri =
+                trimmed.startsWith('#EXT-X-MEDIA') || trimmed.startsWith('#EXT-X-I-FRAME-STREAM-INF');
+              return line.replace(/URI="([^"]+)"/g, (_match, rawUri) => {
+                if (rawUri.startsWith('/api/live/proxy/')) {
+                  return `URI="${rawUri}"`;
+                }
+                try {
+                  const resolved = new URL(rawUri, effectiveUrl).toString();
+                  const isChildM3u8 = isPlaylistUri || /\.m3u8(\?|$)/i.test(resolved);
+                  return `URI="${buildLocalLiveProxyUrl(resolved, customHeaders, isChildM3u8)}"`;
+                } catch {
+                  return _match;
+                }
+              });
+            }
+            return line;
+          }
+
+          const isVariant = expectVariantStream;
+          expectVariantStream = false;
+
+          if (trimmed.startsWith('/api/live/proxy/')) {
+            return trimmed;
+          }
+
+          try {
+            const resolved = new URL(trimmed, effectiveUrl).toString();
+            const isChildM3u8 =
+              isVariant ||
+              /\.m3u8(\?|$)/i.test(resolved) ||
+              /\/(playlist|chunklist|master|index|manifest|mono)[^/]*\.m3u8/i.test(resolved);
+            return buildLocalLiveProxyUrl(resolved, customHeaders, isChildM3u8);
+          } catch {
+            return line;
+          }
+        });
+
+        text = rewrittenLines.join('\n');
+      }
+
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      return res.send(text);
+    }
+
+    // Strip any prepended PNG/GIF/ID3 wrapper before the first valid 188-byte MPEG-TS 0x47 sync sequence
+    if (buffer.length > 376 && buffer[0] !== 0x47) {
+      const maxScan = Math.min(buffer.length - 376, 8192);
+      for (let i = 1; i < maxScan; i++) {
+        if (buffer[i] === 0x47 && buffer[i + 188] === 0x47 && buffer[i + 376] === 0x47) {
+          buffer = buffer.subarray(i);
+          break;
+        }
+      }
+    }
+
+    if (buffer.length > 0 && buffer[0] === 0x47) {
+      res.setHeader('Content-Type', 'video/mp2t');
+    } else if (contentType && !contentType.includes('image/')) {
+      res.setHeader('Content-Type', contentType);
+    } else {
+      res.setHeader('Content-Type', 'video/mp2t');
+    }
+
+    if (upstream.headers.get('content-range')) {
+      res.setHeader('Content-Range', upstream.headers.get('content-range')!);
+    }
+    res.setHeader('Content-Length', buffer.length.toString());
+    res.status(upstream.status);
+    return res.end(buffer);
+  } catch (err: any) {
+    if (!res.headersSent) {
+      res.status(502).send('Live proxy relay failed');
+    }
+  }
 });
 
 // ==========================================

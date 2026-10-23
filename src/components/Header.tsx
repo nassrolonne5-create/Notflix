@@ -145,12 +145,12 @@ export const Header: React.FC = () => {
       )}
 
       {/* Right Controls: SafeFilter & Settings */}
-      <div className="flex items-center gap-2.5 shrink-0">
+      <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
         <div
           title="Safe Filter Shield Locked On"
-          className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[10px] px-2.5 py-1 rounded-full font-extrabold flex items-center gap-1.5 uppercase tracking-wider select-none"
+          className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[10px] px-2.5 py-1.5 sm:py-1 rounded-full font-extrabold flex items-center gap-1.5 uppercase tracking-wider select-none"
         >
-          <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+          <svg className="w-3 h-3 sm:w-2.5 sm:h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
             <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
             <path d="M7 11V7a5 5 0 0 1 10 0v4" />
           </svg>
@@ -161,7 +161,7 @@ export const Header: React.FC = () => {
           onClick={openSettings}
           title="Notflix Settings"
           aria-label="Settings"
-          className="w-8 h-8 md:w-9 md:h-9 rounded-full bg-gradient-to-tr from-blue-600 via-indigo-600 to-purple-600 p-[1.5px] cursor-pointer hover:scale-105 active:scale-95 transition-all shadow-lg shadow-blue-900/30 flex items-center justify-center"
+          className="w-8 h-8 md:w-9 md:h-9 rounded-full bg-gradient-to-tr from-blue-600 via-indigo-600 to-purple-600 p-[1.5px] cursor-pointer hover:scale-105 active:scale-95 transition-all shadow-lg shadow-blue-900/30 flex items-center justify-center shrink-0"
         >
           <div className="w-full h-full rounded-full bg-[#131a2a]/40 backdrop-blur-xs flex items-center justify-center text-white">
             <SlidersHorizontal className="w-4 h-4" />

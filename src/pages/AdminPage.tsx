@@ -33,6 +33,7 @@ import {
   Zap,
   Sparkles,
   BarChart3,
+  Trophy,
 } from 'lucide-react';
 import { smartAdController, SmartAdMetrics } from '../services/smartAdController';
 
@@ -226,10 +227,10 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
   const [loginLoading, setLoginLoading] = useState<boolean>(false);
   const [loginError, setLoginError] = useState<string | null>(null);
 
-  // Admin Studio Page Switcher ('analytics' = pure Analytics Page, 'scrapers' = pure Edit Scraper Page)
-  const [adminView, setAdminView] = useState<'analytics' | 'scrapers'>('analytics');
+  // Admin Studio Page Switcher ('analytics' = Analytics Page, 'live_arena' = Live Arena Command Center, 'scrapers' = Edit Scraper Page)
+  const [adminView, setAdminView] = useState<'analytics' | 'live_arena' | 'scrapers'>('analytics');
   const [dateRange, setDateRange] = useState<'today' | '7d' | '30d' | 'all'>('7d');
-  const [mediaFilter, setMediaFilter] = useState<'all' | 'movie' | 'tv'>('all');
+  const [mediaFilter, setMediaFilter] = useState<'all' | 'movie' | 'tv' | 'live'>('all');
   const [analytics, setAnalytics] = useState<AnalyticsResponse | null>(null);
   const [loadingData, setLoadingData] = useState<boolean>(false);
   const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
@@ -402,22 +403,194 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     setIsAuthenticated(false);
   };
 
-  // Automatic Persistent Browser Vault (survives container rebuilds/updates even without Docker volumes)
+  // Automatic Persistent Browser Vault (IndexedDB + localStorage Dual Vault for Analytics AND Blocked IPs)
   const ADMIN_VAULT_KEY = 'notflix_admin_analytics_vault_v1';
+  const ADMIN_BANS_VAULT_KEY = 'notflix_admin_bans_vault_v1';
+  const IDB_DB_NAME = 'NotflixAdminVaultDB';
+  const IDB_STORE_NAME = 'snapshots';
+
   const isVaultSyncingRef = React.useRef(false);
   const lastVaultSyncTimeRef = React.useRef<number>(0);
   const isDeploymentInProgressRef = React.useRef<boolean>(false);
   const knownServerVersionRef = React.useRef<string | null>(null);
 
-  const getLocalVaultCount = (): number => {
+  const openVaultIdb = (): Promise<IDBDatabase | null> => {
+    if (typeof window === 'undefined' || !window.indexedDB) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      try {
+        const req = window.indexedDB.open(IDB_DB_NAME, 1);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains(IDB_STORE_NAME)) {
+            db.createObjectStore(IDB_STORE_NAME);
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+      } catch {
+        resolve(null);
+      }
+    });
+  };
+
+  const readVaultIdbKey = async <T = any>(key: string): Promise<T | null> => {
+    const db = await openVaultIdb();
+    if (!db) return null;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(IDB_STORE_NAME, 'readonly');
+        const store = tx.objectStore(IDB_STORE_NAME);
+        const req = store.get(key);
+        req.onsuccess = () => resolve((req.result as T) ?? null);
+        req.onerror = () => resolve(null);
+      } catch {
+        resolve(null);
+      }
+    });
+  };
+
+  const writeVaultIdbKey = async (key: string, value: any): Promise<void> => {
+    const db = await openVaultIdb();
+    if (!db) return;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(IDB_STORE_NAME, 'readwrite');
+        const store = tx.objectStore(IDB_STORE_NAME);
+        store.put(value, key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      } catch {
+        resolve();
+      }
+    });
+  };
+
+  const readLocalBansVault = (): {
+    bans: any[];
+    unblockedTombstones: Record<string, number>;
+    lastClearedAllBansAt: number;
+    securityMetrics?: any;
+  } => {
+    try {
+      const raw = localStorage.getItem(ADMIN_BANS_VAULT_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          return {
+            bans: Array.isArray(parsed.bans) ? parsed.bans : [],
+            unblockedTombstones:
+              parsed.unblockedTombstones && typeof parsed.unblockedTombstones === 'object'
+                ? parsed.unblockedTombstones
+                : {},
+            lastClearedAllBansAt: Number(parsed.lastClearedAllBansAt) || 0,
+            securityMetrics: parsed.securityMetrics || undefined,
+          };
+        }
+      }
+    } catch {}
+    return { bans: [], unblockedTombstones: {}, lastClearedAllBansAt: 0 };
+  };
+
+  const saveLocalBansVault = useCallback(
+    (payload: {
+      bans?: any[];
+      unblockedTombstones?: Record<string, number>;
+      lastClearedAllBansAt?: number;
+      securityMetrics?: any;
+    }) => {
+      try {
+        const current = readLocalBansVault();
+        const nextLastCleared = Math.max(
+          current.lastClearedAllBansAt || 0,
+          Number(payload.lastClearedAllBansAt) || 0
+        );
+        const nextTombstones: Record<string, number> = {
+          ...(current.unblockedTombstones || {}),
+          ...(payload.unblockedTombstones || {}),
+        };
+
+        const banMap = new Map<string, any>();
+        for (const b of [...(current.bans || []), ...(payload.bans || [])]) {
+          if (!b || !b.ip) continue;
+          const cleanIp = String(b.ip).replace(/^::ffff:/i, '').trim();
+          const lastAttempt = Number(b.lastAttemptAt || b.bannedAt) || Date.now();
+          const tombTs = Number(nextTombstones[cleanIp]) || 0;
+          if (lastAttempt <= nextLastCleared || lastAttempt <= tombTs) continue;
+          const prev = banMap.get(cleanIp);
+          if (!prev) {
+            banMap.set(cleanIp, { ...b, ip: cleanIp });
+          } else {
+            banMap.set(cleanIp, {
+              ...prev,
+              ...b,
+              ip: cleanIp,
+              blockedAttempts: Math.max(Number(prev.blockedAttempts) || 1, Number(b.blockedAttempts) || 1),
+              lastAttemptAt: Math.max(Number(prev.lastAttemptAt) || 0, lastAttempt),
+            });
+          }
+        }
+
+        const mergedBans = Array.from(banMap.values()).sort(
+          (a, b) => (b.lastAttemptAt || 0) - (a.lastAttemptAt || 0)
+        );
+
+        const prevMetrics = current.securityMetrics || {};
+        const incMetrics = payload.securityMetrics || {};
+        const mergedMetrics = {
+          totalBlockedScrapers: Math.max(
+            Number(prevMetrics.totalBlockedScrapers) || 0,
+            Number(incMetrics.totalBlockedScrapers) || 0,
+            mergedBans.length
+          ),
+          totalInterceptionsBlocked: Math.max(
+            Number(prevMetrics.totalInterceptionsBlocked) || 0,
+            Number(incMetrics.totalInterceptionsBlocked) || 0
+          ),
+          totalRateLimited: Math.max(
+            Number(prevMetrics.totalRateLimited) || 0,
+            Number(incMetrics.totalRateLimited) || 0
+          ),
+          totalHoneypotTrapped: Math.max(
+            Number(prevMetrics.totalHoneypotTrapped) || 0,
+            Number(incMetrics.totalHoneypotTrapped) || 0
+          ),
+          recentSecurityEvents: Array.isArray(incMetrics.recentSecurityEvents || incMetrics.recentEvents)
+            ? (incMetrics.recentSecurityEvents || incMetrics.recentEvents).slice(0, 60)
+            : Array.isArray(prevMetrics.recentSecurityEvents)
+            ? prevMetrics.recentSecurityEvents
+            : [],
+        };
+
+        const vaultData = {
+          bans: mergedBans,
+          unblockedTombstones: nextTombstones,
+          lastClearedAllBansAt: nextLastCleared,
+          securityMetrics: mergedMetrics,
+          updatedAt: Date.now(),
+        };
+
+        localStorage.setItem(ADMIN_BANS_VAULT_KEY, JSON.stringify(vaultData));
+        writeVaultIdbKey(ADMIN_BANS_VAULT_KEY, vaultData).catch(() => {});
+      } catch {}
+    },
+    []
+  );
+
+  const getLocalVaultCounts = (): { eventsCount: number; bansCount: number } => {
+    let eventsCount = 0;
     try {
       const rawVault = localStorage.getItem(ADMIN_VAULT_KEY);
-      if (!rawVault) return 0;
-      const parsed = JSON.parse(rawVault);
-      if (Array.isArray(parsed?.events)) return parsed.events.length;
-      if (Array.isArray(parsed)) return parsed.length;
+      if (rawVault) {
+        const parsed = JSON.parse(rawVault);
+        if (Array.isArray(parsed?.events)) eventsCount = parsed.events.length;
+        else if (Array.isArray(parsed)) eventsCount = parsed.length;
+      }
     } catch {}
-    return 0;
+    const bansVault = readLocalBansVault();
+    return {
+      eventsCount,
+      bansCount: bansVault.bans.length,
+    };
   };
 
   const syncWithBrowserVault = useCallback(
@@ -425,51 +598,89 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
       if (isVaultSyncingRef.current || isDeploymentInProgressRef.current) return false;
       isVaultSyncingRef.current = true;
       try {
-        const exportRes = await fetch(`/api/admin/analytics/export?_cb=${Date.now()}`, {
-          cache: 'no-store',
-          headers: { Authorization: `Bearer ${authToken}`, 'Cache-Control': 'no-cache' },
-        });
-        if (!exportRes.ok) return false;
-        const serverStore = await exportRes.json();
-        const serverEvents: any[] = Array.isArray(serverStore?.events) ? serverStore.events : [];
-
-        // Load local browser vault
+        // 1. Read Analytics Events from both IndexedDB (up to 20k) and localStorage
         let vaultEvents: any[] = [];
+        try {
+          const idbData = await readVaultIdbKey<{ events?: any[] }>(ADMIN_VAULT_KEY);
+          if (idbData && Array.isArray(idbData.events)) {
+            vaultEvents = idbData.events;
+          }
+        } catch {}
+
         try {
           const rawVault = localStorage.getItem(ADMIN_VAULT_KEY);
           if (rawVault) {
             const parsedVault = JSON.parse(rawVault);
-            if (Array.isArray(parsedVault?.events)) {
-              vaultEvents = parsedVault.events;
-            } else if (Array.isArray(parsedVault)) {
-              vaultEvents = parsedVault;
+            const lsEvents = Array.isArray(parsedVault?.events)
+              ? parsedVault.events
+              : Array.isArray(parsedVault)
+              ? parsedVault
+              : [];
+            if (lsEvents.length > 0) {
+              const map = new Map<string, any>();
+              for (const e of [...vaultEvents, ...lsEvents]) {
+                if (e && e.id) map.set(e.id, e);
+              }
+              vaultEvents = Array.from(map.values());
             }
           }
-        } catch {
-          vaultEvents = [];
-        }
+        } catch {}
 
-        const serverIdSet = new Set(serverEvents.map((e) => e?.id).filter(Boolean));
-        const missingOnServer = vaultEvents.filter((e) => e && e.id && !serverIdSet.has(e.id));
-
-        let restoredToServer = false;
-        // If local browser vault has historical events that the server lost after an update/redeploy, auto-restore them!
-        if (missingOnServer.length > 0) {
-          const importRes = await fetch('/api/admin/analytics/import', {
-            method: 'POST',
-            cache: 'no-store',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${authToken}`,
-            },
-            body: JSON.stringify({ events: missingOnServer }),
-          });
-          if (importRes.ok) {
-            restoredToServer = true;
+        // 2. Read Blocked IPs & Security Metrics from both IndexedDB and localStorage
+        let bansVault = readLocalBansVault();
+        try {
+          const idbBans = await readVaultIdbKey<any>(ADMIN_BANS_VAULT_KEY);
+          if (idbBans && typeof idbBans === 'object') {
+            const mergedLastCleared = Math.max(
+              bansVault.lastClearedAllBansAt || 0,
+              Number(idbBans.lastClearedAllBansAt) || 0
+            );
+            const mergedTombstones = {
+              ...(idbBans.unblockedTombstones || {}),
+              ...(bansVault.unblockedTombstones || {}),
+            };
+            const map = new Map<string, any>();
+            for (const b of [...(idbBans.bans || []), ...(bansVault.bans || [])]) {
+              if (!b || !b.ip) continue;
+              const ip = String(b.ip).replace(/^::ffff:/i, '').trim();
+              const lastAttempt = Number(b.lastAttemptAt || b.bannedAt) || 0;
+              if (lastAttempt <= mergedLastCleared || lastAttempt <= (Number(mergedTombstones[ip]) || 0)) {
+                continue;
+              }
+              map.set(ip, b);
+            }
+            bansVault = {
+              bans: Array.from(map.values()),
+              unblockedTombstones: mergedTombstones,
+              lastClearedAllBansAt: mergedLastCleared,
+              securityMetrics: bansVault.securityMetrics || idbBans.securityMetrics,
+            };
           }
-        }
+        } catch {}
 
-        // Merge both sets into the local browser vault (keep latest 10,000 events)
+        // 3. Perform atomic bidirectional sync with server (/api/admin/state/sync)
+        const syncRes = await fetch('/api/admin/state/sync', {
+          method: 'POST',
+          cache: 'no-store',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+            'Cache-Control': 'no-cache',
+          },
+          body: JSON.stringify({
+            events: vaultEvents,
+            bans: bansVault.bans,
+            unblockedTombstones: bansVault.unblockedTombstones,
+            lastClearedAllBansAt: bansVault.lastClearedAllBansAt,
+            securityMetrics: bansVault.securityMetrics,
+          }),
+        });
+
+        if (!syncRes.ok) return false;
+        const syncData = await syncRes.json();
+        if (!syncData || !syncData.success) return false;
+
+        const serverEvents: any[] = Array.isArray(syncData.events) ? syncData.events : [];
         const mergedMap = new Map<string, any>();
         for (const ev of vaultEvents) {
           if (ev && ev.id) mergedMap.set(ev.id, ev);
@@ -479,32 +690,43 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
         }
         const mergedList = Array.from(mergedMap.values())
           .sort((a, b) => (a.ts || 0) - (b.ts || 0))
-          .slice(-10000);
+          .slice(-20000);
 
+        // Save full 20,000 events to IndexedDB and latest 4,000 to localStorage
+        writeVaultIdbKey(ADMIN_VAULT_KEY, { events: mergedList, lastUpdated: Date.now() }).catch(() => {});
         try {
           localStorage.setItem(
             ADMIN_VAULT_KEY,
-            JSON.stringify({ events: mergedList, lastUpdated: Date.now() })
+            JSON.stringify({ events: mergedList.slice(-6000), lastUpdated: Date.now() })
           );
         } catch {
-          // If localStorage quota is tight, store the most recent 4,000 events
           try {
             localStorage.setItem(
               ADMIN_VAULT_KEY,
-              JSON.stringify({ events: mergedList.slice(-4000), lastUpdated: Date.now() })
+              JSON.stringify({ events: mergedList.slice(-3000), lastUpdated: Date.now() })
             );
           } catch {}
         }
 
+        // Save authoritative Blocked IPs + Security Metrics to both IndexedDB and localStorage
+        if (syncData.security) {
+          saveLocalBansVault({
+            bans: syncData.security.bans,
+            unblockedTombstones: syncData.security.unblockedTombstones,
+            lastClearedAllBansAt: syncData.security.lastClearedAllBansAt,
+            securityMetrics: syncData.security.securityMetrics,
+          });
+        }
+
         lastVaultSyncTimeRef.current = Date.now();
-        return restoredToServer;
+        return Boolean((syncData.restoredEvents && syncData.restoredEvents > 0) || syncData.restoredBans);
       } catch {
         return false;
       } finally {
         isVaultSyncingRef.current = false;
       }
     },
-    []
+    [saveLocalBansVault]
   );
 
   // Fetch Analytics Data (with deployment transition detection & Chrome disk-cache eviction)
@@ -569,13 +791,31 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
 
       const data = await res.json();
       if (data.success) {
-        const localVaultCount = getLocalVaultCount();
+        // Persist any newly reported server bans & security metrics into the local vault immediately
+        if (data.security) {
+          saveLocalBansVault({
+            bans: data.security.permanentBans || [],
+            securityMetrics: {
+              totalBlockedScrapers: data.security.totalBlockedScrapers,
+              totalInterceptionsBlocked: data.security.totalInterceptionsBlocked,
+              totalRateLimited: data.security.totalRateLimited,
+              totalHoneypotTrapped: data.security.totalHoneypotTrapped,
+              recentSecurityEvents: data.security.recentEvents || [],
+            },
+          });
+        }
+
+        const { eventsCount: localVaultCount, bansCount: localBansCount } = getLocalVaultCounts();
         const serverCount = typeof data.totalStoredEvents === 'number' ? data.totalStoredEvents : 0;
+        const serverBansCount =
+          typeof data.security?.activeBannedIps === 'number' ? data.security.activeBannedIps : 0;
+
         const needsVaultSync =
           deploymentJustFinished ||
           lastVaultSyncTimeRef.current === 0 ||
           serverCount < localVaultCount ||
-          Date.now() - lastVaultSyncTimeRef.current > 60000;
+          serverBansCount < localBansCount ||
+          Date.now() - lastVaultSyncTimeRef.current > 30000;
 
         if (needsVaultSync) {
           const restored = await syncWithBrowserVault(token);
@@ -586,9 +826,9 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
             return;
           }
           if (restored) {
-            setBackupMessage('Auto-restored historical analytics after update');
+            setBackupMessage('Auto-restored historical analytics & blocked IPs after update');
             setTimeout(() => setBackupMessage(null), 4000);
-            // Re-fetch computed KPIs after restoring historical events
+            // Re-fetch computed KPIs after restoring historical events & blocked IPs
             const refreshedRes = await fetch(`/api/admin/analytics?range=${dateRange}&_cb=${Date.now()}`, {
               cache: 'no-store',
               headers: { Authorization: `Bearer ${token}` },
@@ -617,7 +857,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     } finally {
       setLoadingData(false);
     }
-  }, [token, dateRange, syncWithBrowserVault]);
+  }, [token, dateRange, syncWithBrowserVault, saveLocalBansVault]);
 
   // Analytics Backup & Restore handlers
   const [backupMessage, setBackupMessage] = useState<string | null>(null);
@@ -638,7 +878,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
       a.click();
       a.remove();
       window.URL.revokeObjectURL(url);
-      setBackupMessage('Backup exported successfully');
+      setBackupMessage('Backup (Analytics + Blocked IPs) exported');
       setTimeout(() => setBackupMessage(null), 3500);
     } catch {
       setBackupMessage('Failed to export backup');
@@ -665,9 +905,9 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
         if (result.success) {
           if (token) await syncWithBrowserVault(token);
           fetchAnalytics();
-          setBackupMessage(result.message || 'Analytics restored!');
+          setBackupMessage(result.message || 'Analytics & Blocked IPs restored!');
         } else {
-          setBackupMessage(result.error || 'Failed to restore analytics');
+          setBackupMessage(result.error || 'Failed to restore backup');
         }
       } catch (err: any) {
         setBackupMessage('Invalid JSON backup file: ' + err.message);
@@ -725,6 +965,15 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
         }),
       });
       if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          saveLocalBansVault({
+            bans: data.bans,
+            unblockedTombstones: data.unblockedTombstones,
+            lastClearedAllBansAt: data.lastClearedAllBansAt,
+            securityMetrics: data.securityMetrics,
+          });
+        }
         setManualBanIp('');
         setManualBanReason('');
         fetchAnalytics();
@@ -737,15 +986,31 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     if (!token || !ipToUnblock) return;
     setBanActionLoading(true);
     try {
+      const cleanIp = ipToUnblock.replace(/^::ffff:/i, '').trim();
       const res = await fetch('/api/admin/security/unblock', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ ip: ipToUnblock }),
+        body: JSON.stringify({ ip: cleanIp }),
       });
       if (res.ok) {
+        const data = await res.json();
+        const current = readLocalBansVault();
+        const updatedVault = {
+          bans: Array.isArray(data.bans) ? data.bans : current.bans.filter((b) => b.ip !== cleanIp),
+          unblockedTombstones: {
+            ...(current.unblockedTombstones || {}),
+            ...(data.unblockedTombstones || {}),
+            [cleanIp]: Date.now(),
+          },
+          lastClearedAllBansAt: data.lastClearedAllBansAt || current.lastClearedAllBansAt,
+          securityMetrics: current.securityMetrics,
+          updatedAt: Date.now(),
+        };
+        localStorage.setItem(ADMIN_BANS_VAULT_KEY, JSON.stringify(updatedVault));
+        writeVaultIdbKey(ADMIN_BANS_VAULT_KEY, updatedVault).catch(() => {});
         fetchAnalytics();
       }
     } catch {}
@@ -765,6 +1030,17 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
         body: JSON.stringify({ all: true }),
       });
       if (res.ok) {
+        const data = await res.json();
+        const current = readLocalBansVault();
+        const clearedVault = {
+          bans: [],
+          unblockedTombstones: data.unblockedTombstones || current.unblockedTombstones || {},
+          lastClearedAllBansAt: data.lastClearedAllBansAt || Date.now(),
+          securityMetrics: current.securityMetrics,
+          updatedAt: Date.now(),
+        };
+        localStorage.setItem(ADMIN_BANS_VAULT_KEY, JSON.stringify(clearedVault));
+        writeVaultIdbKey(ADMIN_BANS_VAULT_KEY, clearedVault).catch(() => {});
         fetchAnalytics();
       }
     } catch {}
@@ -1077,6 +1353,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     totalUrls: number;
     moviesCount: number;
     tvCount: number;
+    liveMatchesCount?: number;
+    liveChannelsCount?: number;
     updatedAt: number;
     sitemapUrl: string;
     sampleUrls: Array<{ title: string; url: string; type: string }>;
@@ -1102,6 +1380,81 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
       } catch {
       } finally {
         if (refresh) setSeoRefreshing(false);
+      }
+    },
+    [token]
+  );
+
+  // Live Arena Admin Status & Channel Matrix State
+  const [liveArenaStatus, setLiveArenaStatus] = useState<{
+    updatedAt: number;
+    totalEvents: number;
+    liveNowCount: number;
+    upcomingCount: number;
+    finishedCount: number;
+    totalChannels: number;
+    activeArenaViewers: number;
+    activeLeagues: string[];
+    channelGroups: Record<string, number>;
+    events: Array<{
+      id: string;
+      title: string;
+      sport: string;
+      league: string;
+      leagueLogo?: string;
+      status: string;
+      statusDetail?: string;
+      startTime: string;
+      homeTeam?: { name: string; logo?: string; score?: string | number | null };
+      awayTeam?: { name: string; logo?: string; score?: string | number | null };
+      seoPath: string;
+      seoUrl: string;
+      recommendedChannels: Array<{
+        channelId: string;
+        name: string;
+        language: string;
+        languageLabel: string;
+        logo?: string;
+      }>;
+    }>;
+    channels: Array<{
+      channelId: string;
+      name: string;
+      group: string;
+      language: string;
+      languageLabel: string;
+      logo: string;
+      seoPath: string;
+      seoUrl: string;
+    }>;
+  } | null>(null);
+  const [liveArenaRefreshing, setLiveArenaRefreshing] = useState<boolean>(false);
+  const [arenaMatchFilter, setArenaMatchFilter] = useState<'all' | 'live' | 'upcoming'>('all');
+  const [arenaMatchSearch, setArenaMatchSearch] = useState<string>('');
+  const [arenaChannelGroupFilter, setArenaChannelGroupFilter] = useState<string>('all');
+  const [arenaChannelSearch, setArenaChannelSearch] = useState<string>('');
+
+  const fetchLiveArenaStatus = useCallback(
+    async (refresh = false) => {
+      if (!token) return;
+      if (refresh) setLiveArenaRefreshing(true);
+      try {
+        const res = await fetch(
+          `/api/admin/live-arena/status?${refresh ? 'refresh=1&' : ''}_cb=${Date.now()}`,
+          {
+            cache: 'no-store',
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success) {
+            setLiveArenaStatus(data);
+          }
+        }
+      } catch {
+      } finally {
+        if (refresh) setLiveArenaRefreshing(false);
       }
     },
     [token]
@@ -1217,23 +1570,25 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     }
   }, [isAuthenticated, dateRange, fetchAnalytics]);
 
-  // Fetch & sync scraper server config + Programmatic SEO status + Ad-Blocker policy once authenticated
+  // Fetch & sync scraper server config + Programmatic SEO status + Live Arena status + Ad-Blocker policy once authenticated
   useEffect(() => {
     if (isAuthenticated) {
       fetchAndSyncScrapers();
       fetchSeoStatus(false);
+      fetchLiveArenaStatus(false);
       fetchAndSyncAdBlockPolicy();
     }
-  }, [isAuthenticated, fetchAndSyncScrapers, fetchSeoStatus, fetchAndSyncAdBlockPolicy]);
+  }, [isAuthenticated, fetchAndSyncScrapers, fetchSeoStatus, fetchLiveArenaStatus, fetchAndSyncAdBlockPolicy]);
 
   // Auto-refresh timer (polls every 10 seconds for real live stream updates)
   useEffect(() => {
     if (!isAuthenticated || !autoRefresh) return;
     const interval = setInterval(() => {
       fetchAnalytics();
+      fetchLiveArenaStatus(false);
     }, 10000);
     return () => clearInterval(interval);
-  }, [isAuthenticated, autoRefresh, fetchAnalytics]);
+  }, [isAuthenticated, autoRefresh, fetchAnalytics, fetchLiveArenaStatus]);
 
   // -------------------------------------------------------------
   // RENDER: Loading check
@@ -1405,7 +1760,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
 
           <div className="h-4 w-px bg-white/10 hidden sm:block" />
 
-          {/* Dedicated 2-Page Switcher: Analytics vs Scraper Servers */}
+          {/* Dedicated 3-Page Switcher: Analytics vs Live Arena vs Scraper Servers */}
           <div className="flex items-center bg-[#131a2b] border border-white/15 rounded-lg p-0.5 gap-0.5">
             <button
               type="button"
@@ -1413,7 +1768,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                 setAdminView('analytics');
                 window.scrollTo({ top: 0, behavior: 'smooth' });
               }}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
                 adminView === 'analytics'
                   ? 'bg-blue-600 text-white shadow-sm'
                   : 'text-slate-400 hover:text-white hover:bg-white/5'
@@ -1426,10 +1781,30 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
             <button
               type="button"
               onClick={() => {
+                setAdminView('live_arena');
+                fetchLiveArenaStatus(false);
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                adminView === 'live_arena'
+                  ? 'bg-rose-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <Trophy className="w-3.5 h-3.5" />
+              <span>Live Arena</span>
+              <span className="font-mono tabular-nums text-[10px] opacity-90">
+                ({liveArenaStatus?.totalEvents ?? seoStatus?.liveMatchesCount ?? 0})
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
                 setAdminView('scrapers');
                 window.scrollTo({ top: 0, behavior: 'smooth' });
               }}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
                 adminView === 'scrapers'
                   ? 'bg-blue-600 text-white shadow-sm'
                   : 'text-slate-400 hover:text-white hover:bg-white/5'
@@ -1502,7 +1877,11 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
 
               {/* Manual Refresh Button */}
               <button
-                onClick={() => fetchAnalytics()}
+                onClick={() => {
+                  fetchAnalytics();
+                  fetchLiveArenaStatus(false);
+                  fetchSeoStatus(false);
+                }}
                 disabled={loadingData}
                 title="Refresh analytics data"
                 className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 active:scale-95 text-slate-300 hover:text-white border border-white/10 transition-all cursor-pointer"
@@ -1535,6 +1914,31 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                   className="hidden"
                 />
               </label>
+            </>
+          ) : adminView === 'live_arena' ? (
+            <>
+              <button
+                type="button"
+                onClick={() => setAdminView('analytics')}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 hover:text-white border border-white/10 text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <BarChart3 className="w-3 h-3 text-blue-400" />
+                <span>← Analytics</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  fetchLiveArenaStatus(true);
+                  fetchSeoStatus(true);
+                }}
+                disabled={liveArenaRefreshing}
+                title="Force refresh Live Arena matches, channels & SEO sitemap"
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3 h-3 ${liveArenaRefreshing ? 'animate-spin' : ''}`} />
+                <span>{liveArenaRefreshing ? 'Syncing Arena...' : 'Refresh Live Arena'}</span>
+              </button>
             </>
           ) : (
             <>
@@ -1858,6 +2262,361 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
         )}
 
         {/* =========================================================
+            PAGE 3: Dedicated Live Arena Command Center & Channel Matrix
+           ========================================================= */}
+        {adminView === 'live_arena' && (
+          <section
+            id="live-arena-admin-panel"
+            className="flex flex-col gap-4"
+          >
+            {/* Top Header Card */}
+            <div className="bg-[#0e1424] border border-rose-500/30 rounded-xl p-4 md:p-5 flex flex-col gap-4">
+              <div className="flex items-start md:items-center justify-between flex-col md:flex-row gap-3 border-b border-white/10 pb-3.5">
+                <div className="flex items-start gap-3">
+                  <div className="w-9 h-9 rounded-lg bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
+                    <Trophy className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h2 className="text-sm font-bold text-white tracking-tight">
+                        01. Notflix Live Arena — Broadcast Matrix &amp; SEO Command Center
+                      </h2>
+                      <span className="text-[11px] font-mono tabular-nums text-slate-400">
+                        · {liveArenaStatus?.totalChannels || 102} 24/7 Networks ·{' '}
+                        {liveArenaStatus?.totalEvents || 0} Fixtures Indexed
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Real-time monitoring of live &amp; upcoming sports fixtures, synchronized same-event broadcast channels under the player, 102 24/7 TV networks, and Google SportsEvent / BroadcastEvent SEO indexing.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard?.writeText('https://notflixtv.com/live');
+                      setSeoCopiedUrl('https://notflixtv.com/live');
+                      setTimeout(() => setSeoCopiedUrl(null), 2500);
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-[#131b2e] hover:bg-[#19233b] text-slate-200 border border-white/10 text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    {seoCopiedUrl === 'https://notflixtv.com/live' ? '✓ Copied /live URL' : 'Copy /live Hub URL'}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      window.history.pushState({}, '', '/live');
+                      window.dispatchEvent(new CustomEvent('notflix:open-live-tv'));
+                      onExit();
+                    }}
+                    className="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <Radio className="w-3.5 h-3.5" />
+                    <span>Open Live Arena</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* 5-Column Live Arena KPI Strip */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                <div className="bg-[#11182a] border border-white/10 rounded-xl p-3 flex flex-col justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Matches Live Now
+                  </span>
+                  <div className="text-2xl font-extrabold font-mono tabular-nums text-rose-400 my-1">
+                    {liveArenaStatus?.liveNowCount ?? 0}
+                  </div>
+                  <div className="text-[10px] text-slate-400 font-mono tabular-nums">
+                    In-play broadcasts · {liveArenaStatus?.activeArenaViewers ?? 0} watching
+                  </div>
+                </div>
+
+                <div className="bg-[#11182a] border border-white/10 rounded-xl p-3 flex flex-col justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Upcoming Today
+                  </span>
+                  <div className="text-2xl font-extrabold font-mono tabular-nums text-amber-400 my-1">
+                    {liveArenaStatus?.upcomingCount ?? 0}
+                  </div>
+                  <div className="text-[10px] text-slate-400 font-mono tabular-nums">
+                    {liveArenaStatus?.finishedCount ?? 0} completed (FT)
+                  </div>
+                </div>
+
+                <div className="bg-[#11182a] border border-white/10 rounded-xl p-3 flex flex-col justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    24/7 Live Channels
+                  </span>
+                  <div className="text-2xl font-extrabold font-mono tabular-nums text-blue-400 my-1">
+                    {liveArenaStatus?.totalChannels ?? 102}
+                  </div>
+                  <div className="text-[10px] text-slate-400">
+                    beIN · SSC · Sky · ESPN · Cinema
+                  </div>
+                </div>
+
+                <div className="bg-[#11182a] border border-white/10 rounded-xl p-3 flex flex-col justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Active Leagues
+                  </span>
+                  <div className="text-2xl font-extrabold font-mono tabular-nums text-emerald-400 my-1">
+                    {liveArenaStatus?.activeLeagues?.length ?? 0}
+                  </div>
+                  <div className="text-[10px] text-slate-400 truncate">
+                    {liveArenaStatus?.activeLeagues?.slice(0, 3).join(' · ') || 'Global Football & Sports'}
+                  </div>
+                </div>
+
+                <div className="bg-[#11182a] border border-white/10 rounded-xl p-3 flex flex-col justify-between col-span-2 sm:col-span-1">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Arena SEO Pages
+                  </span>
+                  <div className="text-2xl font-extrabold font-mono tabular-nums text-purple-400 my-1">
+                    {(liveArenaStatus?.totalEvents ?? 0) + (liveArenaStatus?.totalChannels ?? 102) + 1}
+                  </div>
+                  <div className="text-[10px] text-slate-400">
+                    SportsEvent + BroadcastEvent JSON-LD
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Live & Upcoming Matches + Same-Event Channel Broadcast Matrix */}
+            <div className="bg-[#0e1424] border border-white/10 rounded-xl p-4 flex flex-col gap-3">
+              <div className="flex items-center justify-between flex-wrap gap-3">
+                <div>
+                  <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                    02. Live &amp; Upcoming Matches — Same-Event Broadcast Channel Matrix
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Verifies the exact channels broadcasting the same event simultaneously under the Live Arena player and their crawlable Google SEO URLs (<code className="text-rose-300">/live/match/:id-:slug</code>).
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <input
+                    type="text"
+                    value={arenaMatchSearch}
+                    onChange={(e) => setArenaMatchSearch(e.target.value)}
+                    placeholder="Search team, league, or channel..."
+                    className="bg-[#131a2b] border border-white/10 rounded-lg px-2.5 py-1 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 w-48 sm:w-56"
+                  />
+
+                  <div className="flex items-center bg-[#131a2b] border border-white/10 rounded-lg p-0.5 gap-0.5 text-[11px]">
+                    {(
+                      [
+                        { id: 'all', label: `All (${liveArenaStatus?.events?.length || 0})` },
+                        { id: 'live', label: `Live (${liveArenaStatus?.liveNowCount || 0})` },
+                        { id: 'upcoming', label: `Upcoming (${liveArenaStatus?.upcomingCount || 0})` },
+                      ] as const
+                    ).map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setArenaMatchFilter(tab.id)}
+                        className={`px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                          arenaMatchFilter === tab.id
+                            ? 'bg-rose-600 text-white shadow-sm'
+                            : 'text-slate-400 hover:text-white hover:bg-white/5'
+                        }`}
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-[420px] overflow-y-auto pr-1">
+                {(() => {
+                  const rawEvents = liveArenaStatus?.events || [];
+                  const q = arenaMatchSearch.trim().toLowerCase();
+                  const filtered = rawEvents.filter((ev) => {
+                    const st = String(ev.status || '').toUpperCase();
+                    if (arenaMatchFilter === 'live' && st !== 'LIVE') return false;
+                    if (arenaMatchFilter === 'upcoming' && st !== 'UPCOMING') return false;
+                    if (!q) return true;
+                    const chText = (ev.recommendedChannels || [])
+                      .map((c) => c.name.toLowerCase())
+                      .join(' ');
+                    return (
+                      ev.title.toLowerCase().includes(q) ||
+                      ev.league.toLowerCase().includes(q) ||
+                      chText.includes(q)
+                    );
+                  });
+
+                  if (filtered.length === 0) {
+                    return (
+                      <div className="col-span-full py-8 text-center text-xs text-slate-500 border border-dashed border-white/10 rounded-lg">
+                        No matches match your current filter. Click Refresh Live Arena to sync fixtures.
+                      </div>
+                    );
+                  }
+
+                  return filtered.map((ev) => {
+                    const isLiveNow = String(ev.status || '').toUpperCase() === 'LIVE';
+                    return (
+                      <div
+                        key={ev.id}
+                        className="bg-[#11182a] border border-white/10 rounded-xl p-3 flex flex-col justify-between gap-2.5"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="text-[11px] text-slate-400 font-medium truncate">
+                              {ev.league} · {ev.sport} ·{' '}
+                              <span
+                                className={
+                                  isLiveNow
+                                    ? 'text-rose-400 font-bold'
+                                    : 'text-amber-300 font-mono tabular-nums'
+                                }
+                              >
+                                {isLiveNow ? `LIVE ${ev.statusDetail || ''}` : ev.statusDetail || ev.status}
+                              </span>
+                            </div>
+                            <div className="text-xs font-bold text-white mt-0.5 truncate">
+                              {ev.title}
+                              {ev.homeTeam?.score !== null &&
+                              ev.homeTeam?.score !== undefined &&
+                              ev.awayTeam?.score !== null &&
+                              ev.awayTeam?.score !== undefined ? (
+                                <span className="ml-2 font-mono tabular-nums text-emerald-400">
+                                  ({ev.homeTeam.score} - {ev.awayTeam.score})
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard?.writeText(ev.seoUrl);
+                                setSeoCopiedUrl(ev.seoUrl);
+                                setTimeout(() => setSeoCopiedUrl(null), 2000);
+                              }}
+                              className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-semibold text-slate-300 cursor-pointer whitespace-nowrap shrink-0"
+                            >
+                              {seoCopiedUrl === ev.seoUrl ? '✓ Copied' : 'Copy SEO Link'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                window.history.pushState({}, '', ev.seoPath);
+                                window.dispatchEvent(new CustomEvent('notflix:open-live-tv'));
+                                onExit();
+                              }}
+                              className="px-2 py-1 rounded bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/30 text-[10px] font-bold text-rose-300 cursor-pointer whitespace-nowrap shrink-0"
+                            >
+                              Open Match →
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="text-[11px] text-slate-300 bg-[#0b101d] border border-white/5 rounded-lg px-2.5 py-1.5">
+                          <span className="text-slate-400 text-[10px]">Same-Event Broadcast Channels ({ev.recommendedChannels?.length || 0}): </span>
+                          <span className="font-medium text-emerald-300">
+                            {ev.recommendedChannels && ev.recommendedChannels.length > 0
+                              ? ev.recommendedChannels
+                                  .map((c) => c.name.replace(/\s*\([^)]*\)/g, ''))
+                                  .join(' · ')
+                              : 'Auto-matched by league broadcaster'}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+            </div>
+
+            {/* 24/7 Live TV Channel Directory (102 Channels) */}
+            <div className="bg-[#0e1424] border border-white/10 rounded-xl p-4 flex flex-col gap-3">
+              <div className="flex items-center justify-between flex-wrap gap-3">
+                <div>
+                  <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                    03. 24/7 Live TV Network Directory &amp; Indexed Channel Pages ({liveArenaStatus?.totalChannels || 102})
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    All 102 24/7 sports, cinema &amp; entertainment channels indexed in Google Sitemap (<code className="text-blue-300">/live/channel/:id</code>) with TelevisionChannel Schema.org markup.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <input
+                    type="text"
+                    value={arenaChannelSearch}
+                    onChange={(e) => setArenaChannelSearch(e.target.value)}
+                    placeholder="Filter 102 channels..."
+                    className="bg-[#131a2b] border border-white/10 rounded-lg px-2.5 py-1 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-blue-500 w-44 sm:w-52"
+                  />
+
+                  <select
+                    value={arenaChannelGroupFilter}
+                    onChange={(e) => setArenaChannelGroupFilter(e.target.value)}
+                    className="bg-[#131a2b] border border-white/10 rounded-lg px-2.5 py-1 text-xs text-white focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="all">All Network Groups ({liveArenaStatus?.totalChannels || 102})</option>
+                    {Object.entries(liveArenaStatus?.channelGroups || {}).map(([grp, cnt]) => (
+                      <option key={grp} value={grp}>
+                        {grp} ({cnt})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 max-h-80 overflow-y-auto pr-1">
+                {(() => {
+                  const allCh = liveArenaStatus?.channels || [];
+                  const q = arenaChannelSearch.trim().toLowerCase();
+                  const filteredCh = allCh.filter((ch) => {
+                    if (arenaChannelGroupFilter !== 'all' && ch.group !== arenaChannelGroupFilter) {
+                      return false;
+                    }
+                    if (!q) return true;
+                    return (
+                      ch.name.toLowerCase().includes(q) ||
+                      ch.group.toLowerCase().includes(q) ||
+                      ch.languageLabel.toLowerCase().includes(q)
+                    );
+                  });
+
+                  return filteredCh.map((ch) => (
+                    <div
+                      key={ch.channelId}
+                      className="flex items-center justify-between px-2.5 py-2 rounded-lg bg-[#11182a] border border-white/5 text-xs gap-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="font-bold text-white truncate text-[11px]">{ch.name}</div>
+                        <div className="text-[10px] text-slate-400 truncate">
+                          {ch.group} · {ch.languageLabel}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(ch.seoUrl);
+                          setSeoCopiedUrl(ch.seoUrl);
+                          setTimeout(() => setSeoCopiedUrl(null), 2000);
+                        }}
+                        className="px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-semibold text-slate-300 shrink-0 cursor-pointer whitespace-nowrap"
+                      >
+                        {seoCopiedUrl === ch.seoUrl ? '✓ Copied' : 'SEO Link'}
+                      </button>
+                    </div>
+                  ));
+                })()}
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* =========================================================
             PAGE 1: Harmonious, Compact Analytics & Telemetry Page
            ========================================================= */}
         {adminView === 'analytics' && (
@@ -1951,6 +2710,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
                   {analytics.liveStreams.map((stream, idx) => {
+                    const isLiveArenaStream = stream.mediaType === 'live';
                     const isTvStream = stream.mediaType === 'tv';
                     return (
                       <div
@@ -1966,19 +2726,39 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                         ) : (
                           <div
                             className={`w-8 h-11 rounded flex items-center justify-center shrink-0 border ${
-                              isTvStream
+                              isLiveArenaStream
+                                ? 'bg-rose-600/20 border-rose-500/30 text-rose-400'
+                                : isTvStream
                                 ? 'bg-purple-600/20 border-purple-500/30 text-purple-400'
                                 : 'bg-blue-600/20 border-blue-500/30 text-blue-400'
                             }`}
                           >
-                            {isTvStream ? <Tv className="w-4 h-4" /> : <Film className="w-4 h-4" />}
+                            {isLiveArenaStream ? (
+                              <Radio className="w-4 h-4" />
+                            ) : isTvStream ? (
+                              <Tv className="w-4 h-4" />
+                            ) : (
+                              <Film className="w-4 h-4" />
+                            )}
                           </div>
                         )}
                         <div className="min-w-0 flex-1">
                           <div className="text-xs font-bold text-white truncate">{stream.title}</div>
                           <div className="flex items-center gap-1.5 mt-0.5 text-[10px] font-mono text-slate-300">
-                            <span className={isTvStream ? 'text-purple-300' : 'text-blue-300'}>
-                              {isTvStream ? `TV S${stream.season || 1}:E${stream.episode || 1}` : 'Movie'}
+                            <span
+                              className={
+                                isLiveArenaStream
+                                  ? 'text-rose-300 font-bold'
+                                  : isTvStream
+                                  ? 'text-purple-300'
+                                  : 'text-blue-300'
+                              }
+                            >
+                              {isLiveArenaStream
+                                ? 'Live Arena'
+                                : isTvStream
+                                ? `TV S${stream.season || 1}:E${stream.episode || 1}`
+                                : 'Movie'}
                             </span>
                             <span>·</span>
                             <span className="text-emerald-400 capitalize">{stream.device}</span>
@@ -2264,9 +3044,11 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                     const allTopTitles = analytics?.topTitles || [];
                     const movieTitlesCount = allTopTitles.filter((t) => t.mediaType === 'movie').length;
                     const tvTitlesCount = allTopTitles.filter((t) => t.mediaType === 'tv').length;
+                    const liveTitlesCount = allTopTitles.filter((t) => t.mediaType === 'live').length;
                     const displayedTopTitles = allTopTitles.filter((item) => {
                       if (mediaFilter === 'movie') return item.mediaType === 'movie';
                       if (mediaFilter === 'tv') return item.mediaType === 'tv';
+                      if (mediaFilter === 'live') return item.mediaType === 'live';
                       return true;
                     });
 
@@ -2278,14 +3060,14 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                               Top Performing Content
                             </h3>
                             <p className="text-[11px] text-slate-400">
-                              Ranked by viewers and cumulative watch time
+                              Ranked by viewers and cumulative watch time across Movies, TV &amp; Live Arena
                             </p>
                           </div>
 
                           <div className="flex items-center bg-[#131a2b] border border-white/10 rounded-lg p-0.5 gap-0.5 text-[11px]">
                             <button
                               onClick={() => setMediaFilter('all')}
-                              className={`px-2 py-1 rounded-md font-semibold transition-all cursor-pointer ${
+                              className={`px-2 py-1 rounded-md font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
                                 mediaFilter === 'all'
                                   ? 'bg-blue-600 text-white shadow-sm'
                                   : 'text-slate-400 hover:text-white hover:bg-white/5'
@@ -2295,7 +3077,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                             </button>
                             <button
                               onClick={() => setMediaFilter('movie')}
-                              className={`px-2 py-1 rounded-md font-semibold flex items-center gap-1 transition-all cursor-pointer ${
+                              className={`px-2 py-1 rounded-md font-semibold flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap shrink-0 ${
                                 mediaFilter === 'movie'
                                   ? 'bg-blue-600 text-white shadow-sm'
                                   : 'text-slate-400 hover:text-white hover:bg-white/5'
@@ -2306,7 +3088,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                             </button>
                             <button
                               onClick={() => setMediaFilter('tv')}
-                              className={`px-2 py-1 rounded-md font-semibold flex items-center gap-1 transition-all cursor-pointer ${
+                              className={`px-2 py-1 rounded-md font-semibold flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap shrink-0 ${
                                 mediaFilter === 'tv'
                                   ? 'bg-purple-600 text-white shadow-sm'
                                   : 'text-slate-400 hover:text-white hover:bg-white/5'
@@ -2314,6 +3096,17 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                             >
                               <Tv className="w-3 h-3 text-purple-400" />
                               <span>TV ({tvTitlesCount})</span>
+                            </button>
+                            <button
+                              onClick={() => setMediaFilter('live')}
+                              className={`px-2 py-1 rounded-md font-semibold flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                                mediaFilter === 'live'
+                                  ? 'bg-rose-600 text-white shadow-sm'
+                                  : 'text-slate-400 hover:text-white hover:bg-white/5'
+                              }`}
+                            >
+                              <Trophy className="w-3 h-3 text-rose-400" />
+                              <span>Live Arena ({liveTitlesCount})</span>
                             </button>
                           </div>
                         </div>
@@ -2332,6 +3125,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                             <tbody className="divide-y divide-white/5">
                               {displayedTopTitles.length > 0 ? (
                                 displayedTopTitles.map((item, idx) => {
+                                  const isLiveItem = item.mediaType === 'live';
                                   const isTvItem = item.mediaType === 'tv';
                                   return (
                                     <tr key={idx} className="hover:bg-white/[0.02] transition-colors">
@@ -2349,12 +3143,16 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                                           ) : (
                                             <div
                                               className={`w-6 h-8 rounded border flex items-center justify-center shrink-0 ${
-                                                isTvItem
+                                                isLiveItem
+                                                  ? 'bg-rose-500/10 border-rose-500/20 text-rose-400'
+                                                  : isTvItem
                                                   ? 'bg-purple-500/10 border-purple-500/20 text-purple-400'
                                                   : 'bg-blue-500/10 border-blue-500/20 text-blue-400'
                                               }`}
                                             >
-                                              {isTvItem ? (
+                                              {isLiveItem ? (
+                                                <Radio className="w-3 h-3" />
+                                              ) : isTvItem ? (
                                                 <Tv className="w-3 h-3" />
                                               ) : (
                                                 <Film className="w-3 h-3" />
@@ -2365,13 +3163,15 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                                             {item.title}
                                           </span>
                                           <span
-                                            className={`px-1.5 py-0.5 rounded text-[9px] font-bold shrink-0 ${
-                                              isTvItem
-                                                ? 'bg-purple-500/15 text-purple-300'
-                                                : 'bg-blue-500/15 text-blue-300'
+                                            className={`text-[10px] font-mono shrink-0 ${
+                                              isLiveItem
+                                                ? 'text-rose-300'
+                                                : isTvItem
+                                                ? 'text-purple-300'
+                                                : 'text-blue-300'
                                             }`}
                                           >
-                                            {isTvItem ? 'TV' : 'Movie'}
+                                            · {isLiveItem ? 'Live Arena' : isTvItem ? 'TV' : 'Movie'}
                                           </span>
                                         </div>
                                       </td>
@@ -2436,13 +3236,32 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                             <div className="truncate flex items-center gap-1.5">
                               {ev.type === 'play' && (
                                 <span className="text-white truncate">
-                                  Started <strong className="text-blue-300">{ev.title}</strong>
-                                  {ev.mediaType === 'tv' ? ` (S${ev.season || 1}:E${ev.episode || 1})` : ''}
+                                  Started{' '}
+                                  <strong
+                                    className={
+                                      ev.mediaType === 'live' ? 'text-rose-300' : 'text-blue-300'
+                                    }
+                                  >
+                                    {ev.title}
+                                  </strong>
+                                  {ev.mediaType === 'live'
+                                    ? ' (Live Arena)'
+                                    : ev.mediaType === 'tv'
+                                    ? ` (S${ev.season || 1}:E${ev.episode || 1})`
+                                    : ''}
                                 </span>
                               )}
                               {ev.type === 'heartbeat' && (
                                 <span className="text-slate-300 truncate">
-                                  Watching <strong className="text-emerald-300">{ev.title}</strong> (+{ev.watchMinutes}m)
+                                  Watching{' '}
+                                  <strong
+                                    className={
+                                      ev.mediaType === 'live' ? 'text-rose-300' : 'text-emerald-300'
+                                    }
+                                  >
+                                    {ev.title}
+                                  </strong>{' '}
+                                  (+{ev.watchMinutes}m)
                                 </span>
                               )}
                               {ev.type === 'search' && (
@@ -2610,6 +3429,92 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
               </div>
             </div>
 
+            {/* 4.2. Notflix Live Arena — Live Sports & 24/7 Broadcast Overview */}
+            <div className="bg-[#0e1424] border border-rose-500/25 rounded-xl p-4 flex flex-col gap-3">
+              <div className="flex items-center justify-between flex-wrap gap-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
+                    <Trophy className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                        Notflix Live Arena — Sports Matches &amp; 24/7 TV Broadcast Status
+                      </h3>
+                      <span className="text-[11px] font-mono tabular-nums text-slate-400">
+                        · {liveArenaStatus?.liveNowCount ?? 0} Live Now ·{' '}
+                        {liveArenaStatus?.upcomingCount ?? 0} Upcoming ·{' '}
+                        {liveArenaStatus?.totalChannels ?? 102} 24/7 Channels
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400">
+                      Synchronizes same-event broadcast channels directly under the live match player and indexes every match (<code className="text-rose-300">/live/match/:id-:slug</code>) and 24/7 network (<code className="text-rose-300">/live/channel/:id</code>) for Google Search.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => fetchLiveArenaStatus(true)}
+                    disabled={liveArenaRefreshing}
+                    className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] font-semibold text-slate-200 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${liveArenaRefreshing ? 'animate-spin text-rose-400' : ''}`} />
+                    <span>{liveArenaRefreshing ? 'Syncing...' : 'Sync Matches'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdminView('live_arena');
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <Trophy className="w-3 h-3" />
+                    <span>Manage Live Arena →</span>
+                  </button>
+                </div>
+              </div>
+
+              {liveArenaStatus?.events && liveArenaStatus.events.length > 0 && (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 pt-1">
+                  {liveArenaStatus.events.slice(0, 6).map((ev) => {
+                    const isLiveNow = String(ev.status || '').toUpperCase() === 'LIVE';
+                    return (
+                      <div
+                        key={ev.id}
+                        className="flex flex-col justify-between px-3 py-2 rounded-lg bg-[#11182a] border border-white/5 text-xs gap-1.5"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-bold text-white truncate text-[11px]">{ev.title}</span>
+                          <span
+                            className={`font-mono tabular-nums text-[10px] shrink-0 ${
+                              isLiveNow ? 'text-rose-400 font-bold' : 'text-amber-300'
+                            }`}
+                          >
+                            {isLiveNow ? `LIVE ${ev.statusDetail || ''}` : ev.statusDetail || ev.status}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-slate-400 truncate">
+                          {ev.league} ·{' '}
+                          <span className="text-emerald-300">
+                            {ev.recommendedChannels && ev.recommendedChannels.length > 0
+                              ? ev.recommendedChannels
+                                  .slice(0, 3)
+                                  .map((c) => c.name.replace(/\s*\([^)]*\)/g, ''))
+                                  .join(' · ')
+                              : 'Multi-channel HD'}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
             {/* 4.5. Programmatic SEO & 1,000+ Daily Visitor Growth Engine */}
             <div className="bg-[#0e1424] border border-emerald-500/20 rounded-xl p-4 flex flex-col gap-3">
               <div className="flex items-center justify-between flex-wrap gap-3">
@@ -2620,21 +3525,33 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                   <div>
                     <h3 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2 flex-wrap">
                       <span>Programmatic SEO &amp; Google Search Indexing Engine</span>
-                      <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300">
-                        SSR Meta + Dynamic Sitemap Active
+                      <span className="text-[10px] font-mono text-emerald-300">
+                        · SSR Meta + Dynamic Sitemap + Live Arena Schema Active
                       </span>
                     </h3>
                     <p className="text-[11px] text-slate-400">
-                      Auto-generates 200+ crawlable Movie, Series &amp; Anime landing pages (<code className="text-emerald-300">/watch/movie/:id-slug</code>) with Server-Side OpenGraph, Schema.org Movie/TVSeries Rich Snippets &amp; Google Image Sitemaps.
+                      Auto-generates 500+ crawlable Movie, Series, Anime &amp; Live Arena pages (<code className="text-emerald-300">/live</code>, <code className="text-emerald-300">/live/match/:id-slug</code>, <code className="text-emerald-300">/live/channel/:id</code>, <code className="text-emerald-300">/watch/movie/:id-slug</code>) with Server-Side OpenGraph &amp; Schema.org SportsEvent, BroadcastEvent, TelevisionChannel, Movie &amp; TVSeries Rich Snippets.
                     </p>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 flex-wrap text-xs font-mono">
+                <div className="flex items-center gap-2 flex-wrap text-xs font-mono tabular-nums">
                   <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-emerald-500/25 flex items-center gap-1.5">
                     <span className="text-[10px] font-sans text-slate-400">Indexed Sitemap URLs:</span>
                     <span className="font-bold text-emerald-400">
-                      {seoStatus?.totalUrls || 205}
+                      {seoStatus?.totalUrls || 519}
+                    </span>
+                  </div>
+                  <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-white/5 flex items-center gap-1.5">
+                    <span className="text-[10px] font-sans text-slate-400">Live Matches:</span>
+                    <span className="font-bold text-rose-400">
+                      {seoStatus?.liveMatchesCount ?? liveArenaStatus?.totalEvents ?? 0}
+                    </span>
+                  </div>
+                  <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-white/5 flex items-center gap-1.5">
+                    <span className="text-[10px] font-sans text-slate-400">24/7 Channels:</span>
+                    <span className="font-bold text-amber-400">
+                      {seoStatus?.liveChannelsCount || 102}
                     </span>
                   </div>
                   <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-white/5 flex items-center gap-1.5">
@@ -2657,7 +3574,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                       setSeoCopiedUrl(sUrl);
                       setTimeout(() => setSeoCopiedUrl(null), 2500);
                     }}
-                    className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] font-sans font-semibold text-slate-200 transition-colors cursor-pointer"
+                    className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] font-sans font-semibold text-slate-200 transition-colors cursor-pointer whitespace-nowrap shrink-0"
                   >
                     {seoCopiedUrl === (seoStatus?.sitemapUrl || 'https://notflixtv.com/sitemap.xml')
                       ? '✓ Copied Sitemap URL'
@@ -2665,9 +3582,12 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                   </button>
                   <button
                     type="button"
-                    onClick={() => fetchSeoStatus(true)}
+                    onClick={() => {
+                      fetchSeoStatus(true);
+                      fetchLiveArenaStatus(true);
+                    }}
                     disabled={seoRefreshing}
-                    className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-[11px] font-sans font-bold text-white flex items-center gap-1.5 transition-colors cursor-pointer"
+                    className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-[11px] font-sans font-bold text-white flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
                   >
                     <RefreshCw className={`w-3 h-3 ${seoRefreshing ? 'animate-spin' : ''}`} />
                     <span>{seoRefreshing ? 'Refreshing Catalog...' : 'Refresh Sitemap'}</span>
@@ -2683,7 +3603,12 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                       className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-[#11182a] border border-white/5 text-xs gap-2"
                     >
                       <div className="min-w-0 flex-1">
-                        <div className="font-bold text-slate-200 truncate text-[11px]">{item.title}</div>
+                        <div className="font-bold text-slate-200 truncate text-[11px]">
+                          {item.title}{' '}
+                          <span className="font-mono text-[10px] text-slate-400">
+                            · {item.type.toUpperCase()}
+                          </span>
+                        </div>
                         <div className="font-mono text-[10px] text-emerald-400/90 truncate">{item.url}</div>
                       </div>
                       <button
@@ -2693,7 +3618,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                           setSeoCopiedUrl(item.url);
                           setTimeout(() => setSeoCopiedUrl(null), 2000);
                         }}
-                        className="px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-semibold text-slate-300 shrink-0 cursor-pointer"
+                        className="px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-semibold text-slate-300 shrink-0 cursor-pointer whitespace-nowrap"
                       >
                         {seoCopiedUrl === item.url ? '✓ Copied' : 'Copy Link'}
                       </button>

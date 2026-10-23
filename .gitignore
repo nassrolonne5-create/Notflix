@@ -11,6 +11,5 @@ coverage/
 bun.lock
 bun.lockb
 dist.zip
-data/analytics.json
-data/user_profiles.json
 data/userdata.json
+*.tmp.*

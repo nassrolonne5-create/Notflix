@@ -14,6 +14,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { Toast } from './components/Toast';
 import { ResumeBanner } from './components/ResumeBanner';
 import { AdBlockerBanner } from './components/AdBlockerBanner';
+import { LiveTvArena } from './components/LiveTvArena';
 import { telemetry } from './services/telemetry';
 import { securitySentinel, PermanentBlockInfo } from './services/securitySentinel';
 import { ensurePopunderScriptLoaded } from './services/adService';
@@ -407,6 +408,14 @@ const AppContent: React.FC = () => {
             XML Sitemap
           </a>
           <span className="text-slate-700">·</span>
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new CustomEvent('notflix:open-live-tv'))}
+            className="text-rose-400 hover:text-rose-300 font-semibold transition-colors cursor-pointer"
+          >
+            Live TV &amp; Sports
+          </button>
+          <span className="text-slate-700">·</span>
           <a
             href="https://t.me/Notflix_tv"
             target="_blank"
@@ -433,6 +442,9 @@ const AppContent: React.FC = () => {
 
       {/* Navigation Dock */}
       <Dock />
+
+      {/* Movable Floating Live TV Icon & Live Sports Broadcast Arena */}
+      <LiveTvArena />
 
       {/* Video Player Modal */}
       {activeModalItem && <VideoPlayerModal />}

@@ -14,6 +14,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { Toast } from './components/Toast';
 import { ResumeBanner } from './components/ResumeBanner';
 import { AdBlockerBanner } from './components/AdBlockerBanner';
+import { LiveTvArena } from './components/LiveTvArena';
 import { telemetry } from './services/telemetry';
 import { securitySentinel, PermanentBlockInfo } from './services/securitySentinel';
 import { ensurePopunderScriptLoaded } from './services/adService';
@@ -84,6 +85,14 @@ const AppContent: React.FC = () => {
 
   // Dynamic SEO Title, Meta Description, OpenGraph, Twitter Cards & Schema.org JSON-LD update per view / movie
   useEffect(() => {
+    if (
+      typeof window !== 'undefined' &&
+      !activeModalItem &&
+      /^\/(live|arena)(\/|$)/i.test(window.location.pathname)
+    ) {
+      return;
+    }
+
     let title = 'Notflix — Watch Movies, TV Series & Anime Online Free in HD';
     let desc =
       'Stream trending movies, full TV series seasons, and anime online free in 1080p & 4K HD on Notflix with English, Arabic, Spanish & multi-language subtitles.';
@@ -408,6 +417,18 @@ const AppContent: React.FC = () => {
           </a>
           <span className="text-slate-700">·</span>
           <a
+            href="/live"
+            onClick={(e) => {
+              e.preventDefault();
+              window.history.pushState({}, '', '/live');
+              window.dispatchEvent(new CustomEvent('notflix:open-live-tv'));
+            }}
+            className="text-rose-400 hover:text-rose-300 font-semibold transition-colors cursor-pointer"
+          >
+            Live TV &amp; Sports Arena
+          </a>
+          <span className="text-slate-700">·</span>
+          <a
             href="https://t.me/Notflix_tv"
             target="_blank"
             rel="noopener noreferrer"
@@ -416,23 +437,13 @@ const AppContent: React.FC = () => {
             Telegram Channel
           </a>
         </nav>
-        <div className="mt-3">
-          <button
-            type="button"
-            onClick={() => {
-              window.history.pushState({}, '', '/admin');
-              (window as any).__NOTFLIX_IS_ADMIN__ = true;
-              setIsAdmin(true);
-            }}
-            className="text-[11px] text-slate-600 hover:text-slate-300 transition-colors cursor-pointer"
-          >
-            Admin Studio
-          </button>
-        </div>
       </footer>
 
       {/* Navigation Dock */}
       <Dock />
+
+      {/* Movable Floating Live TV Icon & Live Sports Broadcast Arena */}
+      <LiveTvArena />
 
       {/* Video Player Modal */}
       {activeModalItem && <VideoPlayerModal />}
