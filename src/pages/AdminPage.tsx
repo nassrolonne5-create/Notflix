@@ -307,11 +307,15 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
 
     const verifySession = () => {
       attempts++;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
       fetch(`/api/admin/verify?_cb=${Date.now()}`, {
         cache: 'no-store',
+        signal: controller.signal,
         headers: { Authorization: `Bearer ${token}`, 'Cache-Control': 'no-cache' },
       })
         .then(async (res) => {
+          clearTimeout(timeoutId);
           if (cancelled) return;
           if (res.status === 401) {
             localStorage.removeItem('notflix_admin_token');
@@ -322,8 +326,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
           }
           if (!res.ok) {
             // Server is likely mid-deployment (404/502/503) — retry instead of logging out or failing
-            if (attempts < 10) {
-              setTimeout(verifySession, 1500);
+            if (attempts < 3) {
+              setTimeout(verifySession, 1000);
             } else {
               // Assume valid stateless token if server is still restarting
               setIsAuthenticated(true);
@@ -342,9 +346,10 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
           setIsVerifying(false);
         })
         .catch(() => {
+          clearTimeout(timeoutId);
           if (cancelled) return;
-          if (attempts < 10) {
-            setTimeout(verifySession, 1500);
+          if (attempts < 3) {
+            setTimeout(verifySession, 1000);
           } else {
             setIsAuthenticated(true);
             setIsVerifying(false);
@@ -793,6 +798,10 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
 
       const data = await res.json();
       if (data.success) {
+        // Immediately render analytics data so the dashboard never waits on background IndexedDB vault sync
+        setAnalytics(data);
+        setLastFetchedTime(new Date());
+
         // Persist any newly reported server bans & security metrics into the local vault immediately
         if (data.security) {
           saveLocalBansVault({
@@ -821,12 +830,6 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
 
         if (needsVaultSync) {
           const restored = await syncWithBrowserVault(token);
-          if (deploymentJustFinished) {
-            const targetUrl = new URL(window.location.href);
-            targetUrl.searchParams.set('_cb', String(Date.now()));
-            window.location.replace(targetUrl.toString());
-            return;
-          }
           if (restored) {
             setBackupMessage('Auto-restored historical analytics & blocked IPs after update');
             setTimeout(() => setBackupMessage(null), 4000);
@@ -844,15 +847,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
               }
             }
           }
-        } else if (deploymentJustFinished) {
-          const targetUrl = new URL(window.location.href);
-          targetUrl.searchParams.set('_cb', String(Date.now()));
-          window.location.replace(targetUrl.toString());
-          return;
         }
-
-        setAnalytics(data);
-        setLastFetchedTime(new Date());
       }
     } catch {
       // Network interruption during container restart — do not crash or log out
@@ -1727,21 +1722,29 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
   // -------------------------------------------------------------
   // RENDER: YouTube Studio Analytics Dashboard
   // -------------------------------------------------------------
-  const kpis = analytics?.kpis || {
-    liveViewers: 0,
-    totalViews: 0,
-    totalWatchHours: 0,
-    totalWatchMinutes: 0,
-    totalSearches: 0,
-    uniqueVisitors: 0,
+  const rawKpis = analytics?.kpis;
+  const kpis = {
+    liveViewers: Number(rawKpis?.liveViewers) || 0,
+    liveArenaViewers: rawKpis?.liveArenaViewers,
+    totalViews: Number(rawKpis?.totalViews) || 0,
+    totalWatchHours: Number(rawKpis?.totalWatchHours) || 0,
+    totalWatchMinutes: Number(rawKpis?.totalWatchMinutes) || 0,
+    totalSearches: Number(rawKpis?.totalSearches) || 0,
+    uniqueVisitors: Number(rawKpis?.uniqueVisitors) || 0,
   };
 
-  const devices = analytics?.devices || { mobile: 0, desktop: 0, tablet: 0, tv: 0 };
+  const rawDevices = analytics?.devices;
+  const devices = {
+    mobile: Number(rawDevices?.mobile) || 0,
+    desktop: Number(rawDevices?.desktop) || 0,
+    tablet: Number(rawDevices?.tablet) || 0,
+    tv: Number(rawDevices?.tv) || 0,
+  };
   const totalDeviceEvents = devices.mobile + devices.desktop + devices.tablet + devices.tv || 1;
 
   // Max value calculation for timeline graph SVG
-  const timelinePoints = analytics?.timeline || [];
-  const maxViews = Math.max(...timelinePoints.map((p) => p.views), 1);
+  const timelinePoints = Array.isArray(analytics?.timeline) ? analytics.timeline : [];
+  const maxViews = Math.max(...timelinePoints.map((p) => Number(p?.views) || 0), 1);
 
   return (
     <div className="min-h-screen bg-[#080c14] text-white flex flex-col font-sans selection:bg-blue-600 selection:text-white">
@@ -2755,7 +2758,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                 )}
 
                 {/* VOD Movie & TV series streams cards */}
-                {analytics.liveStreams && analytics.liveStreams.length > 0 && (
+                {analytics?.liveStreams && analytics.liveStreams.length > 0 && (
                   <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
                     {analytics.liveStreams.map((stream, idx) => {
                       const isTvStream = stream.mediaType === 'tv';
@@ -2845,43 +2848,43 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
               <div className="flex items-center gap-3 md:gap-4 flex-wrap text-xs font-mono">
                 <div className="flex items-center gap-1.5">
                   <span className="text-slate-400 text-[11px] font-sans">Multiplier:</span>
-                  <span className="font-bold text-white">{smartMetrics.multiplier.toFixed(2)}x</span>
+                  <span className="font-bold text-white">{(Number(smartMetrics?.multiplier) || 1).toFixed(2)}x</span>
                 </div>
                 <span className="text-white/10 hidden sm:inline">|</span>
                 <div className="flex items-center gap-1.5">
                   <span className="text-slate-400 text-[11px] font-sans">Served / Protected:</span>
-                  <span className="font-bold text-blue-400">{smartMetrics.adsDelivered}</span>
+                  <span className="font-bold text-blue-400">{smartMetrics?.adsDelivered ?? 0}</span>
                   <span className="text-slate-500">/</span>
-                  <span className="font-bold text-emerald-400">{smartMetrics.adsSuppressed}</span>
+                  <span className="font-bold text-emerald-400">{smartMetrics?.adsSuppressed ?? 0}</span>
                 </div>
                 <span className="text-white/10 hidden sm:inline">|</span>
                 <div className="flex items-center gap-1.5">
                   <span className="text-slate-400 text-[11px] font-sans">Velocity:</span>
-                  <span className="font-bold text-white">{smartMetrics.interactionVelocityPerMin}/m</span>
+                  <span className="font-bold text-white">{smartMetrics?.interactionVelocityPerMin ?? 0}/m</span>
                 </div>
                 <span className="text-white/10 hidden md:inline">|</span>
                 <div className="hidden md:flex items-center gap-1.5">
                   <span className="text-slate-400 text-[11px] font-sans">Friction:</span>
                   <span
                     className={`font-bold ${
-                      smartMetrics.frictionScore > 1 ? 'text-amber-400' : 'text-emerald-400'
+                      (Number(smartMetrics?.frictionScore) || 0) > 1 ? 'text-amber-400' : 'text-emerald-400'
                     }`}
                   >
-                    {smartMetrics.frictionScore.toFixed(1)}/5
+                    {(Number(smartMetrics?.frictionScore) || 0).toFixed(1)}/5
                   </span>
                 </div>
                 <span className="text-white/10 hidden xl:inline">|</span>
                 <div className="hidden xl:flex items-center gap-2 text-[11px] text-slate-400">
                   <span>
-                    Poster: <strong className="text-blue-400">{Math.round((smartMetrics.effectiveCooldowns.poster || 15000) / 1000)}s</strong>
+                    Poster: <strong className="text-blue-400">{Math.round((smartMetrics?.effectiveCooldowns?.poster || 15000) / 1000)}s</strong>
                   </span>
                   <span>·</span>
                   <span>
-                    Dock: <strong className="text-blue-400">{Math.round((smartMetrics.effectiveCooldowns.dock || 20000) / 1000)}s</strong>
+                    Dock: <strong className="text-blue-400">{Math.round((smartMetrics?.effectiveCooldowns?.dock || 20000) / 1000)}s</strong>
                   </span>
                   <span>·</span>
                   <span>
-                    Ep: <strong className="text-blue-400">{Math.round((smartMetrics.effectiveCooldowns.episode || 35000) / 1000)}s</strong>
+                    Ep: <strong className="text-blue-400">{Math.round((smartMetrics?.effectiveCooldowns?.episode || 35000) / 1000)}s</strong>
                   </span>
                 </div>
               </div>
@@ -3431,18 +3434,18 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                     {[
                       {
                         name: 'CinePro Primary',
-                        endpoint: `${scraperConfigs.cinepro.host}${scraperConfigs.cinepro.port ? ':' + scraperConfigs.cinepro.port : ''}`,
-                        ping: scraperPings.cinepro,
+                        endpoint: `${scraperConfigs?.cinepro?.host || DEFAULT_SCRAPER_ENDPOINTS.cinepro.host}${scraperConfigs?.cinepro?.port ? ':' + scraperConfigs.cinepro.port : ''}`,
+                        ping: scraperPings?.cinepro,
                       },
                       {
                         name: 'TMDB Embed',
-                        endpoint: `${scraperConfigs.tmdb_embed.host}${scraperConfigs.tmdb_embed.port ? ':' + scraperConfigs.tmdb_embed.port : ''}`,
-                        ping: scraperPings.tmdb_embed,
+                        endpoint: `${scraperConfigs?.tmdb_embed?.host || DEFAULT_SCRAPER_ENDPOINTS.tmdb_embed.host}${scraperConfigs?.tmdb_embed?.port ? ':' + scraperConfigs.tmdb_embed.port : ''}`,
+                        ping: scraperPings?.tmdb_embed,
                       },
                       {
                         name: 'Coolify Fallback',
-                        endpoint: scraperConfigs.gateway_fallback.host,
-                        ping: scraperPings.gateway_fallback,
+                        endpoint: scraperConfigs?.gateway_fallback?.host || DEFAULT_SCRAPER_ENDPOINTS.gateway_fallback.host,
+                        ping: scraperPings?.gateway_fallback,
                       },
                     ].map((srv) => (
                       <div
