@@ -329,6 +329,7 @@ export const LiveTvArena: React.FC = () => {
   const arenaScrollRef = useRef<HTMLDivElement | null>(null);
 
   // Draggable Floating Icon / Mini-Player Position State
+  const floatingOrbElRef = useRef<HTMLDivElement | null>(null);
   const [orbPos, setOrbPos] = useState<{ x: number; y: number }>(() => {
     if (typeof window === 'undefined') return { x: 20, y: 120 };
     try {
@@ -337,17 +338,25 @@ export const LiveTvArena: React.FC = () => {
         const parsed = JSON.parse(saved);
         if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
           return {
-            x: Math.min(Math.max(12, parsed.x), window.innerWidth - 172),
-            y: Math.min(Math.max(68, parsed.y), window.innerHeight - 140),
+            x: Math.min(Math.max(8, parsed.x), Math.max(8, window.innerWidth - 172)),
+            y: Math.min(Math.max(8, parsed.y), Math.max(8, window.innerHeight - 80)),
           };
         }
       }
     } catch {}
     return {
-      x: Math.max(16, window.innerWidth - 176),
-      y: Math.max(84, window.innerHeight - 168),
+      x: Math.max(12, window.innerWidth - 176),
+      y: Math.max(76, window.innerHeight - 168),
     };
   });
+  const orbPosRef = useRef<{ x: number; y: number }>(orbPos);
+
+  useEffect(() => {
+    orbPosRef.current = orbPos;
+    if (floatingOrbElRef.current && !dragRef.current.isDown) {
+      floatingOrbElRef.current.style.transform = `translate3d(${orbPos.x}px, ${orbPos.y}px, 0)`;
+    }
+  }, [orbPos]);
 
   // Transparency state when user scrolls/navigates up and down for movies or series
   const [isNavigatingPage, setIsNavigatingPage] = useState<boolean>(false);
@@ -359,28 +368,37 @@ export const LiveTvArena: React.FC = () => {
   const dragRef = useRef<{
     isDown: boolean;
     hasMoved: boolean;
+    pointerId: number | null;
     startX: number;
     startY: number;
     initialOrbX: number;
     initialOrbY: number;
+    offsetX: number;
+    offsetY: number;
   }>({
     isDown: false,
     hasMoved: false,
+    pointerId: null,
     startX: 0,
     startY: 0,
     initialOrbX: 0,
     initialOrbY: 0,
+    offsetX: 0,
+    offsetY: 0,
   });
 
   useEffect(() => {
     const handleResize = () => {
       setOrbPos((prev) => {
-        const maxWidth = isMiniPlayerMode ? 290 : 172;
-        const maxHeight = isMiniPlayerMode ? 200 : 76;
-        return {
-          x: Math.min(Math.max(10, prev.x), Math.max(10, window.innerWidth - maxWidth)),
-          y: Math.min(Math.max(64, prev.y), Math.max(64, window.innerHeight - maxHeight)),
+        const el = floatingOrbElRef.current;
+        const maxWidth = el?.offsetWidth || (isMiniPlayerMode ? 290 : 172);
+        const maxHeight = el?.offsetHeight || (isMiniPlayerMode ? 200 : 56);
+        const clamped = {
+          x: Math.min(Math.max(8, prev.x), Math.max(8, window.innerWidth - maxWidth - 8)),
+          y: Math.min(Math.max(8, prev.y), Math.max(8, window.innerHeight - maxHeight - 8)),
         };
+        orbPosRef.current = clamped;
+        return clamped;
       });
     };
     window.addEventListener('resize', handleResize);
@@ -810,18 +828,31 @@ export const LiveTvArena: React.FC = () => {
   }, []);
 
   const handleOrbPointerDown = (e: React.PointerEvent<HTMLElement>) => {
-    setIsNavigatingPage(false);
+    if (e.button !== undefined && e.button !== 0) return;
     const target = e.target as HTMLElement;
     if (target.closest('[data-no-drag="true"]')) return;
+
+    if (navScrollTimeoutRef.current !== null) {
+      window.clearTimeout(navScrollTimeoutRef.current);
+      navScrollTimeoutRef.current = null;
+    }
+    setIsNavigatingPage(false);
+
+    const currentX = orbPosRef.current.x;
+    const currentY = orbPosRef.current.y;
 
     dragRef.current = {
       isDown: true,
       hasMoved: false,
+      pointerId: e.pointerId,
       startX: e.clientX,
       startY: e.clientY,
-      initialOrbX: orbPos.x,
-      initialOrbY: orbPos.y,
+      initialOrbX: currentX,
+      initialOrbY: currentY,
+      offsetX: e.clientX - currentX,
+      offsetY: e.clientY - currentY,
     };
+
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {}
@@ -829,39 +860,56 @@ export const LiveTvArena: React.FC = () => {
 
   const handleOrbPointerMove = (e: React.PointerEvent<HTMLElement>) => {
     if (!dragRef.current.isDown) return;
+    if (dragRef.current.pointerId !== null && e.pointerId !== dragRef.current.pointerId) return;
+
     const dx = e.clientX - dragRef.current.startX;
     const dy = e.clientY - dragRef.current.startY;
-    if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
-      dragRef.current.hasMoved = true;
-    }
-    if (!dragRef.current.hasMoved) return;
 
-    const widgetW = isMiniPlayerMode ? 290 : 172;
-    const widgetH = isMiniPlayerMode ? 200 : 68;
+    if (!dragRef.current.hasMoved) {
+      if (Math.hypot(dx, dy) < 3) return;
+      dragRef.current.hasMoved = true;
+      dragRef.current.offsetX = e.clientX - dragRef.current.initialOrbX;
+      dragRef.current.offsetY = e.clientY - dragRef.current.initialOrbY;
+    }
+
+    const el = floatingOrbElRef.current;
+    const widgetW = el?.offsetWidth || (isMiniPlayerMode ? 290 : 172);
+    const widgetH = el?.offsetHeight || (isMiniPlayerMode ? 200 : 52);
+
     const nextX = Math.min(
-      Math.max(10, dragRef.current.initialOrbX + dx),
-      Math.max(10, window.innerWidth - widgetW)
+      Math.max(6, e.clientX - dragRef.current.offsetX),
+      Math.max(6, window.innerWidth - widgetW - 6)
     );
     const nextY = Math.min(
-      Math.max(60, dragRef.current.initialOrbY + dy),
-      Math.max(60, window.innerHeight - widgetH)
+      Math.max(6, e.clientY - dragRef.current.offsetY),
+      Math.max(6, window.innerHeight - widgetH - 6)
     );
-    setOrbPos({ x: nextX, y: nextY });
+
+    orbPosRef.current = { x: nextX, y: nextY };
+    if (el) {
+      el.style.transform = `translate3d(${nextX}px, ${nextY}px, 0)`;
+    }
   };
 
-  const handleOrbPointerUp = (e: React.PointerEvent<HTMLElement>) => {
+  const finishOrbPointerInteraction = (e: React.PointerEvent<HTMLElement>, isCancel = false) => {
     if (!dragRef.current.isDown) return;
     const wasDrag = dragRef.current.hasMoved;
     dragRef.current.isDown = false;
+    dragRef.current.pointerId = null;
+
     try {
-      e.currentTarget.releasePointerCapture(e.pointerId);
+      if (e.currentTarget.hasPointerCapture?.(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
     } catch {}
 
     if (wasDrag) {
+      const finalPos = { ...orbPosRef.current };
+      setOrbPos(finalPos);
       try {
-        localStorage.setItem('notflix_live_orb_pos_v1', JSON.stringify(orbPos));
+        localStorage.setItem('notflix_live_orb_pos_v1', JSON.stringify(finalPos));
       } catch {}
-    } else if (!isMiniPlayerMode) {
+    } else if (!isCancel && !isMiniPlayerMode) {
       setIsArenaOpen(true);
       fetchLiveEvents();
       fetchLiveChannels();
@@ -1016,24 +1064,26 @@ export const LiveTvArena: React.FC = () => {
           ===================================================================== */}
       {!isArenaOpen && (
         <div
+          ref={floatingOrbElRef}
           style={{
-            left: `${orbPos.x}px`,
-            top: `${orbPos.y}px`,
+            left: 0,
+            top: 0,
+            transform: `translate3d(${orbPos.x}px, ${orbPos.y}px, 0)`,
             touchAction: 'none',
+            willChange: 'transform',
           }}
           onPointerDown={handleOrbPointerDown}
           onPointerMove={handleOrbPointerMove}
-          onPointerUp={handleOrbPointerUp}
+          onPointerUp={(e) => finishOrbPointerInteraction(e, false)}
+          onPointerCancel={(e) => finishOrbPointerInteraction(e, true)}
           onMouseEnter={() => setIsNavigatingPage(false)}
-          className={`fixed z-50 select-none cursor-grab active:cursor-grabbing transition-all duration-300 ${
-            isNavigatingPage
-              ? 'opacity-55 scale-[0.98]'
-              : 'opacity-100 scale-100'
+          className={`fixed z-50 select-none cursor-grab active:cursor-grabbing transition-opacity duration-200 ${
+            isNavigatingPage ? 'opacity-55' : 'opacity-100'
           }`}
         >
           {isMiniPlayerMode && activeChannel ? (
             <div
-              className={`w-[275px] sm:w-[310px] rounded-2xl border border-rose-500/40 shadow-[0_20px_50px_rgba(0,0,0,0.85)] overflow-hidden transition-all duration-300 ${
+              className={`w-[275px] sm:w-[310px] rounded-2xl border border-rose-500/40 shadow-[0_20px_50px_rgba(0,0,0,0.85)] overflow-hidden transition-colors duration-200 ${
                 isNavigatingPage
                   ? 'bg-[#0b101d]/60 backdrop-blur-sm'
                   : 'bg-[#0b101d]/95 backdrop-blur-xl'
@@ -1110,7 +1160,7 @@ export const LiveTvArena: React.FC = () => {
           ) : (
             <div
               title="Drag to move · Tap to open Live Arena"
-              className={`group relative flex items-center gap-2 pl-2 pr-3 py-2 rounded-2xl border border-rose-500/40 hover:border-rose-400 shadow-[0_12px_32px_rgba(0,0,0,0.75)] transition-all duration-200 ${
+              className={`group relative flex items-center gap-2 pl-2 pr-3 py-2 rounded-2xl border border-rose-500/40 hover:border-rose-400 shadow-[0_12px_32px_rgba(0,0,0,0.75)] transition-colors duration-200 ${
                 isNavigatingPage
                   ? 'bg-[#0e1525]/60 backdrop-blur-sm'
                   : 'bg-[#0e1525]/95 backdrop-blur-xl'
@@ -1128,19 +1178,22 @@ export const LiveTvArena: React.FC = () => {
               {/* Sliding Slot: First shows "LIVE ARENA", then disappears & slides in Live/Upcoming/Finished Events */}
               <div className="w-[104px] h-[28px] overflow-hidden relative text-left">
                 <div
-                  className="transition-transform duration-500 ease-in-out"
+                  className="flex flex-col transition-transform duration-500 ease-in-out will-change-transform"
                   style={{
-                    transform: `translateY(-${(orbTickerIndex % orbSlideSequence.length) * 28}px)`,
+                    transform: `translate3d(0, -${(orbTickerIndex % orbSlideSequence.length) * 28}px, 0)`,
                   }}
                 >
                   {orbSlideSequence.map((slide, idx) => {
                     if (slide.kind === 'brand') {
                       return (
-                        <div key={`brand-${idx}`} className="h-[28px] flex flex-col justify-center text-left">
-                          <span className="text-[11px] font-extrabold tracking-wider uppercase text-white leading-tight truncate">
+                        <div
+                          key={`brand-${idx}`}
+                          className="h-[28px] min-h-[28px] max-h-[28px] shrink-0 overflow-hidden flex flex-col justify-center gap-0.5 text-left"
+                        >
+                          <span className="text-[11px] font-extrabold tracking-wider uppercase text-white leading-none truncate">
                             LIVE ARENA
                           </span>
-                          <span className="text-[9px] font-medium text-slate-400 leading-tight truncate">
+                          <span className="text-[9px] font-medium text-slate-400 leading-none truncate">
                             {totalLiveCount > 0 ? `${totalLiveCount} Live Now` : `${events.length || 58} Matches`}
                           </span>
                         </div>
@@ -1157,14 +1210,17 @@ export const LiveTvArena: React.FC = () => {
                       ev.awayTeam?.shortName || ev.awayTeam?.name?.slice(0, 3).toUpperCase() || 'AWY';
 
                     return (
-                      <div key={`${ev.id}-${idx}`} className="h-[28px] flex flex-col justify-center text-left">
-                        <span className="text-[10px] font-extrabold text-white leading-tight truncate tabular-nums">
+                      <div
+                        key={`${ev.id}-${idx}`}
+                        className="h-[28px] min-h-[28px] max-h-[28px] shrink-0 overflow-hidden flex flex-col justify-center gap-0.5 text-left"
+                      >
+                        <span className="text-[10px] font-extrabold text-white leading-none truncate tabular-nums">
                           {evLive || evFin
                             ? `${homeShort} ${ev.homeTeam?.score ?? 0}-${ev.awayTeam?.score ?? 0} ${awayShort}`
                             : `${homeShort} vs ${awayShort}`}
                         </span>
                         <span
-                          className={`text-[9px] font-bold leading-tight truncate ${
+                          className={`text-[9px] font-bold leading-none truncate ${
                             evLive
                               ? 'text-rose-400'
                               : evFin

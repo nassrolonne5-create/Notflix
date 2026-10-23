@@ -1039,19 +1039,48 @@ function sanitizeDeviceId(raw: unknown): string | null {
   return trimmed;
 }
 
+let userProfilesCache: Record<string, UserData & { updatedAt?: number }> | null = null;
+
+function persistUserProfilesAtomically(profiles: Record<string, UserData & { updatedAt?: number }>) {
+  const serialized = JSON.stringify(profiles);
+  writeFileAtomicallyToMirrors('user_profiles.json', serialized, USER_PROFILES_FILE);
+}
+
 function readAllUserProfiles(): Record<string, UserData & { updatedAt?: number }> {
-  try {
-    if (fs.existsSync(USER_PROFILES_FILE)) {
-      const content = fs.readFileSync(USER_PROFILES_FILE, 'utf-8');
-      const parsed = JSON.parse(content);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed;
-      }
-    }
-  } catch (err) {
-    console.warn('Could not read user profiles file, returning empty map', err);
+  if (userProfilesCache) {
+    return userProfilesCache;
   }
-  return {};
+
+  const candidatePaths = Array.from(
+    new Set([
+      USER_PROFILES_FILE,
+      ...PERSISTENT_READ_DIRS.map((d) => path.join(d, 'user_profiles.json')),
+    ])
+  );
+
+  for (const candidate of candidatePaths) {
+    try {
+      if (fs.existsSync(candidate)) {
+        const content = fs.readFileSync(candidate, 'utf-8').trim();
+        if (!content) {
+          continue;
+        }
+        const parsed = JSON.parse(content);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          userProfilesCache = parsed;
+          return userProfilesCache;
+        }
+      }
+    } catch {
+      // Self-heal corrupted or truncated file below
+    }
+  }
+
+  userProfilesCache = {};
+  try {
+    persistUserProfilesAtomically(userProfilesCache);
+  } catch {}
+  return userProfilesCache;
 }
 
 function readUserData(deviceId: string | null): UserData {
@@ -1090,7 +1119,8 @@ function writeUserData(deviceId: string | null, data: UserData) {
         .slice(0, keys.length - 2000)
         .forEach((k) => delete profiles[k]);
     }
-    fs.writeFileSync(USER_PROFILES_FILE, JSON.stringify(profiles), 'utf-8');
+    userProfilesCache = profiles;
+    persistUserProfilesAtomically(profiles);
   } catch (err) {
     console.error('Failed to write user profiles file:', err);
   }

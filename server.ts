@@ -567,7 +567,8 @@ function loadPermanentBansFromDisk() {
   for (const candidate of candidatePaths) {
     try {
       if (fs.existsSync(candidate)) {
-        const raw = fs.readFileSync(candidate, 'utf-8');
+        const raw = fs.readFileSync(candidate, 'utf-8').trim();
+        if (!raw) continue;
         const parsed = JSON.parse(raw);
 
         // Automatically purge v1 ban files that could contain false-positive browser bans
@@ -1095,7 +1096,8 @@ function readScraperConfigFromDisk(): ScraperConfigStore {
   for (const candidate of candidatePaths) {
     try {
       if (fs.existsSync(candidate)) {
-        const raw = fs.readFileSync(candidate, 'utf-8');
+        const raw = fs.readFileSync(candidate, 'utf-8').trim();
+        if (!raw) continue;
         const parsed = JSON.parse(raw);
         if (parsed && parsed.scrapers && typeof parsed.scrapers === 'object') {
           const updatedAt = typeof parsed.updatedAt === 'number' ? parsed.updatedAt : Date.now();
@@ -1201,19 +1203,48 @@ function sanitizeDeviceId(raw: unknown): string | null {
   return trimmed;
 }
 
+let userProfilesCache: Record<string, UserData & { updatedAt?: number }> | null = null;
+
+function persistUserProfilesAtomically(profiles: Record<string, UserData & { updatedAt?: number }>) {
+  const serialized = JSON.stringify(profiles);
+  writeFileAtomicallyToMirrors('user_profiles.json', serialized, USER_PROFILES_FILE);
+}
+
 function readAllUserProfiles(): Record<string, UserData & { updatedAt?: number }> {
-  try {
-    if (fs.existsSync(USER_PROFILES_FILE)) {
-      const content = fs.readFileSync(USER_PROFILES_FILE, 'utf-8');
-      const parsed = JSON.parse(content);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed;
-      }
-    }
-  } catch (err) {
-    console.warn('Could not read user profiles file, returning empty map', err);
+  if (userProfilesCache) {
+    return userProfilesCache;
   }
-  return {};
+
+  const candidatePaths = Array.from(
+    new Set([
+      USER_PROFILES_FILE,
+      ...PERSISTENT_READ_DIRS.map((d) => path.join(d, 'user_profiles.json')),
+    ])
+  );
+
+  for (const candidate of candidatePaths) {
+    try {
+      if (fs.existsSync(candidate)) {
+        const content = fs.readFileSync(candidate, 'utf-8').trim();
+        if (!content) {
+          continue;
+        }
+        const parsed = JSON.parse(content);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          userProfilesCache = parsed;
+          return userProfilesCache;
+        }
+      }
+    } catch {
+      // Self-heal corrupted or truncated file below
+    }
+  }
+
+  userProfilesCache = {};
+  try {
+    persistUserProfilesAtomically(userProfilesCache);
+  } catch {}
+  return userProfilesCache;
 }
 
 function readUserData(deviceId: string | null): UserData {
@@ -1252,7 +1283,8 @@ function writeUserData(deviceId: string | null, data: UserData) {
         .slice(0, keys.length - 2000)
         .forEach((k) => delete profiles[k]);
     }
-    fs.writeFileSync(USER_PROFILES_FILE, JSON.stringify(profiles), 'utf-8');
+    userProfilesCache = profiles;
+    persistUserProfilesAtomically(profiles);
   } catch (err) {
     console.error('Failed to write user profiles file:', err);
   }
@@ -5324,7 +5356,8 @@ function readAnalyticsData(): AnalyticsData {
   for (const candidate of candidatePaths) {
     try {
       if (fs.existsSync(candidate)) {
-        const content = fs.readFileSync(candidate, 'utf-8');
+        const content = fs.readFileSync(candidate, 'utf-8').trim();
+        if (!content) continue;
         const parsed = JSON.parse(content);
         const eventsArr = Array.isArray(parsed?.events)
           ? parsed.events
@@ -6374,7 +6407,9 @@ function loadAdBlockPolicyFromDisk(): AdBlockPolicyStore {
   for (const file of candidates) {
     try {
       if (fs.existsSync(file)) {
-        const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
+        const raw = fs.readFileSync(file, 'utf-8').trim();
+        if (!raw) continue;
+        const parsed = JSON.parse(raw);
         if (parsed && (parsed.mode === 'dismissible' || parsed.mode === 'strict')) {
           return {
             mode: parsed.mode,
@@ -6384,10 +6419,12 @@ function loadAdBlockPolicyFromDisk(): AdBlockPolicyStore {
       }
     } catch {}
   }
-  return {
+  const fallback: AdBlockPolicyStore = {
     mode: 'dismissible',
     updatedAt: 0,
   };
+  saveAdBlockPolicyToDiskSync(fallback);
+  return fallback;
 }
 
 function saveAdBlockPolicyToDiskSync(store: AdBlockPolicyStore): void {
