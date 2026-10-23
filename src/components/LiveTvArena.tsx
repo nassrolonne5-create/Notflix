@@ -15,6 +15,7 @@ import {
   AlertCircle,
   Download,
   Sparkles,
+  Users,
 } from 'lucide-react';
 import { telemetry } from '../services/telemetry';
 
@@ -325,23 +326,9 @@ function isLiveArenaUrlPath(pathname: string): boolean {
 }
 
 export const LiveTvArena: React.FC = () => {
-  const [isArenaOpen, setIsArenaOpen] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    return isLiveArenaUrlPath(window.location.pathname);
-  });
+  const [isArenaOpen, setIsArenaOpen] = useState<boolean>(false);
   const [isMiniPlayerMode, setIsMiniPlayerMode] = useState(false);
-  const [activeView, setActiveView] = useState<'events' | 'channels'>(() => {
-    if (typeof window !== 'undefined' && /^\/live\/channel\//i.test(window.location.pathname)) {
-      return 'channels';
-    }
-    return 'events';
-  });
-  const previousNonLivePathRef = useRef<string>(
-    typeof window !== 'undefined' && !isLiveArenaUrlPath(window.location.pathname)
-      ? window.location.pathname || '/'
-      : '/'
-  );
-  const handledInitialDeepLinkRef = useRef<string>('');
+  const [activeView, setActiveView] = useState<'events' | 'channels'>('events');
 
   // Data state
   const [events, setEvents] = useState<LiveSportEvent[]>([]);
@@ -368,6 +355,7 @@ export const LiveTvArena: React.FC = () => {
   const [, setIsPlaying] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [isAudioCleanEnabled, setIsAudioCleanEnabled] = useState<boolean>(true);
+  const [liveArenaViewersCount, setLiveArenaViewersCount] = useState<number>(0);
 
   // Video & HLS refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -496,29 +484,10 @@ export const LiveTvArena: React.FC = () => {
     }
   }, []);
 
-  const openArenaWithSeoUrl = useCallback(
-    (targetPath?: string) => {
-      if (typeof window !== 'undefined') {
-        const curPath = window.location.pathname || '/';
-        if (!isLiveArenaUrlPath(curPath) && !curPath.startsWith('/admin')) {
-          previousNonLivePathRef.current = curPath;
-        }
-        const nextPath =
-          targetPath ||
-          (activeMatch
-            ? buildMatchSeoPath(activeMatch)
-            : activeChannel
-            ? buildChannelSeoPath(activeChannel.id)
-            : '/live');
-        if (window.location.pathname !== nextPath) {
-          window.history.pushState({}, '', nextPath);
-        }
-      }
-      setIsArenaOpen(true);
-      setIsMiniPlayerMode(false);
-    },
-    [activeMatch, activeChannel]
-  );
+  const openArenaWithSeoUrl = useCallback((_targetPath?: string) => {
+    setIsArenaOpen(true);
+    setIsMiniPlayerMode(false);
+  }, []);
 
   const closeArenaRestoreSeoUrl = useCallback((minimizeToFloating = false) => {
     setIsArenaOpen(false);
@@ -526,9 +495,7 @@ export const LiveTvArena: React.FC = () => {
       setIsMiniPlayerMode(true);
     }
     if (typeof window !== 'undefined' && isLiveArenaUrlPath(window.location.pathname)) {
-      const restorePath = previousNonLivePathRef.current || '/';
-      window.history.pushState({}, '', restorePath);
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      window.history.replaceState({}, '', '/');
     }
     const existingArenaSchema = document.getElementById('notflix-live-arena-jsonld');
     if (existingArenaSchema) existingArenaSchema.remove();
@@ -536,7 +503,7 @@ export const LiveTvArena: React.FC = () => {
 
   useEffect(() => {
     const handleOpenLive = () => {
-      openArenaWithSeoUrl('/live');
+      openArenaWithSeoUrl();
       fetchLiveEvents();
       fetchLiveChannels();
     };
@@ -552,6 +519,35 @@ export const LiveTvArena: React.FC = () => {
     }, 40000);
     return () => window.clearInterval(interval);
   }, [fetchLiveEvents, fetchLiveChannels]);
+
+  // Real-time Live Arena viewers count poll (aggregated viewers only)
+  const fetchLiveArenaViewers = useCallback(async () => {
+    try {
+      const res = await fetch('/api/live/viewers');
+      if (res.ok) {
+        const data = await res.json();
+        if (typeof data.liveArenaViewers === 'number') {
+          setLiveArenaViewersCount(data.liveArenaViewers);
+        }
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    fetchLiveArenaViewers();
+    const interval = window.setInterval(fetchLiveArenaViewers, 20000);
+    return () => window.clearInterval(interval);
+  }, [fetchLiveArenaViewers]);
+
+  // Active viewer presence tracking while user is in Live Arena
+  useEffect(() => {
+    if (!isArenaOpen && !isMiniPlayerMode) return;
+    telemetry.trackArenaPresence(25);
+    const interval = window.setInterval(() => {
+      telemetry.trackArenaPresence(25);
+    }, 25000);
+    return () => window.clearInterval(interval);
+  }, [isArenaOpen, isMiniPlayerMode]);
 
   const scrollToPlayer = useCallback(() => {
     window.setTimeout(() => {
@@ -588,15 +584,6 @@ export const LiveTvArena: React.FC = () => {
           logo: recCh?.logo,
           quality: '1080p HD',
         });
-      }
-
-      if (typeof window !== 'undefined' && isArenaOpen) {
-        const targetSeoPath = matchContext
-          ? buildMatchSeoPath(matchContext)
-          : buildChannelSeoPath(channelId);
-        if (window.location.pathname !== targetSeoPath) {
-          window.history.pushState({}, '', targetSeoPath);
-        }
       }
 
       scrollToPlayer();
@@ -704,50 +691,13 @@ export const LiveTvArena: React.FC = () => {
     [channels, tuneChannel]
   );
 
-  // Sync deep-linked URLs (/live, /live/match/:slug, /live/channel/:id) on initial load and browser back/forward
+  // Keep each device session independent: never auto-tune a channel or match from the browser URL
   useEffect(() => {
     if (typeof window === 'undefined') return;
-
-    const syncFromUrlPath = () => {
-      const path = window.location.pathname || '/';
-      if (!isLiveArenaUrlPath(path)) {
-        if (!path.startsWith('/admin')) {
-          previousNonLivePathRef.current = path;
-        }
-        return;
-      }
-
-      setIsArenaOpen(true);
-      setIsMiniPlayerMode(false);
-
-      const matchRoute = path.match(/^\/live\/match\/([^/?#]+)/i);
-      const channelRoute = path.match(/^\/live\/channel\/([^/?#]+)/i);
-
-      if (matchRoute && events.length > 0) {
-        const rawParam = decodeURIComponent(matchRoute[1]);
-        if (handledInitialDeepLinkRef.current === `match:${rawParam}:${events.length}`) return;
-        const foundEv =
-          events.find((e) => String(e.id) === rawParam) ||
-          events.find((e) => rawParam.startsWith(`${e.id}-`)) ||
-          events.find((e) => buildMatchSeoPath(e).endsWith(rawParam));
-        if (foundEv) {
-          handledInitialDeepLinkRef.current = `match:${rawParam}:${events.length}`;
-          setActiveView('events');
-          playEventDirectly(foundEv);
-        }
-      } else if (channelRoute) {
-        const rawChannelId = decodeURIComponent(channelRoute[1]).toLowerCase();
-        if (handledInitialDeepLinkRef.current === `channel:${rawChannelId}:${channels.length}`) return;
-        handledInitialDeepLinkRef.current = `channel:${rawChannelId}:${channels.length}`;
-        setActiveView('channels');
-        tuneChannel(rawChannelId, null);
-      }
-    };
-
-    syncFromUrlPath();
-    window.addEventListener('popstate', syncFromUrlPath);
-    return () => window.removeEventListener('popstate', syncFromUrlPath);
-  }, [events, channels, playEventDirectly, tuneChannel]);
+    if (isLiveArenaUrlPath(window.location.pathname)) {
+      window.history.replaceState({}, '', '/');
+    }
+  }, []);
 
   // Dynamic Client-Side SEO Meta, OpenGraph, Canonical & Schema.org JSON-LD for Live Arena
   useEffect(() => {
@@ -1529,6 +1479,15 @@ export const LiveTvArena: React.FC = () => {
                   <span className="font-display text-lg sm:text-xl tracking-wider uppercase text-white truncate">
                     NOTFLIX <span className="text-rose-500">ARENA</span>
                   </span>
+                  {liveArenaViewersCount > 0 && (
+                    <span
+                      title={`${liveArenaViewersCount} active viewers currently in Live Arena`}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/30 text-[11px] font-mono font-bold text-rose-300 shrink-0"
+                    >
+                      <Users className="w-3 h-3 text-rose-400" />
+                      <span>{liveArenaViewersCount} {liveArenaViewersCount === 1 ? 'Viewer' : 'Viewers'}</span>
+                    </span>
+                  )}
                 </div>
 
                 {/* Right Action Buttons: Search, Refresh, Mini-TV, Close */}

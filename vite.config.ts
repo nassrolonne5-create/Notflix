@@ -11,6 +11,19 @@ export default defineConfig(() => {
         '@': path.resolve(import.meta.dirname || '.', '.'),
       },
     },
+    build: {
+      chunkSizeWarningLimit: 1200,
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            'vendor-react': ['react', 'react-dom'],
+            'vendor-hls': ['hls.js'],
+            'vendor-dash': ['dashjs'],
+            'vendor-ui': ['lucide-react', 'motion'],
+          },
+        },
+      },
+    },
     server: {
       host: '0.0.0.0',
       port: 3000,

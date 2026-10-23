@@ -246,12 +246,22 @@ export const telemetry = {
     });
   },
 
+  // Track active Live Arena viewer presence (counts toward total Live Arena viewers without logging what they watch)
+  trackArenaPresence(watchSeconds = 25) {
+    sendTelemetry({
+      eventType: 'heartbeat',
+      title: 'Live Arena',
+      mediaType: 'live',
+      watchSeconds,
+      serverName: 'Live Arena',
+    });
+  },
+
   // Track initial Live Arena stream playback start (live match or 24/7 TV channel)
   trackLivePlay(title: string, poster?: string, serverName?: string) {
-    if (!title) return;
     sendTelemetry({
       eventType: 'play',
-      title,
+      title: 'Live Arena',
       mediaType: 'live',
       poster: poster || '',
       serverName: serverName || 'Live Arena HD',
@@ -260,10 +270,9 @@ export const telemetry = {
 
   // Track active Live Arena playback heartbeat (every 25-30s while live stream is playing)
   trackLiveHeartbeat(title: string, watchSeconds: number, poster?: string, serverName?: string) {
-    if (!title) return;
     sendTelemetry({
       eventType: 'heartbeat',
-      title,
+      title: 'Live Arena',
       mediaType: 'live',
       poster: poster || '',
       watchSeconds,

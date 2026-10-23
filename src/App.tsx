@@ -420,7 +420,6 @@ const AppContent: React.FC = () => {
             href="/live"
             onClick={(e) => {
               e.preventDefault();
-              window.history.pushState({}, '', '/live');
               window.dispatchEvent(new CustomEvent('notflix:open-live-tv'));
             }}
             className="text-rose-400 hover:text-rose-300 font-semibold transition-colors cursor-pointer"

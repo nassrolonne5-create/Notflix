@@ -4345,6 +4345,22 @@ app.get(['/api/live/events', '/v1/live/events'], async (req: Request, res: Respo
   }
 });
 
+// 1.5 GET LIVE ARENA VIEWERS COUNT (Purely the number of active Live Arena viewers, no content tracking)
+app.get(['/api/live/viewers', '/v1/live/viewers', '/api/live-arena/viewers'], (req: Request, res: Response) => {
+  try {
+    const now = Date.now();
+    let liveArenaViewers = 0;
+    activeLiveViewers.forEach((data) => {
+      if (now - data.lastPing <= 75000 && data.mediaType === 'live') {
+        liveArenaViewers++;
+      }
+    });
+    return res.json({ success: true, liveArenaViewers, liveViewers: liveArenaViewers });
+  } catch {
+    return res.json({ success: true, liveArenaViewers: 0, liveViewers: 0 });
+  }
+});
+
 // 2. GET ALL LIVE IPTV SPORTS CHANNELS (STRICTLY FROM CINEPRO API)
 app.get(['/api/live/channels', '/v1/live/channels'], async (req: Request, res: Response) => {
   try {
@@ -5598,26 +5614,35 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
       secondsAgo: number;
     }> = [];
 
+    let liveArenaViewersCount = 0;
+    let vodViewersCount = 0;
+
     activeLiveViewers.forEach((data, sessId) => {
       const diff = now - data.lastPing;
       if (diff <= liveTimeout) {
-        currentLiveList.push({
-          sessionId: sessId,
-          title: data.title,
-          device: data.device,
-          mediaType: data.mediaType,
-          season: data.season,
-          episode: data.episode,
-          poster: data.poster,
-          secondsAgo: Math.round(diff / 1000),
-        });
+        if (data.mediaType === 'live') {
+          // Strictly aggregate Live Arena viewers as total count (no individual viewing detail exposed)
+          liveArenaViewersCount++;
+        } else {
+          vodViewersCount++;
+          currentLiveList.push({
+            sessionId: sessId,
+            title: data.title,
+            device: data.device,
+            mediaType: data.mediaType,
+            season: data.season,
+            episode: data.episode,
+            poster: data.poster,
+            secondsAgo: Math.round(diff / 1000),
+          });
+        }
       } else {
         // Clean up stale sessions
         activeLiveViewers.delete(sessId);
       }
     });
 
-    const liveViewersCount = currentLiveList.length;
+    const liveViewersCount = liveArenaViewersCount + vodViewersCount;
 
     // 2. Filter events by selected date range
     let cutoffTs = 0;
@@ -5826,6 +5851,8 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
       totalStoredEvents: analyticsStore.events.length,
       kpis: {
         liveViewers: liveViewersCount,
+        liveArenaViewers: liveArenaViewersCount,
+        vodViewers: vodViewersCount,
         totalViews,
         totalWatchHours: Number((totalWatchSeconds / 3600).toFixed(1)),
         totalWatchMinutes: Math.round(totalWatchSeconds / 60),
@@ -6332,7 +6359,7 @@ app.post('/api/admin/scrapers/test', requireAdminAuth, async (req: Request, res:
 // ============================================================================
 // AD-BLOCKER NOTIFICATION POPUP POLICY (Admin-Controlled: Dismissible vs Strict Lock)
 // ============================================================================
-export type AdBlockPopupMode = 'dismissible' | 'strict';
+type AdBlockPopupMode = 'dismissible' | 'strict';
 
 interface AdBlockPolicyStore {
   mode: AdBlockPopupMode;

@@ -43,6 +43,8 @@ interface AdminPageProps {
 
 interface AnalyticsKPIs {
   liveViewers: number;
+  liveArenaViewers?: number;
+  vodViewers?: number;
   totalViews: number;
   totalWatchHours: number;
   totalWatchMinutes: number;
@@ -2308,7 +2310,6 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                   <button
                     type="button"
                     onClick={() => {
-                      window.history.pushState({}, '', '/live');
                       window.dispatchEvent(new CustomEvent('notflix:open-live-tv'));
                       onExit();
                     }}
@@ -2322,15 +2323,25 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
 
               {/* 5-Column Live Arena KPI Strip */}
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-                <div className="bg-[#11182a] border border-white/10 rounded-xl p-3 flex flex-col justify-between">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                    Matches Live Now
-                  </span>
+                <div className="bg-[#11182a] border border-white/10 rounded-xl p-3 flex flex-col justify-between hover:border-rose-500/40 transition-colors">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                      Matches Live Now
+                    </span>
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500" />
+                    </span>
+                  </div>
                   <div className="text-2xl font-extrabold font-mono tabular-nums text-rose-400 my-1">
                     {liveArenaStatus?.liveNowCount ?? 0}
                   </div>
-                  <div className="text-[10px] text-slate-400 font-mono tabular-nums">
-                    In-play broadcasts · {liveArenaStatus?.activeArenaViewers ?? 0} watching
+                  <div className="text-[10px] text-slate-400 font-mono tabular-nums flex items-center justify-between">
+                    <span>In-play fixtures</span>
+                    <span className="text-rose-300 font-bold flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block animate-pulse" />
+                      {liveArenaStatus?.activeArenaViewers ?? analytics?.kpis?.liveArenaViewers ?? 0} watching
+                    </span>
                   </div>
                 </div>
 
@@ -2506,7 +2517,6 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                             <button
                               type="button"
                               onClick={() => {
-                                window.history.pushState({}, '', ev.seoPath);
                                 window.dispatchEvent(new CustomEvent('notflix:open-live-tv'));
                                 onExit();
                               }}
@@ -2635,7 +2645,12 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                 <div className="text-2xl font-extrabold font-mono text-white tracking-tight my-1">
                   {kpis.liveViewers}
                 </div>
-                <div className="text-[10px] text-emerald-400 font-medium">● Active streams now</div>
+                <div className="text-[10px] text-emerald-400 font-medium flex items-center justify-between">
+                  <span>● Active streams</span>
+                  <span className="text-rose-400 font-bold">
+                    {kpis.liveArenaViewers ?? liveArenaStatus?.activeArenaViewers ?? 0} in Arena
+                  </span>
+                </div>
               </div>
 
               {/* Total Views */}
@@ -2692,8 +2707,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
               </div>
             </div>
 
-            {/* 2. Active Live Streams Strip (Only when viewers are actively watching) */}
-            {analytics?.liveStreams && analytics.liveStreams.length > 0 && (
+            {/* 2. Active Real-Time Viewers Strip (Only when viewers are actively watching) */}
+            {((analytics?.liveStreams && analytics.liveStreams.length > 0) || ((kpis.liveArenaViewers ?? liveArenaStatus?.activeArenaViewers ?? 0) > 0)) && (
               <div className="bg-[#0e1424] border border-emerald-500/30 rounded-xl p-3">
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
@@ -2702,74 +2717,99 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                       <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
                     </span>
                     <h3 className="text-[11px] font-extrabold uppercase tracking-wider text-white">
-                      Active Live Streams ({analytics.liveStreams.length})
+                      Active Real-Time Viewers ({kpis.liveViewers})
                     </h3>
                   </div>
                   <span className="text-[10px] text-slate-400 font-mono">Live · 10s sync</span>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-                  {analytics.liveStreams.map((stream, idx) => {
-                    const isLiveArenaStream = stream.mediaType === 'live';
-                    const isTvStream = stream.mediaType === 'tv';
-                    return (
-                      <div
-                        key={stream.sessionId + idx}
-                        className="bg-[#131b2e] border border-white/10 rounded-lg p-2 flex items-center gap-2.5"
-                      >
-                        {stream.poster ? (
-                          <img
-                            src={stream.poster}
-                            alt={stream.title}
-                            className="w-8 h-11 object-cover rounded shrink-0 bg-black/40"
-                          />
-                        ) : (
-                          <div
-                            className={`w-8 h-11 rounded flex items-center justify-center shrink-0 border ${
-                              isLiveArenaStream
-                                ? 'bg-rose-600/20 border-rose-500/30 text-rose-400'
-                                : isTvStream
-                                ? 'bg-purple-600/20 border-purple-500/30 text-purple-400'
-                                : 'bg-blue-600/20 border-blue-500/30 text-blue-400'
-                            }`}
-                          >
-                            {isLiveArenaStream ? (
-                              <Radio className="w-4 h-4" />
-                            ) : isTvStream ? (
-                              <Tv className="w-4 h-4" />
-                            ) : (
-                              <Film className="w-4 h-4" />
-                            )}
-                          </div>
-                        )}
-                        <div className="min-w-0 flex-1">
-                          <div className="text-xs font-bold text-white truncate">{stream.title}</div>
-                          <div className="flex items-center gap-1.5 mt-0.5 text-[10px] font-mono text-slate-300">
-                            <span
-                              className={
-                                isLiveArenaStream
-                                  ? 'text-rose-300 font-bold'
-                                  : isTvStream
-                                  ? 'text-purple-300'
-                                  : 'text-blue-300'
-                              }
-                            >
-                              {isLiveArenaStream
-                                ? 'Live Arena'
-                                : isTvStream
-                                ? `TV S${stream.season || 1}:E${stream.episode || 1}`
-                                : 'Movie'}
-                            </span>
-                            <span>·</span>
-                            <span className="text-emerald-400 capitalize">{stream.device}</span>
-                            <span>·</span>
-                            <span className="text-slate-400">{stream.secondsAgo}s</span>
-                          </div>
+                {/* Dedicated Live Arena Viewers Counter (No content details exposed, strictly aggregated viewers count) */}
+                {((kpis.liveArenaViewers ?? liveArenaStatus?.activeArenaViewers ?? 0) > 0) && (
+                  <div className="bg-gradient-to-r from-rose-950/40 via-[#131b2e] to-rose-950/20 border border-rose-500/30 rounded-lg p-2.5 flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-lg bg-rose-600/20 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
+                        <Radio className="w-4 h-4 animate-pulse" />
+                      </div>
+                      <div>
+                        <div className="text-xs font-bold text-white flex items-center gap-2">
+                          <span>Live Arena Active Viewers</span>
+                          <span className="relative flex h-2 w-2">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500" />
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-rose-300/80 font-mono">
+                          Live Sports &amp; 24/7 TV channels active audience
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-xl font-mono font-extrabold text-rose-400">
+                        {kpis.liveArenaViewers ?? liveArenaStatus?.activeArenaViewers ?? 0}
+                      </div>
+                      <div className="text-[9px] uppercase tracking-wider text-slate-400 font-bold">
+                        Arena Viewers
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* VOD Movie & TV series streams cards */}
+                {analytics.liveStreams && analytics.liveStreams.length > 0 && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+                    {analytics.liveStreams.map((stream, idx) => {
+                      const isTvStream = stream.mediaType === 'tv';
+                      return (
+                        <div
+                          key={stream.sessionId + idx}
+                          className="bg-[#131b2e] border border-white/10 rounded-lg p-2 flex items-center gap-2.5"
+                        >
+                          {stream.poster ? (
+                            <img
+                              src={stream.poster}
+                              alt={stream.title}
+                              className="w-8 h-11 object-cover rounded shrink-0 bg-black/40"
+                            />
+                          ) : (
+                            <div
+                              className={`w-8 h-11 rounded flex items-center justify-center shrink-0 border ${
+                                isTvStream
+                                  ? 'bg-purple-600/20 border-purple-500/30 text-purple-400'
+                                  : 'bg-blue-600/20 border-blue-500/30 text-blue-400'
+                              }`}
+                            >
+                              {isTvStream ? (
+                                <Tv className="w-4 h-4" />
+                              ) : (
+                                <Film className="w-4 h-4" />
+                              )}
+                            </div>
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <div className="text-xs font-bold text-white truncate">{stream.title}</div>
+                            <div className="flex items-center gap-1.5 mt-0.5 text-[10px] font-mono text-slate-300">
+                              <span
+                                className={
+                                  isTvStream
+                                    ? 'text-purple-300'
+                                    : 'text-blue-300'
+                                }
+                              >
+                                {isTvStream
+                                  ? `TV S${stream.season || 1}:E${stream.episode || 1}`
+                                  : 'Movie'}
+                              </span>
+                              <span>·</span>
+                              <span className="text-emerald-400 capitalize">{stream.device}</span>
+                              <span>·</span>
+                              <span className="text-slate-400">{stream.secondsAgo}s</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
 

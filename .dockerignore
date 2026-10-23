@@ -10,6 +10,7 @@ Notflix-main
 downloads
 .wrangler
 .aistudio
+public/assets/aistudio
 *.md
 *.txt
 bun.lock
