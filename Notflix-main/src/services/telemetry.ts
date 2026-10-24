@@ -89,7 +89,56 @@ function detectOS(): string {
   return 'Unknown OS';
 }
 
-// Non-blocking beacon / fetch sender
+const TELEMETRY_RETRY_QUEUE_KEY = 'notflix_telemetry_retry_queue_v1';
+
+function readRetryQueue(): Array<Record<string, any>> {
+  try {
+    const raw = localStorage.getItem(TELEMETRY_RETRY_QUEUE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRetryQueue(queue: Array<Record<string, any>>) {
+  try {
+    localStorage.setItem(TELEMETRY_RETRY_QUEUE_KEY, JSON.stringify(queue.slice(-50)));
+  } catch {}
+}
+
+let isFlushingQueue = false;
+
+async function flushQueuedTelemetry(pingEndpoint: string) {
+  if (isFlushingQueue) return;
+  const queue = readRetryQueue();
+  if (queue.length === 0) return;
+  isFlushingQueue = true;
+  try {
+    const remaining: Array<Record<string, any>> = [];
+    for (const item of queue) {
+      try {
+        const res = await fetch(pingEndpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(item),
+          keepalive: true,
+        });
+        if (!res.ok && res.status >= 500) {
+          remaining.push(item);
+        }
+      } catch {
+        remaining.push(item);
+      }
+    }
+    saveRetryQueue(remaining);
+  } finally {
+    isFlushingQueue = false;
+  }
+}
+
+// Non-blocking fetch sender with automatic retry queue during container deployments
 function sendTelemetry(payload: Record<string, any>) {
   try {
     const data = {
@@ -108,20 +157,26 @@ function sendTelemetry(payload: Record<string, any>) {
       '';
     const pingEndpoint = apiBase ? `${apiBase.replace(/\/$/, '')}/api/analytics/ping` : '/api/analytics/ping';
 
-    // Prefer navigator.sendBeacon if available (note: sendBeacon only works with relative or CORS-enabled endpoints)
-    if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
-      const blob = new Blob([json], { type: 'application/json' });
-      navigator.sendBeacon(pingEndpoint, blob);
-      return;
-    }
-
-    // Fire-and-forget fetch with keepalive
     fetch(pingEndpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: json,
       keepalive: true,
-    }).catch(() => {});
+    })
+      .then((res) => {
+        if (res.ok) {
+          flushQueuedTelemetry(pingEndpoint).catch(() => {});
+        } else if (res.status >= 500 || res.status === 404) {
+          const q = readRetryQueue();
+          q.push(data);
+          saveRetryQueue(q);
+        }
+      })
+      .catch(() => {
+        const q = readRetryQueue();
+        q.push(data);
+        saveRetryQueue(q);
+      });
   } catch {
     // Fail silently so user playback is never interrupted
   }
@@ -191,6 +246,40 @@ export const telemetry = {
     });
   },
 
+  // Track active Live Arena viewer presence (counts toward total Live Arena viewers without logging what they watch)
+  trackArenaPresence(watchSeconds = 25) {
+    sendTelemetry({
+      eventType: 'heartbeat',
+      title: 'Live Arena',
+      mediaType: 'live',
+      watchSeconds,
+      serverName: 'Live Arena',
+    });
+  },
+
+  // Track initial Live Arena stream playback start (live match or 24/7 TV channel)
+  trackLivePlay(title: string, poster?: string, serverName?: string) {
+    sendTelemetry({
+      eventType: 'play',
+      title: 'Live Arena',
+      mediaType: 'live',
+      poster: poster || '',
+      serverName: serverName || 'Live Arena HD',
+    });
+  },
+
+  // Track active Live Arena playback heartbeat (every 25-30s while live stream is playing)
+  trackLiveHeartbeat(title: string, watchSeconds: number, poster?: string, serverName?: string) {
+    sendTelemetry({
+      eventType: 'heartbeat',
+      title: 'Live Arena',
+      mediaType: 'live',
+      poster: poster || '',
+      watchSeconds,
+      serverName: serverName || 'Live Arena HD',
+    });
+  },
+
   // Track user search query
   trackSearch(query: string) {
     if (!query || query.trim().length < 2) return;
@@ -210,3 +299,4 @@ export const telemetry = {
     });
   },
 };
+

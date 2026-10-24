@@ -214,7 +214,7 @@ const SPORT_FILTERS = [
 ];
 
 const CHANNEL_CATEGORIES = [
-  { id: 'all', label: 'All Networks (117)' },
+  { id: 'all', label: 'All Networks (134)' },
   { id: 'bein', label: 'beIN Sports' },
   { id: 'mena', label: 'MENA & SSC / Alkass' },
   { id: 'movies', label: 'Movies & Cinema' },
@@ -234,6 +234,7 @@ const CHANNEL_LANGUAGES = [
   { id: 'ar', label: 'AR' },
   { id: 'fr', label: 'FR' },
   { id: 'es', label: 'ES' },
+  { id: 'it', label: 'IT' },
   { id: 'de', label: 'DE' },
   { id: 'pt', label: 'PT' },
   { id: 'tr', label: 'TR' },
@@ -376,18 +377,36 @@ function formatCompactChannelBadge(channelId?: string, rawName?: string): string
     'bein-sports-1-fr': 'beIN FR 1',
     'bein-sports-2-fr': 'beIN FR 2',
     'bein-sports-3-fr': 'beIN FR 3',
+    'bein-sports-fr-1': 'beIN FR 1',
+    'bein-sports-fr-2': 'beIN FR 2',
+    'bein-sports-fr-3': 'beIN FR 3',
     'bein-sports-en-1': 'beIN EN 1',
     'bein-sports-en-2': 'beIN EN 2',
     'bein-sports-en-3': 'beIN EN 3',
     'bein-sports-usa': 'beIN Sports US',
     'bein-sports-es': 'beIN Sports Ñ',
+    'bein-sports-xtra-es': 'beIN Xtra Ñ',
     'bein-sports-1-tr': 'beIN TR 1',
+    'bein-sports-2-tr': 'beIN TR 2',
     'movistar-laliga': 'M+ LaLiga',
     'movistar-champions': 'M+ Champions',
     'dazn-laliga': 'DAZN LaLiga',
+    'dazn-laliga-es': 'DAZN LaLiga',
     'dazn-1-uk': 'DAZN 1 HD',
     'dazn-1-de': 'DAZN 1 DE',
     'dazn-2-de': 'DAZN 2 DE',
+    'dazn-1-it': 'DAZN 1 IT',
+    'dazn-2-it': 'DAZN 2 IT',
+    'sky-sport-calcio-it': 'Sky Calcio IT',
+    'sky-sport-uno-it': 'Sky Uno IT',
+    'sky-sport-arena-it': 'Sky Arena IT',
+    'sky-sport-max-it': 'Sky Max IT',
+    'sky-sport-252-it': 'Sky 252 IT',
+    'sky-sport-24-it': 'Sky Sport 24',
+    'sky-sport-bundesliga-1-de': 'Sky Buli 1',
+    'sky-sport-top-event-de': 'Sky Top Event',
+    'starzplay-sports-1-ar': 'StarzPlay 1',
+    'starzplay-sports-2-ar': 'StarzPlay 2',
     'sport-tv-1-pt': 'Sport TV1',
     'sport-tv-2-pt': 'Sport TV2',
     'eleven-sports-1-pt': 'Eleven 1 PT',
@@ -438,6 +457,8 @@ export const LiveTvArena: React.FC = () => {
   const [activeSourceIndex, setActiveSourceIndex] = useState<number>(0);
   const [usingFallbackProxy, setUsingFallbackProxy] = useState<boolean>(false);
   const [loadingStream, setLoadingStream] = useState<boolean>(false);
+  const [isVideoBuffering, setIsVideoBuffering] = useState<boolean>(false);
+  const [bufferingLogoFailed, setBufferingLogoFailed] = useState<boolean>(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [, setIsPlaying] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(false);
@@ -449,6 +470,51 @@ export const LiveTvArena: React.FC = () => {
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const arenaScrollRef = useRef<HTMLDivElement | null>(null);
+  const bufferingTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setBufferingLogoFailed(false);
+    setIsVideoBuffering(false);
+    if (bufferingTimerRef.current !== null) {
+      window.clearTimeout(bufferingTimerRef.current);
+      bufferingTimerRef.current = null;
+    }
+  }, [activeChannel?.id, activeChannel?.logo]);
+
+  const handleVideoWaiting = useCallback(() => {
+    if (bufferingTimerRef.current !== null) {
+      window.clearTimeout(bufferingTimerRef.current);
+    }
+    bufferingTimerRef.current = window.setTimeout(() => {
+      setIsVideoBuffering(true);
+    }, 300);
+  }, []);
+
+  const handleVideoPlaying = useCallback(() => {
+    if (bufferingTimerRef.current !== null) {
+      window.clearTimeout(bufferingTimerRef.current);
+      bufferingTimerRef.current = null;
+    }
+    setIsVideoBuffering(false);
+    setLoadingStream(false);
+  }, []);
+
+  const activeChannelLogo = useMemo(() => {
+    if (!activeChannel) return '';
+    return (
+      activeChannel.logo ||
+      channels.find((c) => c.id === activeChannel.id)?.logo ||
+      activeMatch?.recommendedChannels?.find((r) => r.channelId === activeChannel.id)?.logo ||
+      ''
+    );
+  }, [activeChannel, channels, activeMatch]);
+
+  const cleanActiveChannelName = useMemo(() => {
+    if (!activeChannel?.name) return 'Live HD';
+    return activeChannel.name
+      .replace(/\s*\((Arabic|English|French|Spanish|Turkish|German|Portuguese|Italian)\)/gi, '')
+      .trim();
+  }, [activeChannel?.name]);
 
   // Draggable Floating Icon / Mini-Player Position State
   const floatingOrbElRef = useRef<HTMLDivElement | null>(null);
@@ -763,15 +829,13 @@ export const LiveTvArena: React.FC = () => {
           setActiveSourceIndex(0);
         } else {
           setSources([]);
+          setLoadingStream(false);
           setStreamError('Stream mirrors are synchronizing. Try switching server or commentary language below.');
         }
       } catch (err: any) {
         if (err?.name === 'AbortError' || reqId !== tuneRequestIdRef.current) return;
+        setLoadingStream(false);
         setStreamError('Unable to reach live stream gateway. Please retry or select another channel.');
-      } finally {
-        if (reqId === tuneRequestIdRef.current) {
-          setLoadingStream(false);
-        }
       }
     },
     [channels, scrollToPlayer]
@@ -1501,11 +1565,31 @@ export const LiveTvArena: React.FC = () => {
                   playsInline
                   autoPlay
                   muted={isMuted}
+                  onWaiting={handleVideoWaiting}
+                  onPlaying={handleVideoPlaying}
+                  onCanPlay={handleVideoPlaying}
                   className="w-full h-full object-contain"
                 />
-                {loadingStream && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-black/70">
-                    <RefreshCw className="w-5 h-5 text-rose-500 animate-spin" />
+                {(loadingStream || isVideoBuffering) && !streamError && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-[#070b14]/90 backdrop-blur-sm select-none pointer-events-none">
+                    <div className="relative flex items-center justify-center">
+                      <span className="w-12 h-12 rounded-full border-2 border-white/10 border-t-rose-500 border-r-rose-400/60 animate-spin" />
+                      <div className="absolute w-8 h-8 rounded-xl bg-white/95 p-1 shadow-[0_0_20px_rgba(225,29,72,0.4)] flex items-center justify-center overflow-hidden">
+                        {activeChannelLogo && !bufferingLogoFailed ? (
+                          <img
+                            src={activeChannelLogo}
+                            alt={cleanActiveChannelName}
+                            onError={() => setBufferingLogoFailed(true)}
+                            className="w-full h-full object-contain"
+                          />
+                        ) : (
+                          <Tv className="w-4 h-4 text-rose-600" />
+                        )}
+                      </div>
+                    </div>
+                    <span className="text-[10px] font-extrabold text-white tracking-tight truncate max-w-[200px] px-2">
+                      {formatCompactChannelBadge(activeChannel.id, activeChannel.name)}
+                    </span>
                   </div>
                 )}
                 <div
@@ -1914,16 +1998,53 @@ export const LiveTvArena: React.FC = () => {
                     ref={videoRef}
                     playsInline
                     autoPlay
-                    controls
+                    controls={!loadingStream && !isVideoBuffering && !streamError}
+                    onWaiting={handleVideoWaiting}
+                    onPlaying={handleVideoPlaying}
+                    onCanPlay={handleVideoPlaying}
                     className="w-full h-full object-contain"
                   />
 
-                  {loadingStream && (
-                    <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center gap-2 z-10">
-                      <RefreshCw className="w-7 h-7 text-rose-500 animate-spin" />
-                      <p className="text-xs font-bold text-white">
-                        Connecting to {activeChannel.name}...
-                      </p>
+                  {(loadingStream || isVideoBuffering) && !streamError && (
+                    <div className="absolute inset-0 bg-[#070b14]/92 backdrop-blur-md flex flex-col items-center justify-center z-10 select-none pointer-events-none">
+                      <div className="relative flex items-center justify-center">
+                        <div className="w-28 h-28 rounded-full bg-rose-600/15 blur-2xl animate-pulse absolute" />
+                        <span className="w-20 h-20 sm:w-24 sm:h-24 rounded-full border border-rose-500/25 animate-ping opacity-30 absolute" />
+                        <span className="w-20 h-20 sm:w-24 sm:h-24 rounded-full border-2 border-white/[0.08] border-t-rose-500 border-r-rose-400/70 animate-spin" />
+                        <div className="absolute w-14 h-14 sm:w-16 sm:h-16 rounded-2xl bg-white/95 p-2 shadow-[0_8px_28px_rgba(225,29,72,0.38)] flex items-center justify-center overflow-hidden">
+                          {activeChannelLogo && !bufferingLogoFailed ? (
+                            <img
+                              src={activeChannelLogo}
+                              alt={cleanActiveChannelName}
+                              onError={() => setBufferingLogoFailed(true)}
+                              className="w-full h-full object-contain"
+                            />
+                          ) : (
+                            <Tv className="w-7 h-7 text-rose-600" />
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="mt-3.5 flex flex-col items-center gap-1.5 px-4 text-center">
+                        <span className="text-sm sm:text-base font-extrabold tracking-tight text-white">
+                          {cleanActiveChannelName}
+                        </span>
+                        <div className="flex items-end gap-1 h-2.5" aria-hidden="true">
+                          <span className="w-1 h-1.5 rounded-full bg-rose-500 animate-pulse" />
+                          <span
+                            className="w-1 h-2.5 rounded-full bg-rose-400 animate-pulse"
+                            style={{ animationDelay: '150ms' }}
+                          />
+                          <span
+                            className="w-1 h-2 rounded-full bg-rose-500 animate-pulse"
+                            style={{ animationDelay: '300ms' }}
+                          />
+                          <span
+                            className="w-1 h-1.5 rounded-full bg-rose-400 animate-pulse"
+                            style={{ animationDelay: '450ms' }}
+                          />
+                        </div>
+                      </div>
                     </div>
                   )}
 
@@ -2080,7 +2201,7 @@ export const LiveTvArena: React.FC = () => {
                     const primaryChannelName =
                       displayedChannelObj?.name?.replace(/\s*\([^)]*\)/g, '').trim() ||
                       ev.broadcasts?.[0] ||
-                      'beIN Sports 1 HD';
+                      'Live Sports HD';
                     const primaryLangTag = (
                       displayedChannelObj?.language ||
                       displayedChannelObj?.languageLabel?.slice(0, 2) ||
@@ -2202,7 +2323,7 @@ export const LiveTvArena: React.FC = () => {
                         <div className="mt-2.5 pt-2 border-t border-white/[0.06] flex items-center justify-between gap-2">
                           <div className="flex items-center gap-1.5 min-w-0 flex-1 overflow-x-auto no-scrollbar">
                             {recChannels.length > 0 ? (
-                              recChannels.slice(0, 3).map((rc, idx) => {
+                              recChannels.slice(0, 4).map((rc, idx) => {
                                 const isActiveCh =
                                   (isWatching && activeChannel?.id === rc.channelId) ||
                                   (!isWatching && idx === 0);
