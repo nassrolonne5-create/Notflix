@@ -149,6 +149,22 @@ export interface LiveChannelStreamItem {
   languageLabel?: string;
 }
 
+export interface LiveChannelEpgProgram {
+  id?: string;
+  eventId?: string | null;
+  title: string;
+  subtitle?: string;
+  category?: string;
+  league?: string;
+  startTime: string;
+  endTime?: string;
+  status?: string;
+  statusDetail?: string;
+  isLive?: boolean;
+  progressPct?: number;
+  type?: string;
+}
+
 export interface LiveChannel {
   id: string;
   name: string;
@@ -163,6 +179,13 @@ export interface LiveChannel {
   featured?: boolean;
   streams?: LiveChannelStreamItem[];
   defaultProxyUrl?: string;
+  epg?: {
+    nowPlaying?: LiveChannelEpgProgram | null;
+    nextUp?: LiveChannelEpgProgram | null;
+    upcoming?: LiveChannelEpgProgram[];
+    currentProgram?: LiveChannelEpgProgram | null;
+    nextProgram?: LiveChannelEpgProgram | null;
+  };
 }
 
 export interface VerifiedStreamSource {
@@ -191,7 +214,7 @@ const SPORT_FILTERS = [
 ];
 
 const CHANNEL_CATEGORIES = [
-  { id: 'all', label: 'All Networks (102)' },
+  { id: 'all', label: 'All Networks (117)' },
   { id: 'bein', label: 'beIN Sports' },
   { id: 'mena', label: 'MENA & SSC / Alkass' },
   { id: 'movies', label: 'Movies & Cinema' },
@@ -244,13 +267,14 @@ function formatKickoffTime(isoString?: string): {
   dateLabel: string;
   relative: string;
   isToday: boolean;
+  minsUntilKickoff: number;
 } {
   if (!isoString) {
-    return { time: 'TBD', dateLabel: 'Today', relative: 'Scheduled', isToday: true };
+    return { time: 'TBD', dateLabel: 'Today', relative: 'Scheduled', isToday: true, minsUntilKickoff: 999 };
   }
   const date = new Date(isoString);
   if (Number.isNaN(date.getTime())) {
-    return { time: 'TBD', dateLabel: 'Today', relative: 'Scheduled', isToday: true };
+    return { time: 'TBD', dateLabel: 'Today', relative: 'Scheduled', isToday: true, minsUntilKickoff: 999 };
   }
   const time = date.toLocaleTimeString('en-US', {
     hour: '2-digit',
@@ -264,22 +288,22 @@ function formatKickoffTime(isoString?: string): {
     : date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 
   const diffMs = date.getTime() - now.getTime();
+  const minsUntilKickoff = Math.round(diffMs / 60000);
   let relative = 'Starting soon';
 
   if (diffMs > 0) {
-    const mins = Math.round(diffMs / 60000);
-    if (mins < 60) {
-      relative = `in ${mins}m`;
-    } else if (mins < 1440) {
-      const hrs = Math.floor(mins / 60);
-      const remMins = mins % 60;
+    if (minsUntilKickoff < 60) {
+      relative = `in ${minsUntilKickoff}m`;
+    } else if (minsUntilKickoff < 1440) {
+      const hrs = Math.floor(minsUntilKickoff / 60);
+      const remMins = minsUntilKickoff % 60;
       relative = remMins > 0 ? `in ${hrs}h ${remMins}m` : `in ${hrs}h`;
     } else {
       relative = dateLabel;
     }
   }
 
-  return { time, dateLabel, relative, isToday };
+  return { time, dateLabel, relative, isToday, minsUntilKickoff };
 }
 
 function normalizeSportMatch(eventSport: string, filterSport: string): boolean {
@@ -323,6 +347,69 @@ export function buildChannelSeoPath(channelId: string): string {
 
 function isLiveArenaUrlPath(pathname: string): boolean {
   return /^\/(live|arena)(\/|$)/i.test(pathname || '');
+}
+
+function formatCompactChannelBadge(channelId?: string, rawName?: string): string {
+  const id = String(channelId || '').toLowerCase();
+  const compactMap: Record<string, string> = {
+    'sky-sports-premier-league': 'Sky Sports PL',
+    'sky-sports-main-event': 'Sky Main Event',
+    'sky-sports-football': 'Sky Football',
+    'sky-sports-plus': 'Sky Sports+',
+    'sky-sports-action': 'Sky Action',
+    'sky-sports-arena': 'Sky Arena',
+    'sky-sports-f1': 'Sky Sports F1',
+    'sky-sports-mix': 'Sky Sports Mix',
+    'sky-sports-news': 'Sky Sports News',
+    'sky-sports-tennis': 'Sky Tennis',
+    'sky-sports-golf': 'Sky Golf',
+    'sky-sports-cricket': 'Sky Cricket',
+    'supersport-premier-league': 'SuperSport PL',
+    'supersport-football': 'SuperSport FB',
+    'supersport-laliga': 'SuperSport LaLiga',
+    'supersport-grandstand': 'SS Grandstand',
+    'supersport-variety-1': 'SS Variety 1',
+    'cbs-sports-golazo': 'CBS Golazo',
+    'bein-sports-xtra-1': 'beIN Xtra 1',
+    'bein-sports-max-1-ar': 'beIN Max 1',
+    'bein-sports-max-2-ar': 'beIN Max 2',
+    'bein-sports-1-fr': 'beIN FR 1',
+    'bein-sports-2-fr': 'beIN FR 2',
+    'bein-sports-3-fr': 'beIN FR 3',
+    'bein-sports-en-1': 'beIN EN 1',
+    'bein-sports-en-2': 'beIN EN 2',
+    'bein-sports-en-3': 'beIN EN 3',
+    'bein-sports-usa': 'beIN Sports US',
+    'bein-sports-es': 'beIN Sports Ñ',
+    'bein-sports-1-tr': 'beIN TR 1',
+    'movistar-laliga': 'M+ LaLiga',
+    'movistar-champions': 'M+ Champions',
+    'dazn-laliga': 'DAZN LaLiga',
+    'dazn-1-uk': 'DAZN 1 HD',
+    'dazn-1-de': 'DAZN 1 DE',
+    'dazn-2-de': 'DAZN 2 DE',
+    'sport-tv-1-pt': 'Sport TV1',
+    'sport-tv-2-pt': 'Sport TV2',
+    'eleven-sports-1-pt': 'Eleven 1 PT',
+    'canal-plus-foot-fr': 'Canal+ Foot',
+    'rmc-sport-1-fr': 'RMC Sport 1',
+    'usa-network-hd': 'USA Network',
+    'espn-deportes': 'ESPN Deportes',
+    'fox-deportes': 'Fox Deportes',
+    'tudn-usa': 'TUDN HD',
+    'ad-sports-1-ar': 'AD Sports 1',
+    'ad-sports-2-ar': 'AD Sports 2',
+    'dubai-sports-1-ar': 'Dubai Sports 1',
+    'on-time-sports-1-ar': 'ON Time 1',
+    'arryadia-maroc-ar': 'Arryadia HD',
+  };
+  if (id && compactMap[id]) return compactMap[id];
+
+  return String(rawName || id || 'Live HD')
+    .replace(/\s*\([^)]*\)/g, '')
+    .replace(/\b(UK|USA|HD|FHD|4K)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 export const LiveTvArena: React.FC = () => {
@@ -577,9 +664,19 @@ export const LiveTvArena: React.FC = () => {
     }, 60);
   }, []);
 
+  const tuneRequestIdRef = useRef<number>(0);
+  const tuneAbortRef = useRef<AbortController | null>(null);
+
   const tuneChannel = useCallback(
     async (channelId: string, matchContext?: LiveSportEvent | null) => {
       if (!channelId) return;
+      const reqId = ++tuneRequestIdRef.current;
+      if (tuneAbortRef.current) {
+        tuneAbortRef.current.abort();
+      }
+      const controller = new AbortController();
+      tuneAbortRef.current = controller;
+
       if (matchContext !== undefined) {
         setActiveMatch(matchContext);
       }
@@ -607,8 +704,13 @@ export const LiveTvArena: React.FC = () => {
       scrollToPlayer();
 
       try {
-        const res = await fetch(`/api/live/stream/${encodeURIComponent(channelId)}`);
+        const res = await fetch(`/api/live/stream/${encodeURIComponent(channelId)}`, {
+          signal: controller.signal,
+        });
+        if (reqId !== tuneRequestIdRef.current) return;
         const data = await res.json();
+        if (reqId !== tuneRequestIdRef.current) return;
+
         const fetchedSources: VerifiedStreamSource[] = Array.isArray(data?.sources)
           ? data.sources.filter((s: any) => Boolean(s?.url))
           : [];
@@ -641,6 +743,7 @@ export const LiveTvArena: React.FC = () => {
             name: data.channel.name || prev?.name || channelId,
             logo: data.channel.logo || prev?.logo,
             languageLabel: data.channel.languageLabel || data.channel.language || prev?.languageLabel || 'English',
+            epg: data.channel.epg || prev?.epg,
           }));
         }
 
@@ -662,10 +765,13 @@ export const LiveTvArena: React.FC = () => {
           setSources([]);
           setStreamError('Stream mirrors are synchronizing. Try switching server or commentary language below.');
         }
-      } catch {
+      } catch (err: any) {
+        if (err?.name === 'AbortError' || reqId !== tuneRequestIdRef.current) return;
         setStreamError('Unable to reach live stream gateway. Please retry or select another channel.');
       } finally {
-        setLoadingStream(false);
+        if (reqId === tuneRequestIdRef.current) {
+          setLoadingStream(false);
+        }
       }
     },
     [channels, scrollToPlayer]
@@ -927,28 +1033,13 @@ export const LiveTvArena: React.FC = () => {
     const showSignalInterruptedOverlay = () => {
       if (failoverTriggered) return;
       failoverTriggered = true;
+      // Only try alternate server mirrors for the SAME selected TV channel; never silently jump to a different TV channel
       if (activeSourceIndex + 1 < sources.length) {
         setUsingFallbackProxy(false);
         setActiveSourceIndex((prev) => prev + 1);
-      } else if (
-        activeMatch &&
-        Array.isArray(activeMatch.recommendedChannels) &&
-        activeMatch.recommendedChannels.length > 1 &&
-        activeChannel
-      ) {
-        const curIdx = activeMatch.recommendedChannels.findIndex(
-          (rc) => rc.channelId === activeChannel.id
-        );
-        const nextIdx = curIdx >= 0 ? curIdx + 1 : 1;
-        if (nextIdx < activeMatch.recommendedChannels.length) {
-          tuneChannel(activeMatch.recommendedChannels[nextIdx].channelId, activeMatch);
-          return;
-        }
-        setLoadingStream(false);
-        setStreamError('Signal interrupted on this mirror. Pick another server or commentary option.');
       } else {
         setLoadingStream(false);
-        setStreamError('Signal interrupted on this mirror. Pick another server or commentary option.');
+        setStreamError('Signal interrupted on this channel mirror. Click Retry Signal or choose another broadcast channel below.');
       }
     };
 
@@ -1654,7 +1745,7 @@ export const LiveTvArena: React.FC = () => {
                       activeView === 'channels' ? 'bg-black/30 text-white' : 'bg-white/5 text-slate-400'
                     }`}
                   >
-                    {channels.length || 102}
+                    {channels.length || 117}
                   </span>
                 </button>
               </div>
@@ -1671,7 +1762,7 @@ export const LiveTvArena: React.FC = () => {
                     placeholder={
                       activeView === 'events'
                         ? 'Search team, league, or channel...'
-                        : 'Search 102+ live sports, movie & TV channels...'
+                        : 'Search 117+ live sports, movie & TV channels...'
                     }
                     className="w-full pl-8 pr-8 py-1.5 rounded-lg bg-[#080c15] border border-white/15 focus:border-rose-500 focus:outline-none text-xs text-white placeholder-slate-500"
                   />
@@ -1869,13 +1960,23 @@ export const LiveTvArena: React.FC = () => {
 
                 {/* Stream Bar: Title + Commentary Languages + Mirrors */}
                 <div className="p-2.5 sm:px-4 bg-[#101829] border-t border-white/[0.08] flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
+                  <div className="flex items-center gap-2 min-w-0 flex-wrap">
                     <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping shrink-0" />
                     <span className="text-xs font-bold text-white truncate">
                       {activeMatch
                         ? `${activeMatch.homeTeam?.name} vs ${activeMatch.awayTeam?.name}`
                         : activeChannel.name}
                     </span>
+                    {activeMatch && !isEventLive(activeMatch.status) && !isEventFinished(activeMatch.status) && (
+                      <span className="px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/35 text-[10px] font-semibold text-amber-300">
+                        Kickoff {formatKickoffTime(activeMatch.startTime).relative} ({formatKickoffTime(activeMatch.startTime).time}) · Previewing {formatCompactChannelBadge(activeChannel.id, activeChannel.name)}
+                      </span>
+                    )}
+                    {!activeMatch && (activeChannel.epg?.nowPlaying || activeChannel.epg?.currentProgram) && (
+                      <span className="px-2 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/35 text-[10px] font-semibold text-rose-300 truncate max-w-[260px]">
+                        Now Playing: {(activeChannel.epg?.nowPlaying || activeChannel.epg?.currentProgram)?.title}
+                      </span>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-1.5 flex-wrap">
@@ -1884,14 +1985,14 @@ export const LiveTvArena: React.FC = () => {
                       activeMatch.recommendedChannels.length > 0 &&
                       activeMatch.recommendedChannels.map((rc) => {
                         const isCurrent = rc.channelId === activeChannel.id;
-                        const cleanName = rc.name.replace(/\s*\([^)]*\)/g, '').trim();
+                        const cleanName = formatCompactChannelBadge(rc.channelId, rc.name);
                         const langTag = (rc.language || rc.languageLabel?.slice(0, 2) || 'HD').toUpperCase();
                         return (
                           <button
                             key={rc.channelId}
                             type="button"
                             onClick={() => tuneChannel(rc.channelId, activeMatch)}
-                            title={`${cleanName} (${rc.languageLabel})`}
+                            title={`${rc.name} (${rc.languageLabel})`}
                             className={`px-2 py-1 rounded-md text-[10px] font-bold transition-colors cursor-pointer flex items-center gap-1 ${
                               isCurrent
                                 ? 'bg-rose-600 text-white shadow-[0_2px_10px_rgba(225,29,72,0.4)]'
@@ -1899,7 +2000,7 @@ export const LiveTvArena: React.FC = () => {
                             }`}
                           >
                             <Tv className="w-2.5 h-2.5 shrink-0 opacity-80" />
-                            <span className="truncate max-w-[125px]">{cleanName}</span>
+                            <span className="truncate max-w-[135px]">{cleanName}</span>
                             <span className="opacity-75 text-[9px]">({langTag})</span>
                           </button>
                         );
@@ -1993,8 +2094,14 @@ export const LiveTvArena: React.FC = () => {
                     return (
                       <div
                         key={ev.id}
-                        onClick={() => playEventDirectly(ev, displayedChannelObj?.channelId)}
-                        className={`group rounded-2xl px-3.5 pt-3 pb-2.5 border transition-all duration-200 cursor-pointer ${
+                        onClick={() => {
+                          if (!finished) {
+                            playEventDirectly(ev, displayedChannelObj?.channelId);
+                          }
+                        }}
+                        className={`group rounded-2xl px-3.5 pt-3 pb-2.5 border transition-all duration-200 ${
+                          finished ? 'cursor-default opacity-85' : 'cursor-pointer'
+                        } ${
                           isWatching
                             ? 'bg-[#151f38] border-blue-500/60 shadow-[0_8px_24px_rgba(29,99,255,0.2)]'
                             : live
@@ -2099,10 +2206,7 @@ export const LiveTvArena: React.FC = () => {
                                 const isActiveCh =
                                   (isWatching && activeChannel?.id === rc.channelId) ||
                                   (!isWatching && idx === 0);
-                                const shortChName = rc.name
-                                  .replace(/\s*\([^)]*\)/g, '')
-                                  .replace(/\bHD\b/gi, '')
-                                  .trim();
+                                const shortChName = formatCompactChannelBadge(rc.channelId, rc.name);
                                 const langCode = (
                                   rc.language ||
                                   rc.languageLabel?.slice(0, 2) ||
@@ -2137,7 +2241,7 @@ export const LiveTvArena: React.FC = () => {
                                         <Tv className="w-2.5 h-2.5 text-rose-600" />
                                       )}
                                     </span>
-                                    <span className="truncate max-w-[105px]">{shortChName}</span>
+                                    <span className="whitespace-nowrap">{shortChName}</span>
                                     <span className="px-1 py-0.2 rounded bg-black/40 text-[8px] font-mono font-bold text-slate-300">
                                       {langCode}
                                     </span>
@@ -2169,22 +2273,43 @@ export const LiveTvArena: React.FC = () => {
                             )}
                           </div>
 
-                          <a
-                            href={buildMatchSeoPath(ev)}
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              playEventDirectly(ev, displayedChannelObj?.channelId);
-                            }}
-                            className={`px-3.5 py-1 rounded-full text-[11px] sm:text-xs font-bold text-white flex items-center gap-1.5 transition-all shrink-0 cursor-pointer ${
-                              live
-                                ? 'bg-rose-600 hover:bg-rose-500 shadow-[0_4px_12px_rgba(225,29,72,0.35)]'
-                                : 'bg-[#1d63ff] hover:bg-blue-500 shadow-[0_4px_12px_rgba(29,99,255,0.35)]'
-                            }`}
-                          >
-                            <span>{isWatching ? 'Watching' : 'Watch'}</span>
-                            <Play className="w-2.5 h-2.5 fill-current" />
-                          </a>
+                          {finished ? (
+                            <span className="px-3 py-1 rounded-full bg-slate-800/80 border border-white/10 text-[10px] sm:text-[11px] font-bold text-slate-400 shrink-0">
+                              Match Ended
+                            </span>
+                          ) : (
+                            <a
+                              href={buildMatchSeoPath(ev)}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                playEventDirectly(ev, displayedChannelObj?.channelId);
+                              }}
+                              title={
+                                live
+                                  ? 'Watch Live Match Broadcast'
+                                  : `Match starts at ${kickoff.time} (${kickoff.relative}) — preview channel broadcast`
+                              }
+                              className={`px-3.5 py-1 rounded-full text-[11px] sm:text-xs font-bold text-white flex items-center gap-1.5 transition-all shrink-0 cursor-pointer ${
+                                live
+                                  ? 'bg-rose-600 hover:bg-rose-500 shadow-[0_4px_12px_rgba(225,29,72,0.35)]'
+                                  : kickoff.minsUntilKickoff <= 30
+                                  ? 'bg-[#1d63ff] hover:bg-blue-500 shadow-[0_4px_12px_rgba(29,99,255,0.35)]'
+                                  : 'bg-slate-800 hover:bg-slate-700 border border-white/15 text-slate-200'
+                              }`}
+                            >
+                              <span>
+                                {isWatching
+                                  ? 'Watching'
+                                  : live
+                                  ? 'Watch Live'
+                                  : kickoff.minsUntilKickoff <= 30
+                                  ? 'Pre-Match'
+                                  : 'Channel Preview'}
+                              </span>
+                              <Play className="w-2.5 h-2.5 fill-current" />
+                            </a>
+                          )}
                         </div>
                       </div>
                     );
@@ -2320,6 +2445,11 @@ export const LiveTvArena: React.FC = () => {
                 <div className="grid grid-cols-1 xs:grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2.5 sm:gap-3">
                   {filteredChannels.map((ch) => {
                     const isSelected = activeChannel?.id === ch.id;
+                    const nowProg = ch.epg?.nowPlaying || ch.epg?.currentProgram;
+                    const nextProg = ch.epg?.nextUp || ch.epg?.nextProgram;
+                    const isLiveMatchProgram = Boolean(
+                      nowProg && (nowProg.type === 'live_match' || nowProg.eventId || nowProg.isLive)
+                    );
                     return (
                       <a
                         key={ch.id}
@@ -2358,6 +2488,29 @@ export const LiveTvArena: React.FC = () => {
                               {ch.quality || '1080p'}
                             </span>
                           </div>
+                          {nowProg ? (
+                            <div
+                              title={`ON AIR: ${nowProg.title}${nowProg.league || nowProg.subtitle ? ` (${nowProg.league || nowProg.subtitle})` : ''}`}
+                              className={`mt-1 text-[10px] font-bold truncate flex items-center gap-1 ${
+                                isLiveMatchProgram ? 'text-rose-400' : 'text-emerald-400/90'
+                              }`}
+                            >
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                  isLiveMatchProgram ? 'bg-rose-500 animate-ping' : 'bg-emerald-400'
+                                }`}
+                              />
+                              <span className="truncate">{nowProg.title}</span>
+                            </div>
+                          ) : null}
+                          {nextProg ? (
+                            <div
+                              title={`UP NEXT (${formatKickoffTime(nextProg.startTime).time}): ${nextProg.title}`}
+                              className="mt-0.5 text-[9.5px] font-medium text-cyan-400/85 truncate"
+                            >
+                              Next {formatKickoffTime(nextProg.startTime).time}: {nextProg.title}
+                            </div>
+                          ) : null}
                         </div>
 
                         <div

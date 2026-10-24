@@ -316,7 +316,13 @@ export default {
     // 2. TMDB Proxy
     if (pathname.startsWith('/api/tmdb/')) {
       try {
-        const tmdbPath = pathname.replace('/api/tmdb/', '');
+        const tmdbPath = pathname.replace('/api/tmdb/', '').replace(/^\/+/, '');
+        if (!tmdbPath || tmdbPath.includes('..') || !/^[a-zA-Z0-9/_-]+$/.test(tmdbPath)) {
+          return new Response(JSON.stringify({ error: 'Invalid TMDB path' }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
         const tmdbKey = env.TMDB_API_KEY || DEFAULT_TMDB_KEY;
         const targetUrl = new URL(`${TMDB_BASE}/${tmdbPath}`);
 
@@ -512,12 +518,27 @@ export default {
     }
 
     if (pathname === '/api/subtitles/proxy') {
-      const subUrl = url.searchParams.get('url');
+      const subUrl = (url.searchParams.get('url') || '').trim();
       if (!subUrl) {
         return new Response('URL required', { status: 400 });
       }
 
       try {
+        const parsedSub = new URL(subUrl);
+        const h = parsedSub.hostname.toLowerCase();
+        if (
+          (parsedSub.protocol !== 'http:' && parsedSub.protocol !== 'https:') ||
+          h === 'localhost' ||
+          h.startsWith('127.') ||
+          h.startsWith('10.') ||
+          h.startsWith('192.168.') ||
+          h.startsWith('169.254.') ||
+          h === '0.0.0.0' ||
+          h.includes(':')
+        ) {
+          return new Response('Forbidden URL', { status: 403 });
+        }
+
         const subRes = await fetch(subUrl);
         let text = await subRes.text();
         if (!text.trim().startsWith('WEBVTT')) {

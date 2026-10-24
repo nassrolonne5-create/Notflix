@@ -236,10 +236,13 @@ export const VideoPlayerModal: React.FC = () => {
     }, 1000);
   }, []);
 
+  const streamRequestIdRef = useRef<number>(0);
+
   // Load Streams with robust fallback
   const loadStreamsWithRetry = useCallback(
     async (force = false) => {
       if (!activeModalItem) return;
+      const reqId = ++streamRequestIdRef.current;
       if (retryCountdownTimerRef.current) {
         window.clearInterval(retryCountdownTimerRef.current);
         retryCountdownTimerRef.current = null;
@@ -258,6 +261,7 @@ export const VideoPlayerModal: React.FC = () => {
           currentEpisode,
           force
         );
+        if (reqId !== streamRequestIdRef.current) return;
 
         // If initial cache miss returned 0 streams, immediately try force refresh once before showing error
         if ((!fetchedStreams || fetchedStreams.length === 0) && !force) {
@@ -268,6 +272,7 @@ export const VideoPlayerModal: React.FC = () => {
             currentEpisode,
             true
           );
+          if (reqId !== streamRequestIdRef.current) return;
         }
 
         if (fetchedStreams && fetchedStreams.length > 0) {
@@ -281,9 +286,11 @@ export const VideoPlayerModal: React.FC = () => {
           return;
         }
       } catch (err) {
+        if (reqId !== streamRequestIdRef.current) return;
         console.warn('Stream scraper request failed:', err);
       }
 
+      if (reqId !== streamRequestIdRef.current) return;
       setStreamError('Streaming servers are temporarily busy or resolving. Click Retry to search again.');
       setIsLoadingStreams(false);
       setStreamLoadAttempt(1);

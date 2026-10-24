@@ -114,13 +114,15 @@ const AppContent: React.FC = () => {
       (window as any).__NOTFLIX_IS_ADMIN__ = initialAdmin;
     }
 
-    window.addEventListener('popstate', handleNavigation);
-    window.addEventListener('hashchange', handleNavigation);
-    window.addEventListener('notflix:open-admin', () => {
+    const handleOpenAdmin = () => {
       window.history.pushState({}, '', '/admin');
       (window as any).__NOTFLIX_IS_ADMIN__ = true;
       setIsAdmin(true);
-    });
+    };
+
+    window.addEventListener('popstate', handleNavigation);
+    window.addEventListener('hashchange', handleNavigation);
+    window.addEventListener('notflix:open-admin', handleOpenAdmin);
 
     // Track initial page view for analytics
     telemetry.trackPageView(window.location.pathname);
@@ -128,6 +130,7 @@ const AppContent: React.FC = () => {
     return () => {
       window.removeEventListener('popstate', handleNavigation);
       window.removeEventListener('hashchange', handleNavigation);
+      window.removeEventListener('notflix:open-admin', handleOpenAdmin);
     };
   }, []);
 

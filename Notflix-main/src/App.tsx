@@ -33,6 +33,54 @@ const checkIsAdmin = (): boolean => {
   );
 };
 
+class AdminErrorBoundary extends React.Component<
+  { onExit: () => void; children: React.ReactNode },
+  { hasError: boolean; errorMsg: string }
+> {
+  constructor(props: { onExit: () => void; children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, errorMsg: '' };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, errorMsg: error?.message || 'Unexpected error' };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-[#080c14] text-white flex items-center justify-center p-6">
+          <div className="max-w-md w-full bg-[#0e1424] border border-blue-500/30 rounded-2xl p-6 text-center shadow-2xl">
+            <h2 className="text-lg font-extrabold text-white mb-2">
+              Admin Studio Reload Required
+            </h2>
+            <p className="text-xs text-slate-400 mb-4 font-mono break-words">
+              {this.state.errorMsg}
+            </p>
+            <div className="flex items-center justify-center gap-3">
+              <button
+                type="button"
+                onClick={() => this.setState({ hasError: false, errorMsg: '' })}
+                className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold cursor-pointer"
+              >
+                Retry Dashboard
+              </button>
+              <button
+                type="button"
+                onClick={this.props.onExit}
+                className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-slate-200 text-xs font-semibold cursor-pointer"
+              >
+                Return to Site
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 const AppContent: React.FC = () => {
   const { activeTab, setActiveTab, activeModalItem, quickViewItem } = useApp();
   const [isAdmin, setIsAdmin] = useState<boolean>(checkIsAdmin);
@@ -66,13 +114,15 @@ const AppContent: React.FC = () => {
       (window as any).__NOTFLIX_IS_ADMIN__ = initialAdmin;
     }
 
-    window.addEventListener('popstate', handleNavigation);
-    window.addEventListener('hashchange', handleNavigation);
-    window.addEventListener('notflix:open-admin', () => {
+    const handleOpenAdmin = () => {
       window.history.pushState({}, '', '/admin');
       (window as any).__NOTFLIX_IS_ADMIN__ = true;
       setIsAdmin(true);
-    });
+    };
+
+    window.addEventListener('popstate', handleNavigation);
+    window.addEventListener('hashchange', handleNavigation);
+    window.addEventListener('notflix:open-admin', handleOpenAdmin);
 
     // Track initial page view for analytics
     telemetry.trackPageView(window.location.pathname);
@@ -80,11 +130,20 @@ const AppContent: React.FC = () => {
     return () => {
       window.removeEventListener('popstate', handleNavigation);
       window.removeEventListener('hashchange', handleNavigation);
+      window.removeEventListener('notflix:open-admin', handleOpenAdmin);
     };
   }, []);
 
   // Dynamic SEO Title, Meta Description, OpenGraph, Twitter Cards & Schema.org JSON-LD update per view / movie
   useEffect(() => {
+    if (
+      typeof window !== 'undefined' &&
+      !activeModalItem &&
+      /^\/(live|arena)(\/|$)/i.test(window.location.pathname)
+    ) {
+      return;
+    }
+
     let title = 'Notflix — Watch Movies, TV Series & Anime Online Free in HD';
     let desc =
       'Stream trending movies, full TV series seasons, and anime online free in 1080p & 4K HD on Notflix with English, Arabic, Spanish & multi-language subtitles.';
@@ -205,7 +264,7 @@ const AppContent: React.FC = () => {
   // Dedicated Admin Analytics Command Center
   if (isAdmin) {
     return (
-      <AdminPage
+      <AdminErrorBoundary
         onExit={() => {
           window.history.pushState({}, '', '/');
           window.location.hash = '';
@@ -213,7 +272,17 @@ const AppContent: React.FC = () => {
           setIsAdmin(false);
           setTimeout(ensurePopunderScriptLoaded, 100);
         }}
-      />
+      >
+        <AdminPage
+          onExit={() => {
+            window.history.pushState({}, '', '/');
+            window.location.hash = '';
+            (window as any).__NOTFLIX_IS_ADMIN__ = false;
+            setIsAdmin(false);
+            setTimeout(ensurePopunderScriptLoaded, 100);
+          }}
+        />
+      </AdminErrorBoundary>
     );
   }
 
@@ -408,13 +477,16 @@ const AppContent: React.FC = () => {
             XML Sitemap
           </a>
           <span className="text-slate-700">·</span>
-          <button
-            type="button"
-            onClick={() => window.dispatchEvent(new CustomEvent('notflix:open-live-tv'))}
+          <a
+            href="/live"
+            onClick={(e) => {
+              e.preventDefault();
+              window.dispatchEvent(new CustomEvent('notflix:open-live-tv'));
+            }}
             className="text-rose-400 hover:text-rose-300 font-semibold transition-colors cursor-pointer"
           >
-            Live TV &amp; Sports
-          </button>
+            Live TV &amp; Sports Arena
+          </a>
           <span className="text-slate-700">·</span>
           <a
             href="https://t.me/Notflix_tv"
@@ -425,19 +497,6 @@ const AppContent: React.FC = () => {
             Telegram Channel
           </a>
         </nav>
-        <div className="mt-3">
-          <button
-            type="button"
-            onClick={() => {
-              window.history.pushState({}, '', '/admin');
-              (window as any).__NOTFLIX_IS_ADMIN__ = true;
-              setIsAdmin(true);
-            }}
-            className="text-[11px] text-slate-600 hover:text-slate-300 transition-colors cursor-pointer"
-          >
-            Admin Studio
-          </button>
-        </div>
       </footer>
 
       {/* Navigation Dock */}

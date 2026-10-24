@@ -114,20 +114,71 @@ interface CacheEntry {
 const apiCache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
-// Persistent Data Directory Setup
+// Persistent Data Directory Setup (Multi-volume +Downloads persistence mirror)
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const DOWNLOADS_PERSIST_DIR = path.join(__dirname, 'downloads', '.persistence');
+const TMP_PERSIST_DIR = '/var/tmp/notflix_persistence';
+const ROOT_DATA_DIR = '/data';
+
+const PERSISTENT_WRITE_DIRS = Array.from(
+  new Set([
+    DATA_DIR,
+    path.join(process.cwd(), 'data'),
+    DOWNLOADS_PERSIST_DIR,
+    TMP_PERSIST_DIR,
+    ROOT_DATA_DIR,
+  ])
+);
+
+const PERSISTENT_READ_DIRS = Array.from(
+  new Set([
+    ...PERSISTENT_WRITE_DIRS,
+    path.join(__dirname, 'data_seed'),
+    path.join(process.cwd(), 'data_seed'),
+    '/app/data',
+    '/app/data_seed',
+    '/app/downloads/.persistence',
+  ])
+);
+
+for (const dir of PERSISTENT_WRITE_DIRS) {
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  } catch {
+    // Ignore read-only paths on restricted hosts
+  }
+}
+
+function writeFileAtomicallyToMirrors(filename: string, serialized: string, extraFilePath?: string) {
+  for (const dir of PERSISTENT_WRITE_DIRS) {
+    try {
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const target = path.join(dir, filename);
+      const tmpTarget = `${target}.tmp.${process.pid}`;
+      fs.writeFileSync(tmpTarget, serialized, 'utf-8');
+      fs.renameSync(tmpTarget, target);
+    } catch {
+      // Fallback direct write if rename across mount points or non-writable dir
+      try {
+        fs.writeFileSync(path.join(dir, filename), serialized, 'utf-8');
+      } catch {}
+    }
+  }
+  if (extraFilePath) {
+    try {
+      fs.writeFileSync(extraFilePath, serialized, 'utf-8');
+    } catch {}
+  }
+}
+
 const USER_PROFILES_FILE = path.join(DATA_DIR, 'user_profiles.json');
 const LEGACY_GLOBAL_USER_DATA_FILE = path.join(DATA_DIR, 'userdata.json');
 const BLOCKED_IPS_FILE = path.join(DATA_DIR, 'blocked_ips.json');
 const BLOCKED_IPS_BACKUP_MIRROR_FILE = '/var/tmp/notflix_blocked_ips_backup.json';
-
-if (!fs.existsSync(DATA_DIR)) {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  } catch (e) {
-    console.error('Error creating data directory:', e);
-  }
-}
 
 // Clean up any legacy global userdata.json so global watch positions never leak across users
 if (fs.existsSync(LEGACY_GLOBAL_USER_DATA_FILE)) {
@@ -277,10 +328,12 @@ const DATA_INTERCEPTION_TRAP_PATHS = [
   /^\/package\.json/i,
   /^\/tsconfig\.json/i,
   /^\/data\//i,
+  /^\/downloads\/\.persistence/i,
   /analytics\.json/i,
   /scrapers\.json/i,
   /user_profiles\.json/i,
   /blocked_ips\.json/i,
+  /adblock_policy\.json/i,
   /^\/wp-admin/i,
   /^\/wp-login/i,
   /^\/phpmyadmin/i,
@@ -340,10 +393,15 @@ function recordSecurityEvent(
   if (securityMetrics.recentSecurityEvents.length > 60) {
     securityMetrics.recentSecurityEvents.pop();
   }
+  scheduleSavePermanentBans();
 }
 
 // Persistent Permanent IP Blacklist Map (IP -> PermanentBanRecord)
 const permanentlyBannedIps = new Map<string, PermanentBanRecord>();
+// Tombstones for explicitly unblocked IPs (IP -> timestamp when unblocked) so merges never resurrect unblocked IPs
+const unblockedIpTombstones = new Map<string, number>();
+let lastClearedAllBansAt = 0;
+
 // Whitelisted Admin IPs (automatically populated when admin logs in or verifies session)
 const whitelistedAdminIps = new Set<string>();
 // Rate-limit strike counter per IP (escalates repeated rate-limit violations into a permanent IP ban)
@@ -363,48 +421,166 @@ function isInternalOrLoopbackIp(ip: string): boolean {
   );
 }
 
+function mergePermanentBansAndSecurityPayload(parsed: any): boolean {
+  if (!parsed || typeof parsed !== 'object') return false;
+  let changed = false;
+
+  if (typeof parsed.lastClearedAllBansAt === 'number' && parsed.lastClearedAllBansAt > lastClearedAllBansAt) {
+    lastClearedAllBansAt = parsed.lastClearedAllBansAt;
+    for (const [existingIp, rec] of permanentlyBannedIps.entries()) {
+      if ((rec.lastAttemptAt || rec.bannedAt || 0) <= lastClearedAllBansAt) {
+        permanentlyBannedIps.delete(existingIp);
+        changed = true;
+      }
+    }
+  }
+
+  if (parsed.unblockedTombstones && typeof parsed.unblockedTombstones === 'object') {
+    for (const [rawIp, tsVal] of Object.entries(parsed.unblockedTombstones)) {
+      const cleanIp = String(rawIp || '').replace(/^::ffff:/i, '').trim();
+      const ts = Number(tsVal) || 0;
+      if (cleanIp && ts > (unblockedIpTombstones.get(cleanIp) || 0)) {
+        unblockedIpTombstones.set(cleanIp, ts);
+        const existing = permanentlyBannedIps.get(cleanIp);
+        if (existing && (existing.lastAttemptAt || existing.bannedAt || 0) <= ts) {
+          permanentlyBannedIps.delete(cleanIp);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  const list: PermanentBanRecord[] = Array.isArray(parsed?.bans) ? parsed.bans : [];
+  for (const item of list) {
+    if (item && item.ip && !isInternalOrLoopbackIp(item.ip)) {
+      const cleanIp = item.ip.replace(/^::ffff:/i, '').trim();
+      const itemLastAttempt = Number(item.lastAttemptAt || item.bannedAt) || Date.now();
+      const tombstoneTs = unblockedIpTombstones.get(cleanIp) || 0;
+
+      if (itemLastAttempt <= lastClearedAllBansAt || itemLastAttempt <= tombstoneTs) {
+        continue;
+      }
+
+      const existing = permanentlyBannedIps.get(cleanIp);
+      if (!existing) {
+        permanentlyBannedIps.set(cleanIp, {
+          ip: cleanIp,
+          reason: item.reason || 'Permanent Security Ban',
+          category: item.category || 'scraper',
+          userAgent: item.userAgent || 'unknown',
+          path: item.path || '/',
+          bannedAt: Number(item.bannedAt) || itemLastAttempt,
+          permanent: true,
+          blockedAttempts: Math.max(1, Number(item.blockedAttempts) || 1),
+          lastAttemptAt: itemLastAttempt,
+        });
+        changed = true;
+      } else {
+        const mergedAttempts = Math.max(existing.blockedAttempts || 1, Number(item.blockedAttempts) || 1);
+        const mergedLastAttempt = Math.max(existing.lastAttemptAt || 0, itemLastAttempt);
+        const mergedBannedAt = Math.min(existing.bannedAt || itemLastAttempt, Number(item.bannedAt) || itemLastAttempt);
+        if (
+          mergedAttempts !== existing.blockedAttempts ||
+          mergedLastAttempt !== existing.lastAttemptAt ||
+          mergedBannedAt !== existing.bannedAt
+        ) {
+          existing.blockedAttempts = mergedAttempts;
+          existing.lastAttemptAt = mergedLastAttempt;
+          existing.bannedAt = mergedBannedAt;
+          changed = true;
+        }
+      }
+    }
+  }
+
+  const incomingMetrics = parsed.securityMetrics || parsed.metrics;
+  if (incomingMetrics && typeof incomingMetrics === 'object') {
+    const nextScrapers = Math.max(
+      securityMetrics.totalBlockedScrapers,
+      Number(incomingMetrics.totalBlockedScrapers) || 0,
+      permanentlyBannedIps.size
+    );
+    const nextInterceptions = Math.max(
+      securityMetrics.totalInterceptionsBlocked,
+      Number(incomingMetrics.totalInterceptionsBlocked) || 0
+    );
+    const nextRateLimited = Math.max(
+      securityMetrics.totalRateLimited,
+      Number(incomingMetrics.totalRateLimited) || 0
+    );
+    const nextHoneypot = Math.max(
+      securityMetrics.totalHoneypotTrapped,
+      Number(incomingMetrics.totalHoneypotTrapped) || 0
+    );
+
+    if (
+      nextScrapers !== securityMetrics.totalBlockedScrapers ||
+      nextInterceptions !== securityMetrics.totalInterceptionsBlocked ||
+      nextRateLimited !== securityMetrics.totalRateLimited ||
+      nextHoneypot !== securityMetrics.totalHoneypotTrapped
+    ) {
+      securityMetrics.totalBlockedScrapers = nextScrapers;
+      securityMetrics.totalInterceptionsBlocked = nextInterceptions;
+      securityMetrics.totalRateLimited = nextRateLimited;
+      securityMetrics.totalHoneypotTrapped = nextHoneypot;
+      changed = true;
+    }
+
+    const incomingEvents = Array.isArray(incomingMetrics.recentSecurityEvents)
+      ? incomingMetrics.recentSecurityEvents
+      : Array.isArray(incomingMetrics.recentEvents)
+      ? incomingMetrics.recentEvents
+      : [];
+    if (incomingEvents.length > 0) {
+      const evMap = new Map<string, any>();
+      for (const ev of [...securityMetrics.recentSecurityEvents, ...incomingEvents]) {
+        if (ev && ev.ip && ev.ts) {
+          const key = `${ev.ip}_${ev.ts}_${ev.path || ''}`;
+          if (!evMap.has(key)) evMap.set(key, ev);
+        }
+      }
+      const mergedEvents = Array.from(evMap.values())
+        .sort((a, b) => (b.ts || 0) - (a.ts || 0))
+        .slice(0, 60);
+      if (mergedEvents.length !== securityMetrics.recentSecurityEvents.length) {
+        changed = true;
+      }
+      securityMetrics.recentSecurityEvents = mergedEvents;
+    }
+  } else if (permanentlyBannedIps.size > securityMetrics.totalBlockedScrapers) {
+    securityMetrics.totalBlockedScrapers = permanentlyBannedIps.size;
+  }
+
+  return changed;
+}
+
 function loadPermanentBansFromDisk() {
-  const candidatePaths = [
-    BLOCKED_IPS_FILE,
-    BLOCKED_IPS_BACKUP_MIRROR_FILE,
-    '/data/blocked_ips.json',
-    '/app/data/blocked_ips.json',
-    path.join(process.cwd(), 'data', 'blocked_ips.json'),
-    path.join(__dirname, 'data', 'blocked_ips.json'),
-  ];
+  const candidatePaths = Array.from(
+    new Set([
+      ...PERSISTENT_READ_DIRS.map((d) => path.join(d, 'blocked_ips.json')),
+      BLOCKED_IPS_FILE,
+      BLOCKED_IPS_BACKUP_MIRROR_FILE,
+    ])
+  );
 
   let purgedLegacyV1Bans = false;
+  let loadedAny = false;
 
   for (const candidate of candidatePaths) {
     try {
       if (fs.existsSync(candidate)) {
-        const raw = fs.readFileSync(candidate, 'utf-8');
+        const raw = fs.readFileSync(candidate, 'utf-8').trim();
+        if (!raw) continue;
         const parsed = JSON.parse(raw);
 
-        // Automatically purge v1 ban files that could contain false-positive browser bans (e.g. Firefox prefetch/viewport)
+        // Automatically purge v1 ban files that could contain false-positive browser bans
         if (!parsed || parsed.schemaVersion !== BAN_STORAGE_SCHEMA_VERSION) {
           purgedLegacyV1Bans = true;
           continue;
         }
 
-        const list: PermanentBanRecord[] = Array.isArray(parsed?.bans) ? parsed.bans : [];
-        for (const item of list) {
-          if (item && item.ip && !isInternalOrLoopbackIp(item.ip)) {
-            const cleanIp = item.ip.replace(/^::ffff:/i, '').trim();
-            if (!permanentlyBannedIps.has(cleanIp)) {
-              permanentlyBannedIps.set(cleanIp, {
-                ip: cleanIp,
-                reason: item.reason || 'Permanent Security Ban',
-                category: item.category || 'scraper',
-                userAgent: item.userAgent || 'unknown',
-                path: item.path || '/',
-                bannedAt: item.bannedAt || Date.now(),
-                permanent: true,
-                blockedAttempts: item.blockedAttempts || 1,
-                lastAttemptAt: item.lastAttemptAt || item.bannedAt || Date.now(),
-              });
-            }
-          }
+        if (mergePermanentBansAndSecurityPayload(parsed)) {
+          loadedAny = true;
         }
       }
     } catch (e) {
@@ -412,9 +588,8 @@ function loadPermanentBansFromDisk() {
     }
   }
 
-  if (purgedLegacyV1Bans) {
+  if (purgedLegacyV1Bans || loadedAny) {
     savePermanentBansToDiskSync();
-    console.log('🧹 Purged legacy v1 false-positive IP bans and upgraded ban store to v2.');
   }
 
   if (permanentlyBannedIps.size > 0) {
@@ -428,18 +603,15 @@ function savePermanentBansToDiskSync() {
       {
         schemaVersion: BAN_STORAGE_SCHEMA_VERSION,
         updatedAt: Date.now(),
+        lastClearedAllBansAt,
+        unblockedTombstones: Object.fromEntries(unblockedIpTombstones.entries()),
         bans: Array.from(permanentlyBannedIps.values()),
+        securityMetrics,
       },
       null,
       2
     );
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    fs.writeFileSync(BLOCKED_IPS_FILE, serialized, 'utf-8');
-    try {
-      fs.writeFileSync(BLOCKED_IPS_BACKUP_MIRROR_FILE, serialized, 'utf-8');
-    } catch {}
+    writeFileAtomicallyToMirrors('blocked_ips.json', serialized, BLOCKED_IPS_BACKUP_MIRROR_FILE);
   } catch (err) {
     console.error('Error saving permanent IP bans to disk:', err);
   }
@@ -469,6 +641,7 @@ function banIpPermanently(
   if (isLegitimateSearchCrawler(userAgent) && category !== 'manual') return null;
 
   const now = Date.now();
+  unblockedIpTombstones.delete(cleanIp);
   const existing = permanentlyBannedIps.get(cleanIp);
   if (existing) {
     existing.blockedAttempts += 1;
@@ -490,8 +663,6 @@ function banIpPermanently(
   };
 
   permanentlyBannedIps.set(cleanIp, record);
-  savePermanentBansToDiskSync();
-
   securityMetrics.totalBlockedScrapers++;
   if (category === 'interception' || category === 'hotlink') {
     securityMetrics.totalInterceptionsBlocked++;
@@ -500,23 +671,116 @@ function banIpPermanently(
   }
 
   recordSecurityEvent(cleanIp, `PERMANENT BAN: ${reason}`, userAgent, reqPath, category, true);
+  savePermanentBansToDiskSync();
   console.warn(`🚨 [PERMANENT IP BLOCK] Blocked ${cleanIp} permanently | Reason: ${reason} | Path: ${reqPath}`);
   return record;
 }
 
 function unblockIpPermanently(rawIp: string): boolean {
   const cleanIp = (rawIp || '').replace(/^::ffff:/i, '').trim();
+  unblockedIpTombstones.set(cleanIp, Date.now());
   const deleted = permanentlyBannedIps.delete(cleanIp);
   rateLimitStrikes.delete(cleanIp);
-  if (deleted) {
-    savePermanentBansToDiskSync();
-  }
+  savePermanentBansToDiskSync();
   return deleted;
 }
 
 // In-Memory Sliding-Window Rate Limiters (IP -> timestamp[])
 const globalApiRateLimiter = new Map<string, number[]>();
 const streamRateLimiter = new Map<string, number[]>();
+const adminLoginRateLimiter = new Map<string, number[]>();
+
+function escapeHtmlText(unsafe: unknown): string {
+  return String(unsafe ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function safeCompareStrings(a: string, b: string): boolean {
+  const hashA = crypto.createHash('sha256').update(String(a)).digest();
+  const hashB = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(hashA, hashB) && a.length === b.length;
+}
+
+/**
+ * Validates that an external URL is safe for server-side proxy fetching (prevents SSRF to loopback,
+ * RFC1918 private networks, link-local cloud metadata 169.254.169.254, IPv6 private ranges, or non-HTTP schemes).
+ */
+function isSafeExternalProxyUrl(rawUrl: string): boolean {
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    if (parsed.username || parsed.password) return false;
+
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').trim();
+    if (!host) return false;
+
+    if (
+      host === 'localhost' ||
+      host.endsWith('.localhost') ||
+      host.endsWith('.local') ||
+      host.endsWith('.internal') ||
+      host === '0.0.0.0' ||
+      host === '::' ||
+      host === '::1' ||
+      host === '0:0:0:0:0:0:0:1' ||
+      host === 'metadata.google.internal' ||
+      host === 'metadata'
+    ) {
+      return false;
+    }
+
+    // Block IPv6 private / loopback / link-local / IPv4-mapped private addresses
+    if (host.includes(':')) {
+      if (
+        host.startsWith('fe80:') ||
+        host.startsWith('fc') ||
+        host.startsWith('fd') ||
+        host.startsWith('::ffff:127.') ||
+        host.startsWith('::ffff:10.') ||
+        host.startsWith('::ffff:192.168.') ||
+        host.startsWith('::ffff:169.254.') ||
+        /^::ffff:172\.(1[6-9]|2[0-9]|3[0-1])\./.test(host)
+      ) {
+        return false;
+      }
+    }
+
+    // Block integer/hex/octal single-token IP encodings (e.g. 2130706433 or 0x7f000001)
+    if (/^(0x[0-9a-f]+|\d+)$/i.test(host)) {
+      return false;
+    }
+
+    // Block IPv4 loopback, private RFC1918, carrier-grade NAT, and cloud metadata ranges
+    const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (ipv4Match) {
+      const o1 = Number(ipv4Match[1]);
+      const o2 = Number(ipv4Match[2]);
+      if (o1 > 255 || o2 > 255 || Number(ipv4Match[3]) > 255 || Number(ipv4Match[4]) > 255) {
+        return false;
+      }
+      if (
+        o1 === 0 ||
+        o1 === 10 ||
+        o1 === 127 ||
+        (o1 === 169 && o2 === 254) ||
+        (o1 === 172 && o2 >= 16 && o2 <= 31) ||
+        (o1 === 192 && o2 === 168) ||
+        (o1 === 100 && o2 >= 64 && o2 <= 127)
+      ) {
+        return false;
+      }
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function getClientIp(req: Request): string {
   const cfIp = req.headers['cf-connecting-ip'];
@@ -550,7 +814,7 @@ function checkRateLimit(ip: string, map: Map<string, number[]>, maxRequests: num
   return true;
 }
 
-// Periodic cleanup of expired rate-limit buckets (Permanent IP bans NEVER expire)
+// Periodic cleanup of expired rate-limit buckets & bounded caches (Permanent IP bans NEVER expire)
 setInterval(() => {
   const now = Date.now();
   for (const [ip, timestamps] of globalApiRateLimiter.entries()) {
@@ -563,9 +827,33 @@ setInterval(() => {
     if (valid.length === 0) streamRateLimiter.delete(ip);
     else streamRateLimiter.set(ip, valid);
   }
+  for (const [ip, timestamps] of adminLoginRateLimiter.entries()) {
+    const valid = timestamps.filter((t) => now - t < 15 * 60 * 1000);
+    if (valid.length === 0) adminLoginRateLimiter.delete(ip);
+    else adminLoginRateLimiter.set(ip, valid);
+  }
+  for (const [ip, tracker] of distinctCatalogScrapeTracker.entries()) {
+    if (now - tracker.windowStart > 5 * 60 * 1000) {
+      distinctCatalogScrapeTracker.delete(ip);
+    }
+  }
+  if (apiCache.size > 1500) {
+    for (const [k, entry] of apiCache.entries()) {
+      if (now - entry.timestamp > 15 * 60 * 1000) apiCache.delete(k);
+    }
+  }
+  if (subtitleCache.size > 1000) {
+    const keys = Array.from(subtitleCache.keys());
+    for (let i = 0; i < keys.length - 800; i++) {
+      subtitleCache.delete(keys[i]);
+    }
+  }
 }, 5 * 60 * 1000);
 
 function renderPermanentBlockHtml(record: PermanentBanRecord): string {
+  const safeIp = escapeHtmlText(record.ip);
+  const safeReason = escapeHtmlText(record.reason);
+  const safeTime = escapeHtmlText(new Date(record.bannedAt).toISOString());
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -633,9 +921,9 @@ function renderPermanentBlockHtml(record: PermanentBanRecord): string {
     <p>Your network IP address has been permanently blocked by the Anti-Interception &amp; Anti-Scraping Security Shield due to unauthorized data interception or automated scraping activity.</p>
     <div class="meta">
       <div class="row"><span class="lbl">STATUS:</span><span class="val">HTTP 403 FORBIDDEN (PERMANENT)</span></div>
-      <div class="row"><span class="lbl">BLOCKED IP:</span><span class="val" style="color:#e2e8f0">${record.ip}</span></div>
-      <div class="row"><span class="lbl">VIOLATION:</span><span class="val" style="color:#fcd34d">${record.reason}</span></div>
-      <div class="row"><span class="lbl">TIMESTAMP:</span><span class="val" style="color:#94a3b8">${new Date(record.bannedAt).toISOString()}</span></div>
+      <div class="row"><span class="lbl">BLOCKED IP:</span><span class="val" style="color:#e2e8f0">${safeIp}</span></div>
+      <div class="row"><span class="lbl">VIOLATION:</span><span class="val" style="color:#fcd34d">${safeReason}</span></div>
+      <div class="row"><span class="lbl">TIMESTAMP:</span><span class="val" style="color:#94a3b8">${safeTime}</span></div>
     </div>
   </div>
 </body>
@@ -675,11 +963,12 @@ const globalSecurityShieldMiddleware = (req: Request, res: Response, next: NextF
     return next();
   }
 
-  // 2. Always allow health checks, Admin UI, Admin API, and static JS/CSS/font assets so Admin Dashboard is always reachable
+  // 2. Always allow health checks, internal handover sync, Admin UI, Admin API, and static JS/CSS/font assets so Admin Dashboard is always reachable
   if (
     req.path === '/health' ||
     req.path === '/api/health' ||
     req.path === '/healthz' ||
+    req.path === '/api/internal/handover-snapshot' ||
     req.path.startsWith('/admin') ||
     req.path.startsWith('/api/admin') ||
     req.path.startsWith('/assets/') ||
@@ -913,21 +1202,21 @@ function getDefaultScraperConfigStore(): ScraperConfigStore {
 
 function readScraperConfigFromDisk(): ScraperConfigStore {
   const defaults = getDefaultScraperConfigStore();
-  const candidatePaths = [
-    SCRAPERS_CONFIG_FILE,
-    SCRAPERS_BACKUP_MIRROR_FILE,
-    '/data/scrapers.json',
-    '/app/data/scrapers.json',
-    path.join(process.cwd(), 'data', 'scrapers.json'),
-    path.join(__dirname, 'data', 'scrapers.json'),
-  ];
+  const candidatePaths = Array.from(
+    new Set([
+      ...PERSISTENT_READ_DIRS.map((d) => path.join(d, 'scrapers.json')),
+      SCRAPERS_CONFIG_FILE,
+      SCRAPERS_BACKUP_MIRROR_FILE,
+    ])
+  );
 
   let newestStore: ScraperConfigStore | null = null;
 
   for (const candidate of candidatePaths) {
     try {
       if (fs.existsSync(candidate)) {
-        const raw = fs.readFileSync(candidate, 'utf-8');
+        const raw = fs.readFileSync(candidate, 'utf-8').trim();
+        if (!raw) continue;
         const parsed = JSON.parse(raw);
         if (parsed && parsed.scrapers && typeof parsed.scrapers === 'object') {
           const updatedAt = typeof parsed.updatedAt === 'number' ? parsed.updatedAt : Date.now();
@@ -981,13 +1270,7 @@ let scraperConfigStore: ScraperConfigStore = readScraperConfigFromDisk();
 function saveScraperConfigToDiskSync(store: ScraperConfigStore) {
   try {
     const serialized = JSON.stringify(store, null, 2);
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    fs.writeFileSync(SCRAPERS_CONFIG_FILE, serialized, 'utf-8');
-    try {
-      fs.writeFileSync(SCRAPERS_BACKUP_MIRROR_FILE, serialized, 'utf-8');
-    } catch {}
+    writeFileAtomicallyToMirrors('scrapers.json', serialized, SCRAPERS_BACKUP_MIRROR_FILE);
   } catch (err) {
     console.error('Error saving scraper configuration to disk:', err);
   }
@@ -1215,7 +1498,10 @@ app.all(['/api/health', '/health', '/healthz'], (req: Request, res: Response) =>
 // ==========================================
 app.get('/api/tmdb/*', async (req: Request, res: Response) => {
   try {
-    const tmdbPath = req.params[0];
+    const tmdbPath = String(req.params[0] || '').replace(/^\/+/, '');
+    if (!tmdbPath || tmdbPath.includes('..') || !/^[a-zA-Z0-9/_-]+$/.test(tmdbPath)) {
+      return res.status(400).json({ error: 'Invalid TMDB endpoint path' });
+    }
     const queryParams = new URLSearchParams(req.query as Record<string, string>);
     
     // Enforce include_adult=false & without_genres=10749 at the TMDB source
@@ -2324,9 +2610,12 @@ app.get('/api/subtitles/search', async (req: Request, res: Response) => {
 
 app.get('/api/subtitles/proxy', async (req: Request, res: Response) => {
   try {
-    const subUrl = req.query.url as string;
+    const subUrl = String(req.query.url || '').trim();
     if (!subUrl) {
       return res.status(400).send('url query param required');
+    }
+    if (!isSafeExternalProxyUrl(subUrl)) {
+      return res.status(403).send('Forbidden: Invalid or internal subtitle URL blocked');
     }
 
     const isOpenSubDl = subUrl.includes('opensubtitles.org');
@@ -2348,19 +2637,32 @@ app.get('/api/subtitles/proxy', async (req: Request, res: Response) => {
       clearTimeout(timer);
     }
 
+    if (response.url && !isSafeExternalProxyUrl(response.url)) {
+      return res.status(403).send('Forbidden: Redirect to internal address blocked');
+    }
+
     if (!response.ok) {
       return res.status(response.status).send('Failed to fetch subtitle from upstream');
     }
 
+    const contentLen = Number(response.headers.get('content-length') || 0);
+    if (contentLen > 5 * 1024 * 1024) {
+      return res.status(413).send('Subtitle payload too large');
+    }
+
     const arrayBuffer = await response.arrayBuffer();
+    if (arrayBuffer.byteLength > 5 * 1024 * 1024) {
+      return res.status(413).send('Subtitle payload too large');
+    }
     let buffer = Buffer.from(arrayBuffer);
 
-    // Automatically gunzip if upstream returned a .gz compressed subtitle file (e.g. dl.opensubtitles.org)
+    // Automatically gunzip if upstream returned a .gz compressed subtitle file (with 5MB max output cap against zip bombs)
     if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
       try {
-        buffer = zlib.gunzipSync(buffer);
+        buffer = zlib.gunzipSync(buffer, { maxOutputLength: 5 * 1024 * 1024 });
       } catch (gzErr) {
         console.warn('Subtitle gunzip error:', gzErr);
+        return res.status(400).send('Invalid compressed subtitle payload');
       }
     }
 
@@ -2439,7 +2741,7 @@ app.get('/api/proxy/stream', async (req: Request, res: Response) => {
       targetUrl = `${getCineproUrl()}/v1/proxy${queryString}`;
     } else if (
       targetUrl.startsWith('/') ||
-      /^https?:\/\/(localhost|127\.|0\.0\.0\.0|169\.254\.|\[::1\])/i.test(targetUrl) ||
+      !isSafeExternalProxyUrl(targetUrl) ||
       targetUrl.includes('/api/admin') ||
       targetUrl.includes('analytics.json') ||
       targetUrl.includes('scrapers.json')
@@ -2497,6 +2799,10 @@ app.get('/api/proxy/stream', async (req: Request, res: Response) => {
       });
     } finally {
       clearTimeout(abortTimeout);
+    }
+
+    if (upstream.url && !targetUrl.includes('/v1/proxy') && !isSafeExternalProxyUrl(upstream.url)) {
+      return res.status(403).send('Forbidden: Redirect to internal network blocked');
     }
 
     res.set('Access-Control-Allow-Origin', '*');
@@ -3056,6 +3362,7 @@ const LIVE_CHANNEL_DIRECTORY: Record<string, ChannelMetaEntry> = {
   'ad-sports-1-ar': { channelId: 'ad-sports-1-ar', name: 'Abu Dhabi Sports 1 & Premium 1 HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: `${TV_LOGO_REPO}/countries/united-arab-emirates/abu-dhabi-sports-tv-ae.png` },
   'ad-sports-2-ar': { channelId: 'ad-sports-2-ar', name: 'Abu Dhabi Sports 2 Premium HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: `${TV_LOGO_REPO}/countries/united-arab-emirates/abu-dhabi-sports-tv-ae.png` },
   'dubai-sports-1-ar': { channelId: 'dubai-sports-1-ar', name: 'Dubai Sports 1 HD (Arabic)', language: 'ar', languageLabel: 'Arabic', logo: `${TV_LOGO_REPO}/countries/united-arab-emirates/dubai-sports-tv-ae.png` },
+  'ontime-sports-1-ar': { channelId: 'ontime-sports-1-ar', name: 'OnTime Sports 1 & 2 HD (Egypt Arabic)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#0f172a', '#1e3a8a', '#22d3ee', 'EGYPT SPORTS', 'ONTIME', 'أون تايم HD') },
   'ktv-sport-ar': { channelId: 'ktv-sport-ar', name: 'Kuwait TV Sport HD (KTV Sport)', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#0369a1', '#0c4a6e', '#38bdf8', 'KUWAIT TV', 'KTV SPORT', 'الكويت الرياضية') },
   'arryadia-ar': { channelId: 'arryadia-ar', name: 'Arryadia Morocco Sports HD', language: 'ar', languageLabel: 'Arabic', logo: makeSvgChannelBadge('#991b1b', '#14532d', '#4ade80', 'SNRT MOROCCO', 'ARRYADIA', 'الرياضية TNT') },
 
@@ -3089,11 +3396,25 @@ const LIVE_CHANNEL_DIRECTORY: Record<string, ChannelMetaEntry> = {
   'sky-sports-main-event': { channelId: 'sky-sports-main-event', name: 'Sky Sports Main Event UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/sky-sports-main-event-uk.png` },
   'sky-sports-premier-league': { channelId: 'sky-sports-premier-league', name: 'Sky Sports Premier League UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/sky-sports-premier-league-uk.png` },
   'sky-sports-football': { channelId: 'sky-sports-football', name: 'Sky Sports Football UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/sky-sports-football-uk.png` },
+  'sky-sports-plus': { channelId: 'sky-sports-plus', name: 'Sky Sports+ UK HD', language: 'en', languageLabel: 'English', logo: makeSvgChannelBadge('#0f172a', '#1e3a8a', '#f43f5e', 'SKY SPORTS', 'SPORTS+', 'EFL & LIVE HD') },
+  'sky-sports-action': { channelId: 'sky-sports-action', name: 'Sky Sports Action UK HD', language: 'en', languageLabel: 'English', logo: makeSvgChannelBadge('#0f172a', '#172554', '#38bdf8', 'SKY SPORTS', 'ACTION', 'UK HD') },
   'sky-sports-f1': { channelId: 'sky-sports-f1', name: 'Sky Sports F1 UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/sky-sports-f1-uk.png` },
+  'sky-sports-cricket': { channelId: 'sky-sports-cricket', name: 'Sky Sports Cricket UK HD', language: 'en', languageLabel: 'English', logo: makeSvgChannelBadge('#0f172a', '#1e3a8a', '#ef4444', 'SKY SPORTS', 'CRICKET', 'UK HD') },
+  'sky-sports-golf': { channelId: 'sky-sports-golf', name: 'Sky Sports Golf UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/sky-sports-golf-icon-uk.png` },
+  'sky-sports-tennis': { channelId: 'sky-sports-tennis', name: 'Sky Sports Tennis UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/sky-sports-tennis-icon-uk.png` },
+  'sky-sports-mix': { channelId: 'sky-sports-mix', name: 'Sky Sports Mix UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/sky-sports-mix-icon-uk.png` },
+  'sky-sports-news': { channelId: 'sky-sports-news', name: 'Sky Sports News UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/sky-sports-news-icon-uk.png` },
+  'sky-sports-racing': { channelId: 'sky-sports-racing', name: 'Sky Sports Racing UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/sky-sports-racing-icon-uk.png` },
   'tnt-sports-1': { channelId: 'tnt-sports-1', name: 'TNT Sports 1 UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/hd/tnt-sports-1-hd-uk.png` },
   'tnt-sports-2': { channelId: 'tnt-sports-2', name: 'TNT Sports 2 UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/hd/tnt-sports-2-hd-uk.png` },
   'tnt-sports-3': { channelId: 'tnt-sports-3', name: 'TNT Sports 3 UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/hd/tnt-sports-3-hd-uk.png` },
   'tnt-sports-4': { channelId: 'tnt-sports-4', name: 'TNT Sports 4 UK HD', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-kingdom/hd/tnt-sports-4-hd-uk.png` },
+  'supersport-premier-league': { channelId: 'supersport-premier-league', name: 'SuperSport Premier League HD', language: 'en', languageLabel: 'English', logo: makeSvgChannelBadge('#0f172a', '#1e3a8a', '#f59e0b', 'SUPERSPORT', 'EPL', 'PREMIER LEAGUE') },
+  'supersport-grandstand': { channelId: 'supersport-grandstand', name: 'SuperSport Grandstand HD', language: 'en', languageLabel: 'English', logo: makeSvgChannelBadge('#0f172a', '#1e3a8a', '#fbbf24', 'SUPERSPORT', 'GRANDSTAND', 'LIVE HD') },
+  'supersport-football': { channelId: 'supersport-football', name: 'SuperSport Football HD', language: 'en', languageLabel: 'English', logo: makeSvgChannelBadge('#0f172a', '#1e3a8a', '#38bdf8', 'SUPERSPORT', 'FOOTBALL', 'LIVE HD') },
+  'supersport-laliga': { channelId: 'supersport-laliga', name: 'SuperSport LaLiga HD', language: 'en', languageLabel: 'English', logo: makeSvgChannelBadge('#0f172a', '#7f1d1d', '#f43f5e', 'SUPERSPORT', 'LALIGA', 'LIVE HD') },
+  'supersport-variety-1': { channelId: 'supersport-variety-1', name: 'SuperSport Variety 1 HD', language: 'en', languageLabel: 'English', logo: makeSvgChannelBadge('#0f172a', '#1e3a8a', '#34d399', 'SUPERSPORT', 'VARIETY 1', 'LIVE HD') },
+  'usa-network-hd': { channelId: 'usa-network-hd', name: 'USA Network Sports HD', language: 'en', languageLabel: 'English', logo: 'https://schedulesdirect-api20141201-logos.s3.dualstack.us-east-1.amazonaws.com/stationLogos/s11207_dark_360w_270h.png' },
 
   // US Sports (Fox, ESPN, CBS, NBC, NBA, NFL, NHL, MLB)
   'fox-sports-1': { channelId: 'fox-sports-1', name: 'Fox Sports 1 (FS1 HD)', language: 'en', languageLabel: 'English', logo: makeSvgChannelBadge('#0c4a6e', '#082f49', '#38bdf8', 'FOX SPORTS', 'FS1', 'HD LIVE') },
@@ -3124,6 +3445,8 @@ const LIVE_CHANNEL_DIRECTORY: Record<string, ChannelMetaEntry> = {
   'red-bull-tv': { channelId: 'red-bull-tv', name: 'Red Bull TV Motorsports (1080p)', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/international/red-bull-tv-int.png` },
   'tennis-channel': { channelId: 'tennis-channel', name: 'Tennis Channel HD (1080p)', language: 'en', languageLabel: 'English', logo: `${TV_LOGO_REPO}/countries/united-states/tennis-channel-us.png` },
 };
+
+let cachedUpstreamEpgMap: Map<string, any> = new Map();
 
 const GENERIC_PLACEHOLDER_LOGOS = new Set([
   'https://i.imgur.com/Vtk2cGI.png',
@@ -3170,7 +3493,11 @@ function buildRecommendedChannelItem(channelId: string): {
   const fromCache = cachedList.find((c: any) => c?.id === channelId);
   const meta = LIVE_CHANNEL_DIRECTORY[channelId];
   const lang = fromCache?.language || meta?.language || 'en';
-  const name = fromCache?.name || meta?.name || channelId.replace(/-/g, ' ').toUpperCase();
+  const name =
+    (channelId === 'canal-plus-foot-fr' && meta?.name) ||
+    meta?.name ||
+    fromCache?.name ||
+    channelId.replace(/-/g, ' ').toUpperCase();
   return {
     channelId,
     name,
@@ -3181,7 +3508,7 @@ function buildRecommendedChannelItem(channelId: string): {
   };
 }
 
-// Official competition broadcast pools so simultaneous matches in the same time slot map to their real broadcasters
+// Official competition broadcast pools so simultaneous matches in the same time slot map strictly to unique satellite channels (never duplicate alias feeds)
 const UEFA_ARABIC_POOL = [
   'bein-sports-1-ar',
   'bein-sports-2-ar',
@@ -3189,67 +3516,6 @@ const UEFA_ARABIC_POOL = [
   'bein-sports-4-ar',
   'bein-sports-5-ar',
   'bein-sports-6-ar',
-  'bein-sports-7-ar',
-  'bein-sports-8-ar',
-  'bein-sports-9-ar',
-];
-
-const UEFA_UK_TNT_POOL = [
-  'tnt-sports-1',
-  'tnt-sports-2',
-  'tnt-sports-3',
-  'tnt-sports-4',
-];
-
-const UEFA_EN_BEIN_POOL = [
-  'bein-sports-en-1',
-  'bein-sports-en-2',
-  'bein-sports-en-3',
-];
-
-const UEFA_FR_POOL = [
-  'canal-plus-foot-fr',
-  'bein-sports-fr-1',
-  'bein-sports-fr-2',
-  'bein-sports-fr-3',
-  'rmc-sport-1-fr',
-  'bein-sports-max-4-fr',
-  'bein-sports-max-5-fr',
-  'bein-sports-max-6-fr',
-  'bein-sports-max-7-fr',
-  'bein-sports-max-9-fr',
-  'bein-sports-max-10-fr',
-];
-
-const UEFA_OFFICIAL_PRIMARY_POOL = [
-  'bein-sports-1-ar',
-  'bein-sports-2-ar',
-  'bein-sports-3-ar',
-  'bein-sports-4-ar',
-  'bein-sports-5-ar',
-  'bein-sports-6-ar',
-  'bein-sports-7-ar',
-  'bein-sports-8-ar',
-  'bein-sports-9-ar',
-  'tnt-sports-1',
-  'tnt-sports-2',
-  'tnt-sports-3',
-  'tnt-sports-4',
-  'bein-sports-en-1',
-  'bein-sports-en-2',
-  'bein-sports-en-3',
-  'canal-plus-foot-fr',
-  'bein-sports-fr-1',
-  'bein-sports-fr-2',
-  'bein-sports-fr-3',
-  'cbs-sports-golazo',
-  'rmc-sport-1-fr',
-  'bein-sports-max-4-fr',
-  'bein-sports-max-5-fr',
-  'bein-sports-max-6-fr',
-  'bein-sports-max-7-fr',
-  'bein-sports-max-9-fr',
-  'bein-sports-max-10-fr',
 ];
 
 const MENA_SAUDI_MULTIPLEX_POOL = [
@@ -3267,10 +3533,239 @@ const MENA_SAUDI_MULTIPLEX_POOL = [
   'dubai-sports-1-ar',
 ];
 
+// Classify every channel into a distinct broadcaster family so a single match never hogs two sibling channels from the same network when concurrent matches are airing
+function getChannelNetworkFamily(channelId: string): string {
+  if (channelId.startsWith('bein-sports-') && channelId.endsWith('-ar')) return 'bein-ar';
+  if (channelId.startsWith('ssc-')) return 'ssc-ar';
+  if (channelId.startsWith('alkass-')) return 'alkass-ar';
+  if (channelId.startsWith('ad-sports-') || channelId.startsWith('dubai-sports-') || channelId === 'arryadia-ar' || channelId === 'ontime-sports-1-ar' || channelId === 'ktv-sport-ar') return 'mena-ar';
+  if (channelId.startsWith('sky-sports-')) return 'sky-uk';
+  if (channelId.startsWith('tnt-sports-') || channelId.startsWith('premier-sports-') || channelId.startsWith('eurosport-')) return 'tnt-uk';
+  if (channelId.startsWith('supersport-')) return 'supersport';
+  if (channelId.startsWith('bein-sports-en-') || channelId === 'bein-sports-xtra-en') return 'bein-en';
+  if (channelId.endsWith('-fr')) return 'fr';
+  if (channelId.endsWith('-tr')) return 'tr';
+  return 'us-en';
+}
+
+// Order an event's assigned channels so the first 3 pills on the match card show a diverse mix (Flagship Arabic + Flagship UK/US English + 3rd International/European)
+function sortEventChannelsForCardDisplay(channelIds: string[]): string[] {
+  if (channelIds.length <= 1) return channelIds;
+  const arList = channelIds.filter((id) => id.endsWith('-ar'));
+  const ukUsList = channelIds.filter(
+    (id) =>
+      !id.endsWith('-ar') &&
+      !id.endsWith('-fr') &&
+      !id.endsWith('-tr') &&
+      !id.startsWith('bein-sports-en-') &&
+      !id.startsWith('supersport-')
+  );
+  const intlEnList = channelIds.filter((id) => id.startsWith('bein-sports-en-') || id.startsWith('supersport-'));
+  const frTrList = channelIds.filter((id) => id.endsWith('-fr') || id.endsWith('-tr'));
+
+  const ordered: string[] = [];
+  const pushUnique = (id?: string) => {
+    if (id && !ordered.includes(id)) ordered.push(id);
+  };
+
+  // Top 3 slots on the match card: 1 Arabic (if any), 1 UK/US flagship (Sky/TNT/ESPN/USA/CBS), 1 French/SuperSport/beIN EN
+  if (arList.length > 0) pushUnique(arList[0]);
+  if (ukUsList.length > 0) pushUnique(ukUsList[0]);
+  if (frTrList.length > 0) pushUnique(frTrList[0]);
+  if (intlEnList.length > 0) pushUnique(intlEnList[0]);
+
+  for (const id of channelIds) {
+    pushUnique(id);
+  }
+  return ordered;
+}
+
+// Strict per-channel stream allowlist/blocklist so a channel NEVER includes another numbered channel's feed as "Server 2 / Backup"
+const STRICT_CHANNEL_REQUIRED_STREAM_TOKEN: Record<string, string[]> = {
+  // beIN Sports Arabic 1–9 & Open & Premium
+  'bein-sports-1-ar': ['premium91'],
+  'bein-sports-2-ar': ['premium92'],
+  'bein-sports-3-ar': ['premium93'],
+  'bein-sports-4-ar': ['premium94'],
+  'bein-sports-5-ar': ['premium95'],
+  'bein-sports-6-ar': ['premium96'],
+  'bein-sports-7-ar': ['premium97'],
+  'bein-sports-8-ar': ['premium98', 'premium97', 'premium99'], // 8-ar uses failover if 98 is offline
+  'bein-sports-9-ar': ['premium99'],
+  'bein-sports-open-ar': ['premium578'],
+  'bein-sports-premium-1-ar': ['premium91'],
+  'bein-sports-premium-2-ar': ['premium92'],
+  'bein-sports-premium-3-ar': ['premium93'],
+  // beIN Sports English 1–3
+  'bein-sports-en-1': ['premium712'],
+  'bein-sports-en-2': ['premium713'],
+  'bein-sports-en-3': ['premium714'],
+  // beIN Sports France 1–3 & MAX
+  'bein-sports-fr-1': ['premium116'],
+  'bein-sports-fr-2': ['premium117'],
+  'bein-sports-fr-3': ['premium118'],
+  'bein-sports-max-4-fr': ['premium494'],
+  'bein-sports-max-5-fr': ['premium495'],
+  'bein-sports-max-6-fr': ['premium496'],
+  'bein-sports-max-7-fr': ['premium497'],
+  'bein-sports-max-8-fr': ['premium498'],
+  'bein-sports-max-9-fr': ['premium499'],
+  'bein-sports-max-10-fr': ['premium500'],
+  // TNT Sports 1–4 UK
+  'tnt-sports-1': ['premium31'],
+  'tnt-sports-2': ['premium32'],
+  'tnt-sports-3': ['premium33'],
+  'tnt-sports-4': ['premium34'],
+  // Sky Sports UK
+  'sky-sports-main-event': ['premium38'],
+  'sky-sports-premier-league': ['premium130', 'AAxBRQEBc2c'],
+  'sky-sports-football': ['premium35'],
+  'sky-sports-plus': ['premium36'],
+  'sky-sports-action': ['premium37', 'AQNASgYGemc'],
+  'sky-sports-f1': ['premium60', 'AwZGQwwEZA'],
+  // SuperSport
+  'supersport-grandstand': ['premium412'],
+  'supersport-football': ['premium413'],
+  'supersport-premier-league': ['premium414'],
+  'supersport-laliga': ['premium415'],
+  'supersport-variety-1': ['premium420'],
+};
+
+// Filter out contaminated secondary mirrors where upstream bundles a different TV channel or a free FAST replay stream
+function isMismatchedSecondaryMirror(channelId: string, rawUrl: string, label = ''): boolean {
+  const u = String(rawUrl || '').toLowerCase();
+  const l = String(label || '').toLowerCase();
+  if (!u && !l) return false;
+
+  const allowedTokens = STRICT_CHANNEL_REQUIRED_STREAM_TOKEN[channelId];
+  if (allowedTokens && allowedTokens.length > 0 && u) {
+    const matchesAllowed = allowedTokens.some((token) => u.includes(token.toLowerCase()));
+    if (!matchesAllowed) {
+      return true;
+    }
+  }
+
+  // Premier Sports 1 & 2 UK must only use real UK satellite feeds (premium451/premium709), never Amagi/Pluto/Tubi FAST loops
+  if (channelId === 'premier-sports-1' || channelId === 'premier-sports-2') {
+    if (u.includes('amagi.tv') || u.includes('pluto') || u.includes('tubi') || u.includes('wurl.com')) {
+      return true;
+    }
+  }
+
+  // Canal+ Foot France must only use Canal+ Foot (premium463), never Canal+ Sport France (premium122 / stream-48) which airs Rugby
+  if (channelId === 'canal-plus-foot-fr') {
+    if (u.includes('premium122') || u.includes('premium121') || u.includes('stream-48') || l.includes('canal+ sport')) {
+      return true;
+    }
+  }
+
+  // RMC Sport 1 must not fall back to RMC Sport 2 (different live event)
+  if (channelId === 'rmc-sport-1-fr') {
+    if (u.includes('premium120') || l.includes('rmc sport 2')) return true;
+  }
+
+  // SSC channels must not cross-contaminate between SSC 1, SSC 2, SSC 3, and SSC Extra 1/2
+  if (channelId === 'ssc-sport-1-ar') {
+    if (u.includes('premium615') || u.includes('premium616') || u.includes('premium619') || u.includes('premium620') || u.includes('premium600') || l.includes('extra')) {
+      return true;
+    }
+  }
+  if (channelId === 'ssc-sport-2-ar') {
+    if (u.includes('premium614') || u.includes('premium616') || u.includes('premium619') || u.includes('premium620') || u.includes('premium601') || l.includes('extra')) {
+      return true;
+    }
+  }
+  if (channelId === 'ssc-sport-3-ar') {
+    if (u.includes('premium614') || u.includes('premium615') || u.includes('premium619') || u.includes('premium620') || u.includes('premium609') || l.includes('extra')) {
+      return true;
+    }
+  }
+  if (channelId === 'ssc-extra-1-ar') {
+    if (u.includes('premium620') || u.includes('premium616') || u.includes('premium614') || u.includes('premium615') || u.includes('premium783')) {
+      return true;
+    }
+  }
+  if (channelId === 'ssc-extra-2-ar') {
+    if (u.includes('premium784')) {
+      return true;
+    }
+  }
+
+  // Abu Dhabi Sports 1 must not fall back to Abu Dhabi Sports 1 Premium (different feed)
+  if (channelId === 'ad-sports-1-ar' && (u.includes('premium609') || l.includes('premium'))) {
+    return true;
+  }
+
+  // KTV Sport must not fall back to KTV Sport Plus
+  if (channelId === 'ktv-sport-ar' && l.includes('plus')) {
+    return true;
+  }
+
+  // Dubai Sports 1 must not fall back to Dubai Racing
+  if (channelId === 'dubai-sports-1-ar' && (u.includes('premium608') || l.includes('racing'))) {
+    return true;
+  }
+
+  // NFL Network single-game feed must not switch to NFL RedZone whiparound
+  if (channelId === 'nfl-network' && (u.includes('premium667') || l.includes('redzone'))) {
+    return true;
+  }
+
+  // DAZN Combat must not switch to DAZN LaLiga or DAZN Ligue 1 football feeds
+  if (channelId === 'dazn-combat' && (u.includes('premium538') || u.includes('premium960') || l.includes('laliga') || l.includes('ligue 1'))) {
+    return true;
+  }
+
+  return false;
+}
+
+// Compute real-world broadcaster priority score so simultaneous matches sort in exact TV channel order (1..6)
+function getMatchBroadcastPrestige(ev: any): number {
+  const home = String(ev?.homeTeam?.name || '').toLowerCase();
+  const away = String(ev?.awayTeam?.name || '').toLowerCase();
+  const teams = `${home} ${away}`;
+  const leagueSlug = String(ev?.leagueSlug || ev?.league || '').toLowerCase();
+
+  let score = 0;
+  // League tier priority so top-division matches always claim primary flagship channels before second-tier simultaneous matches
+  if (leagueSlug.includes('uefa.champions')) score += 85;
+  else if (leagueSlug === 'eng.1' || leagueSlug.includes('premier league')) score += 75;
+  else if (leagueSlug === 'esp.1' || leagueSlug === 'ita.1' || leagueSlug === 'ger.1' || leagueSlug === 'fra.1') score += 60;
+  else if (leagueSlug.includes('ksa.1') || leagueSlug.includes('afc.champions')) score += 58;
+  else if (leagueSlug.includes('uefa.europa') && !leagueSlug.includes('conf')) score += 45;
+  else if (leagueSlug.includes('ufc') || leagueSlug.includes('f1') || leagueSlug.includes('nba') || leagueSlug.includes('nfl')) score += 50;
+  else if (leagueSlug === 'eng.2') score += 10;
+
+  const clubWeights: Array<[RegExp, number]> = [
+    [/\b(real madrid|barcelona|ac milan|milan|arsenal|liverpool|manchester city|manchester united|bayern|paris saint-germain|psg|inter milan|juventus|chelsea)\b/i, 120],
+    [/\b(crystal palace|besiktas|beşiktaş|tottenham|aston villa|newcastle|atletico madrid|borussia dortmund|napoli|roma|al hilal|al nassr)\b/i, 75],
+    [/\b(as monaco|monaco|lyon|olympique lyonnais|bournemouth|afc bournemouth|marseille|lille|bayer leverkusen|al ittihad|al ahli)\b/i, 70],
+    [/\b(atalanta|ajax|ajax amsterdam|sc freiburg|freiburg|tsg hoffenheim|hoffenheim|celtic|celta vigo|rangers|fenerbahce|galatasaray)\b/i, 56],
+    [/\b(benfica|real sociedad|porto|sporting|villarreal|athletic club|real betis|fiorentina|lazio|bologna|stuttgart|eintracht frankfurt|rb leipzig|brighton|sunderland|nottingham forest|west ham|fulham|brentford|everton|wolves)\b/i, 35],
+    [/\b(nice|rennes|stade rennais|lens|brest|strasbourg|az alkmaar|psv|feyenoord|anderlecht|club brugge|kaa gent|genk|salzburg|olympiacos|panathinaikos|paok|trabzonspor|basaksehir)\b/i, 20],
+  ];
+
+  for (const [pattern, weight] of clubWeights) {
+    const matches = teams.match(new RegExp(pattern.source, 'gi'));
+    if (matches) {
+      score += weight * matches.length;
+    }
+  }
+
+  return score;
+}
+
 function assignSmartChannelsForEvent(
   ev: any,
   slotIndex: number,
-  usedPrimaryInSlot: Set<string>
+  claimedInSlot: Set<string>,
+  slotContext?: {
+    britishRank?: number;
+    totalBritishInSlot?: number;
+    frenchRank?: number;
+    totalFrenchInSlot?: number;
+    turkishRank?: number;
+  }
 ): Array<{
   channelId: string;
   name: string;
@@ -3286,29 +3781,79 @@ function assignSmartChannelsForEvent(
   const away = String(ev?.awayTeam?.name || '').toLowerCase();
   const teamsText = `${home} ${away}`;
   const broadcastsText = Array.isArray(ev?.broadcasts) ? ev.broadcasts.join(' ').toLowerCase() : '';
+  const statusUpper = String(ev?.status || '').toUpperCase();
+  const isLive =
+    statusUpper === 'LIVE' ||
+    statusUpper === 'IN' ||
+    statusUpper === 'IN_PROGRESS' ||
+    statusUpper === 'HT' ||
+    statusUpper === '1H' ||
+    statusUpper === '2H';
 
-  const candidateIds: string[] = [];
-  const pushUnique = (...ids: string[]) => {
-    for (const id of ids) {
-      if (id && LIVE_CHANNEL_DIRECTORY[id] && !candidateIds.includes(id)) {
-        candidateIds.push(id);
-      }
+  const isFightCard = sport.includes('mma') || sport.includes('ufc') || sport.includes('boxing') || league.includes('ufc');
+  const isMotorsport = sport.includes('motor') || sport.includes('f1') || sport.includes('racing') || league.includes('formula');
+
+  const assignedIds: string[] = [];
+  const claimedFamiliesForThisEvent = new Set<string>();
+
+  // STRICT GLOBAL EXCLUSIVITY: A physical TV channel can NEVER be assigned to two simultaneous events in the same time slot
+  const claimChannel = (id?: string, enforceOnePerNetworkFamily = false): boolean => {
+    if (!id || !LIVE_CHANNEL_DIRECTORY[id] || assignedIds.includes(id)) return false;
+    if (claimedInSlot.has(id)) return false;
+    const family = getChannelNetworkFamily(id);
+    if (enforceOnePerNetworkFamily && claimedFamiliesForThisEvent.has(family)) {
+      return false;
     }
+    assignedIds.push(id);
+    claimedInSlot.add(id);
+    claimedFamiliesForThisEvent.add(family);
+    return true;
   };
 
-  // 1. NBA / Basketball (Official rights: ESPN, TNT Sports, NBA TV, beIN Sports EN/FR)
-  if (sport.includes('basketball') || league.includes('nba') || leagueSlug === 'nba') {
-    if (broadcastsText.includes('tnt')) {
-      pushUnique('tnt-sports-1', 'nba-tv', 'espn-hd', 'bein-sports-en-1', 'bein-sports-fr-1');
-    } else if (broadcastsText.includes('espn') || broadcastsText.includes('abc')) {
-      const espnPrimary = slotIndex % 2 === 0 ? 'espn-hd' : 'espn-2-hd';
-      pushUnique(espnPrimary, 'nba-tv', 'espn-hd', 'espn-2-hd', 'bein-sports-en-1', 'bein-sports-fr-1');
-    } else {
-      const nbaPool = ['nba-tv', 'espn-hd', 'espn-2-hd', 'tnt-sports-1', 'bein-sports-en-1', 'bein-sports-fr-1'];
-      pushUnique(nbaPool[slotIndex % nbaPool.length], ...nbaPool);
+  const claimFirstAvailable = (pool: string[], enforceOnePerNetworkFamily = false): string | null => {
+    for (const id of pool) {
+      if (claimChannel(id, enforceOnePerNetworkFamily)) return id;
     }
+    return null;
+  };
+
+  // Extract scraper EPG & recommended channel hints to supplement after competition-prestige channel routing
+  const epgLiveIds: string[] = Array.isArray(ev?.epgLiveChannelIds) ? ev.epgLiveChannelIds : [];
+  const epgUpcomingIds: string[] = Array.isArray(ev?.epgUpcomingChannelIds) ? ev.epgUpcomingChannelIds : [];
+  const scraperRecIds: string[] = Array.isArray(ev?.scraperRecommendedChannels)
+    ? ev.scraperRecommendedChannels.map((c: any) => String(c?.channelId || c?.id || c || '').trim()).filter(Boolean)
+    : [];
+
+  // STEP 1: COMPETITION-SPECIFIC PRESTIGE-ORDERED MULTIPLEX POOLS
+  // Simultaneous matches in a time slot are pre-sorted by getMatchBroadcastPrestige(ev) (e.g. Arsenal vs Everton = slot 0, Coventry vs Fulham = slot 1)
+  // so the #1 marquee match always claims beIN Sports 1 HD (bein-sports-1-ar) & beIN EN 1, while the #2 match claims beIN Sports 2 HD (bein-sports-2-ar) & beIN EN 2.
+  // 1. NBA / Basketball
+  if (sport.includes('basketball') || league.includes('nba') || leagueSlug === 'nba') {
+    const usPools = [
+      ['nba-tv', 'espn-hd', 'espn-2-hd', 'tnt-sports-1', 'tnt-sports-2', 'fox-sports-1'],
+      ['espn-hd', 'espn-2-hd', 'nba-tv', 'tnt-sports-1', 'tnt-sports-2', 'fox-sports-1'],
+      ['tnt-sports-1', 'tnt-sports-2', 'nba-tv', 'espn-hd', 'espn-2-hd', 'fox-sports-1'],
+    ];
+    const preferredUsPool = broadcastsText.includes('tnt')
+      ? usPools[2]
+      : broadcastsText.includes('espn') || broadcastsText.includes('abc')
+        ? usPools[1]
+        : usPools[0];
+    claimFirstAvailable(preferredUsPool, true);
+    claimFirstAvailable(['bein-sports-en-1', 'bein-sports-en-2', 'bein-sports-en-3', 'bein-sports-xtra-en'], true);
+    claimFirstAvailable(
+      [
+        'bein-sports-fr-1',
+        'bein-sports-fr-2',
+        'bein-sports-fr-3',
+        'bein-sports-max-4-fr',
+        'bein-sports-max-5-fr',
+        'bein-sports-max-6-fr',
+      ],
+      true
+    );
   }
-  // 2. NFL / American Football (Official rights: NFL Network, Fox Sports, CBS, NBC, ESPN, Sky Sports Main Event)
+  // 2. NFL / American Football
   else if (
     sport === 'football' ||
     sport === 'nfl' ||
@@ -3316,45 +3861,46 @@ function assignSmartChannelsForEvent(
     league.includes('nfl') ||
     leagueSlug === 'nfl'
   ) {
-    if (broadcastsText.includes('nbc') || broadcastsText.includes('peacock')) {
-      pushUnique('nbc-sports-now', 'nfl-network', 'sky-sports-main-event', 'fox-sports-1', 'espn-hd');
-    } else if (broadcastsText.includes('espn') || broadcastsText.includes('abc')) {
-      pushUnique('espn-hd', 'espn-2-hd', 'nfl-network', 'sky-sports-main-event', 'fox-sports-1');
-    } else if (broadcastsText.includes('cbs') || broadcastsText.includes('paramount')) {
-      pushUnique('cbs-sports-golazo', 'nfl-network', 'fox-sports-1', 'sky-sports-main-event', 'espn-hd');
+    if (broadcastsText.includes('espn') || broadcastsText.includes('abc')) {
+      claimFirstAvailable(['espn-hd', 'espn-2-hd', 'nfl-network', 'fox-sports-1', 'fox-sports-2', 'cbs-sports-golazo', 'nbc-sports-now'], true);
     } else if (broadcastsText.includes('fox')) {
-      const foxPrimary = slotIndex % 2 === 0 ? 'fox-sports-1' : 'fox-sports-2';
-      pushUnique(foxPrimary, 'fox-sports-1', 'fox-sports-2', 'nfl-network', 'sky-sports-main-event', 'espn-hd');
+      claimFirstAvailable(['fox-sports-1', 'fox-sports-2', 'nfl-network', 'espn-hd', 'espn-2-hd', 'cbs-sports-golazo', 'nbc-sports-now'], true);
     } else {
-      // Prime Video / NFL Network / Thursday Night Football
-      pushUnique('nfl-network', 'fox-sports-1', 'sky-sports-main-event', 'cbs-sports-golazo', 'espn-hd');
+      claimFirstAvailable(['nfl-network', 'fox-sports-1', 'espn-hd', 'fox-sports-2', 'espn-2-hd', 'cbs-sports-golazo', 'nbc-sports-now'], true);
     }
+    claimFirstAvailable(['sky-sports-action', 'sky-sports-main-event', 'sky-sports-mix', 'sky-sports-plus'], true);
+    claimFirstAvailable(['bein-sports-fr-2', 'bein-sports-fr-3', 'bein-sports-max-4-fr', 'bein-sports-max-5-fr'], true);
   }
-  // 3. UFC / MMA / Boxing (Official rights: ESPN, TNT Sports UK, RMC Sport FR, DAZN Combat)
-  else if (sport.includes('mma') || sport.includes('ufc') || sport.includes('boxing') || league.includes('ufc')) {
-    const combatPool = ['espn-hd', 'dazn-combat', 'tnt-sports-1', 'rmc-sport-1-fr', 'fox-sports-2'];
-    pushUnique(combatPool[slotIndex % combatPool.length], ...combatPool);
+  // 3. UFC / MMA / Boxing
+  else if (isFightCard) {
+    claimFirstAvailable(['dazn-combat', 'espn-hd', 'espn-2-hd', 'fox-sports-2'], true);
+    claimFirstAvailable(['tnt-sports-1', 'tnt-sports-2', 'tnt-sports-3', 'tnt-sports-4'], true);
+    claimFirstAvailable(['rmc-sport-1-fr', 'bein-sports-fr-3'], true);
+    claimFirstAvailable(['ad-sports-2-ar', 'ad-sports-1-ar'], true);
   }
-  // 4. Formula 1 / Motorsport (Official rights: Sky Sports F1, ESPN 2, beIN Sports 8, Canal+)
-  else if (sport.includes('motor') || sport.includes('f1') || sport.includes('racing') || league.includes('formula')) {
-    pushUnique('sky-sports-f1', 'espn-2-hd', 'bein-sports-8-ar', 'canal-plus-foot-fr', 'red-bull-tv');
+  // 4. Formula 1 / Motorsport
+  else if (isMotorsport) {
+    claimFirstAvailable(['sky-sports-f1', 'red-bull-tv', 'espn-2-hd'], true);
+    claimFirstAvailable(['bein-sports-8-ar', 'bein-sports-9-ar', 'ssc-sport-3-ar'], true);
+    claimFirstAvailable(['canal-plus-foot-fr', 'bein-sports-fr-3'], true);
   }
   // 5. Tennis (ATP / WTA)
   else if (sport.includes('tennis') || league.includes('atp') || league.includes('wta')) {
-    const tennisPool = ['tennis-channel', 'eurosport-1', 'eurosport-2', 'bein-sports-7-ar', 'sky-sports-main-event'];
-    pushUnique(tennisPool[slotIndex % tennisPool.length], ...tennisPool);
+    claimFirstAvailable(['sky-sports-tennis', 'tennis-channel', 'eurosport-1', 'eurosport-2'], true);
+    claimFirstAvailable(['bein-sports-7-ar', 'bein-sports-8-ar', 'bein-sports-9-ar'], true);
+    claimFirstAvailable(['bein-sports-fr-3', 'bein-sports-max-4-fr', 'bein-sports-max-5-fr'], true);
   }
   // 6. NHL / Ice Hockey
   else if (sport.includes('hockey') || league.includes('nhl') || leagueSlug === 'nhl') {
-    const nhlPool = ['nhl-network', 'espn-hd', 'espn-2-hd', 'fox-sports-2', 'premier-sports-1'];
-    pushUnique(nhlPool[slotIndex % nhlPool.length], ...nhlPool);
+    claimFirstAvailable(['nhl-network', 'espn-hd', 'espn-2-hd', 'fox-sports-2'], true);
+    claimFirstAvailable(['premier-sports-1', 'premier-sports-2', 'tnt-sports-3', 'tnt-sports-4'], true);
   }
   // 7. MLB / Baseball
   else if (sport.includes('baseball') || league.includes('mlb') || leagueSlug === 'mlb') {
-    const mlbPool = ['mlb-network', 'fox-sports-1', 'espn-hd', 'fox-sports-2', 'espn-2-hd'];
-    pushUnique(mlbPool[slotIndex % mlbPool.length], ...mlbPool);
+    claimFirstAvailable(['mlb-network', 'fox-sports-1', 'espn-hd', 'fox-sports-2'], true);
+    claimFirstAvailable(['tnt-sports-2', 'tnt-sports-3', 'tnt-sports-4'], true);
   }
-  // 8. Football / Soccer — STRICT COMPETITION-FIRST BROADCAST RIGHTS
+  // 8. Football / Soccer
   else {
     const isUefaCompetition =
       leagueSlug.includes('uefa') ||
@@ -3364,42 +3910,107 @@ function assignSmartChannelsForEvent(
       league.includes('conference league');
 
     // 8A. UEFA Champions League, UEFA Europa League, UEFA Conference League
-    // Official Rights ONLY: beIN Sports 1-9 HD (AR), TNT Sports 1-4 (UK), beIN Sports EN 1-3, Canal+ / beIN FR, CBS Sports Golazo (US)
     if (isUefaCompetition && !leagueSlug.includes('afc') && !league.includes('afc')) {
-      const arChannel = UEFA_ARABIC_POOL[slotIndex % UEFA_ARABIC_POOL.length];
-      const ukTntChannel = UEFA_UK_TNT_POOL[slotIndex % UEFA_UK_TNT_POOL.length];
-      const enBeinChannel = UEFA_EN_BEIN_POOL[slotIndex % UEFA_EN_BEIN_POOL.length];
-      const frChannel = UEFA_FR_POOL[slotIndex % UEFA_FR_POOL.length];
-
       const hasBritishClub =
         /\b(arsenal|aston villa|bournemouth|brentford|brighton|chelsea|crystal palace|everton|fulham|ipswich|leicester|liverpool|manchester city|manchester united|newcastle|nottingham forest|southampton|sunderland|tottenham|west ham|wolves|wolverhampton|celtic|rangers|heart of midlothian|hearts|aberdeen|hibernian)\b/i.test(
           teamsText
         );
+      const isScottishClub = /\b(celtic|rangers|heart of midlothian|hearts|aberdeen|hibernian)\b/i.test(teamsText);
       const hasTurkishClub =
         /\b(galatasaray|fenerbahce|fenerbahçe|besiktas|beşiktaş|trabzonspor|basaksehir|başakşehir|samsunspor)\b/i.test(
           teamsText
         );
       const hasFrenchClub =
-        /\b(paris saint-germain|psg|marseille|lyon|monaco|lille|lens|stade rennais|rennes|nice|brest|strasbourg)\b/i.test(
+        /\b(paris saint-germain|psg|marseille|lyon|olympique lyonnais|monaco|as monaco|lille|lens|stade rennais|rennes|nice|brest|strasbourg)\b/i.test(
           teamsText
         );
-      const hasRealMadrid = /\b(real madrid)\b/i.test(teamsText);
 
-      // Primary channel rotation stays strictly on official UEFA broadcasters
-      if (hasTurkishClub) {
-        const trCh = `bein-sports-${(slotIndex % 3) + 1}-tr`;
-        pushUnique(arChannel, ukTntChannel, trCh, enBeinChannel, 'cbs-sports-golazo', frChannel);
-      } else if (hasBritishClub) {
-        pushUnique(arChannel, ukTntChannel, enBeinChannel, 'cbs-sports-golazo', frChannel);
-      } else if (hasFrenchClub) {
-        pushUnique(arChannel, frChannel, ukTntChannel, enBeinChannel, 'cbs-sports-golazo');
-      } else if (hasRealMadrid) {
-        pushUnique('bein-sports-1-ar', 'tnt-sports-1', 'bein-sports-en-1', 'cbs-sports-golazo', 'real-madrid-tv');
+      claimFirstAvailable(
+        [
+          ...UEFA_ARABIC_POOL,
+          'bein-sports-7-ar',
+          'bein-sports-8-ar',
+          'bein-sports-9-ar',
+          'bein-sports-premium-1-ar',
+          'bein-sports-premium-2-ar',
+          'bein-sports-premium-3-ar',
+        ],
+        true
+      );
+
+      const totalBritishInSlot = slotContext?.totalBritishInSlot ?? 0;
+      if (hasBritishClub) {
+        const britRank = slotContext?.britishRank ?? 0;
+        const preferredTnt = `tnt-sports-${Math.min(4, britRank + 1)}`;
+        claimFirstAvailable([preferredTnt, 'tnt-sports-1', 'tnt-sports-2', 'tnt-sports-3', 'tnt-sports-4', 'premier-sports-1', 'premier-sports-2'], true);
       } else {
-        pushUnique(arChannel, enBeinChannel, ukTntChannel, frChannel, 'cbs-sports-golazo');
+        const nonBritishUkPool =
+          totalBritishInSlot >= 3
+            ? ['tnt-sports-4', 'premier-sports-1', 'premier-sports-2']
+            : totalBritishInSlot === 2
+              ? ['tnt-sports-3', 'tnt-sports-4', 'premier-sports-1', 'premier-sports-2']
+              : totalBritishInSlot === 1
+                ? ['tnt-sports-2', 'tnt-sports-3', 'tnt-sports-4', 'premier-sports-1', 'premier-sports-2']
+                : ['tnt-sports-1', 'tnt-sports-2', 'tnt-sports-3', 'tnt-sports-4', 'premier-sports-1', 'premier-sports-2'];
+        claimFirstAvailable(nonBritishUkPool, true);
       }
 
-      pushUnique(...UEFA_OFFICIAL_PRIMARY_POOL);
+      if (slotIndex === 0) {
+        claimFirstAvailable(['bein-sports-en-1', 'bein-sports-en-2', 'bein-sports-en-3'], true);
+      } else if (isScottishClub) {
+        claimFirstAvailable(['bein-sports-en-2', 'bein-sports-en-3', 'bein-sports-en-1'], true);
+      } else if (hasBritishClub) {
+        claimFirstAvailable(['bein-sports-en-3', 'bein-sports-en-2', 'bein-sports-en-1'], true);
+      } else if (totalBritishInSlot < 3) {
+        claimFirstAvailable(['bein-sports-en-1', 'bein-sports-en-2', 'bein-sports-en-3'], true);
+      }
+
+      const totalFrenchInSlot = slotContext?.totalFrenchInSlot ?? 0;
+      if (hasFrenchClub) {
+        const frRank = slotContext?.frenchRank ?? 0;
+        if (frRank === 0) {
+          claimFirstAvailable(['canal-plus-foot-fr', 'bein-sports-fr-1', 'rmc-sport-1-fr'], true);
+        } else {
+          claimFirstAvailable(
+            [
+              'bein-sports-fr-2',
+              'rmc-sport-1-fr',
+              'bein-sports-fr-1',
+              'bein-sports-fr-3',
+              'bein-sports-max-4-fr',
+            ],
+            true
+          );
+        }
+      } else {
+        const frenchPool =
+          totalFrenchInSlot === 0
+            ? [
+                'bein-sports-fr-1',
+                'bein-sports-fr-2',
+                'bein-sports-fr-3',
+                'bein-sports-max-4-fr',
+                'bein-sports-max-5-fr',
+                'bein-sports-max-6-fr',
+                'bein-sports-max-7-fr',
+                'bein-sports-max-9-fr',
+                'bein-sports-max-10-fr',
+              ]
+            : [
+                'bein-sports-fr-3',
+                'bein-sports-max-4-fr',
+                'bein-sports-max-5-fr',
+                'bein-sports-max-6-fr',
+                'bein-sports-max-7-fr',
+                'bein-sports-max-9-fr',
+                'bein-sports-max-10-fr',
+              ];
+        claimFirstAvailable(frenchPool, true);
+      }
+
+      if (hasTurkishClub) {
+        claimFirstAvailable(['bein-sports-1-tr', 'bein-sports-2-tr', 'bein-sports-3-tr', 'bein-sports-4-tr', 'bein-sports-5-tr'], true);
+      }
     }
     // 8B. Saudi Pro League & AFC Champions League Elite
     else if (
@@ -3411,105 +4022,127 @@ function assignSmartChannelsForEvent(
         teamsText
       )
     ) {
-      const primarySsc = MENA_SAUDI_MULTIPLEX_POOL[slotIndex % 5]; // ssc-sport-1..3, ssc-extra-1..2
-      pushUnique(
-        primarySsc,
-        'ssc-sport-1-ar',
-        'ssc-sport-2-ar',
-        'ssc-sport-3-ar',
-        'alkass-1-ar',
-        'fox-sports-2'
-      );
+      claimFirstAvailable(['ssc-sport-1-ar', 'ssc-sport-2-ar', 'ssc-sport-3-ar', 'ssc-extra-1-ar', 'ssc-extra-2-ar', 'ssc-extra-3-ar'], true);
+      claimFirstAvailable(['alkass-1-ar', 'alkass-2-ar', 'alkass-3-ar', 'ad-sports-1-ar', 'ad-sports-2-ar'], true);
+      claimFirstAvailable(['fox-sports-2', 'fox-sports-1'], true);
     }
-    // 8C. English Premier League / FA Cup / EFL Cup
+    // 8C-1. English Premier League & FA Cup (Top-Flight)
     else if (
-      leagueSlug.includes('eng') ||
+      leagueSlug === 'eng.1' ||
+      leagueSlug === 'eng.fa' ||
       league.includes('premier league') ||
-      league.includes('fa cup') ||
+      league.includes('fa cup')
+    ) {
+      claimFirstAvailable(['bein-sports-1-ar', 'bein-sports-2-ar', 'bein-sports-3-ar', 'bein-sports-premium-1-ar', 'bein-sports-premium-2-ar'], true);
+      if (broadcastsText.includes('tnt')) {
+        claimFirstAvailable(['tnt-sports-1', 'tnt-sports-2', 'sky-sports-premier-league', 'sky-sports-main-event'], true);
+      } else {
+        claimFirstAvailable(['sky-sports-premier-league', 'sky-sports-main-event', 'tnt-sports-1', 'tnt-sports-2'], true);
+      }
+      claimFirstAvailable(['supersport-premier-league', 'supersport-grandstand', 'supersport-variety-1'], true);
+      claimFirstAvailable(['usa-network-hd', 'nbc-sports-now'], true);
+      claimFirstAvailable(['bein-sports-en-1', 'bein-sports-en-2', 'bein-sports-en-3'], true);
+      claimFirstAvailable(['canal-plus-foot-fr', 'bein-sports-fr-1', 'rmc-sport-1-fr'], true);
+    }
+    // 8C-2. EFL Championship / Carabao Cup / English Football League (eng.2 — Dedicated Sky Sports EFL & Golazo channels)
+    else if (
+      leagueSlug === 'eng.2' ||
+      leagueSlug.includes('eng.') ||
+      league.includes('championship') ||
       league.includes('efl') ||
       league.includes('carabao')
     ) {
-      if (broadcastsText.includes('tnt')) {
-        pushUnique('tnt-sports-1', 'bein-sports-1-ar', 'sky-sports-premier-league', 'bein-sports-en-1', 'nbc-sports-now');
-      } else {
-        const eplPool = [
-          'bein-sports-1-ar',
-          'sky-sports-premier-league',
+      claimFirstAvailable(
+        [
+          'sky-sports-football',
+          'sky-sports-plus',
+          'sky-sports-action',
+          'sky-sports-mix',
+          'sky-sports-news',
           'sky-sports-main-event',
-          'tnt-sports-1',
-          'bein-sports-en-1',
-          'nbc-sports-now',
-          'bein-sports-2-ar',
-          'canal-plus-foot-fr',
-        ];
-        pushUnique(eplPool[slotIndex % 3], ...eplPool);
-      }
+        ],
+        true
+      );
+      claimFirstAvailable(['cbs-sports-golazo', 'bein-sports-en-2', 'bein-sports-en-3', 'bein-sports-xtra-en'], true);
+      claimFirstAvailable(['supersport-football', 'supersport-variety-1', 'premier-sports-1', 'premier-sports-2'], true);
     }
     // 8D. Spanish LaLiga / Copa del Rey
     else if (leagueSlug.includes('esp') || league.includes('laliga') || league.includes('copa del rey')) {
-      const hasRealMadrid = /\b(real madrid)\b/i.test(teamsText);
-      const laligaPool = [
-        'bein-sports-3-ar',
-        'espn-hd',
-        'premier-sports-1',
-        'bein-sports-xtra-es',
-        'bein-sports-en-1',
-        'bein-sports-fr-1',
-        ...(hasRealMadrid ? ['real-madrid-tv'] : []),
-      ];
-      pushUnique(laligaPool[slotIndex % 2], ...laligaPool);
+      const isHeadlineLaLiga = /\b(barcelona|real madrid|atletico madrid|atlético)\b/i.test(teamsText);
+      if (isHeadlineLaLiga) {
+        claimFirstAvailable(['bein-sports-1-ar', 'bein-sports-3-ar', 'bein-sports-2-ar', 'bein-sports-premium-1-ar'], true);
+      } else {
+        claimFirstAvailable(['bein-sports-3-ar', 'bein-sports-2-ar', 'bein-sports-4-ar', 'bein-sports-1-ar'], true);
+      }
+      claimFirstAvailable(['premier-sports-1', 'premier-sports-2', 'tnt-sports-3'], true);
+      claimFirstAvailable(['supersport-laliga', 'supersport-football'], true);
+      claimFirstAvailable(['espn-hd', 'espn-2-hd', 'bein-sports-en-1', 'bein-sports-en-2'], true);
+      claimFirstAvailable(['bein-sports-fr-1', 'bein-sports-fr-2', 'bein-sports-fr-3', 'bein-sports-max-4-fr'], true);
     }
-    // 8E. Italian Serie A / Coppa Italia (Official MENA rights: Abu Dhabi Sports 1/2 + CBS Golazo US + TNT Sports UK)
+    // 8E. Italian Serie A / Coppa Italia
     else if (leagueSlug.includes('ita') || league.includes('serie a') || league.includes('coppa italia')) {
-      const serieAPool = [
-        'ad-sports-1-ar',
-        'cbs-sports-golazo',
-        'tnt-sports-2',
-        'bein-sports-4-ar',
-        'bein-sports-fr-2',
-        'ad-sports-2-ar',
-      ];
-      pushUnique(serieAPool[slotIndex % 2], ...serieAPool);
+      claimFirstAvailable(['ad-sports-1-ar', 'ad-sports-2-ar', 'bein-sports-4-ar', 'bein-sports-3-ar'], true);
+      claimFirstAvailable(['tnt-sports-2', 'tnt-sports-3', 'tnt-sports-4', 'premier-sports-1'], true);
+      claimFirstAvailable(['supersport-football', 'supersport-variety-1', 'cbs-sports-golazo'], true);
+      claimFirstAvailable(['bein-sports-fr-2', 'bein-sports-fr-3', 'bein-sports-max-4-fr', 'bein-sports-max-5-fr'], true);
     }
     // 8F. German Bundesliga / DFB-Pokal
     else if (leagueSlug.includes('ger') || league.includes('bundesliga')) {
-      const bundesligaPool = [
-        'bein-sports-5-ar',
-        'sky-sports-football',
-        'espn-2-hd',
-        'bein-sports-fr-2',
-        'espn-hd',
-      ];
-      pushUnique(bundesligaPool[slotIndex % 2], ...bundesligaPool);
+      claimFirstAvailable(
+        [
+          'bein-sports-5-ar',
+          'dubai-sports-1-ar',
+          'bein-sports-6-ar',
+          'bein-sports-7-ar',
+          'bein-sports-8-ar',
+          'bein-sports-9-ar',
+        ],
+        true
+      );
+      claimFirstAvailable(
+        [
+          'sky-sports-football',
+          'sky-sports-mix',
+          'sky-sports-plus',
+          'sky-sports-action',
+          'premier-sports-1',
+          'premier-sports-2',
+        ],
+        true
+      );
+      claimFirstAvailable(['espn-2-hd', 'espn-hd', 'espnu-hd'], true);
+      claimFirstAvailable(
+        [
+          'bein-sports-fr-2',
+          'bein-sports-fr-3',
+          'bein-sports-max-4-fr',
+          'bein-sports-max-5-fr',
+          'bein-sports-max-6-fr',
+          'bein-sports-max-7-fr',
+        ],
+        true
+      );
     }
     // 8G. French Ligue 1
     else if (leagueSlug.includes('fra') || league.includes('ligue 1')) {
-      const ligue1Pool = [
-        'bein-sports-6-ar',
-        'bein-sports-fr-1',
-        'canal-plus-foot-fr',
-        'bein-sports-en-2',
-        'rmc-sport-1-fr',
-      ];
-      pushUnique(ligue1Pool[slotIndex % 2], ...ligue1Pool);
+      claimFirstAvailable(['bein-sports-4-ar', 'bein-sports-6-ar', 'bein-sports-2-ar'], true);
+      claimFirstAvailable(['canal-plus-foot-fr', 'bein-sports-fr-1', 'rmc-sport-1-fr'], true);
+      claimFirstAvailable(['tnt-sports-3', 'tnt-sports-4', 'bein-sports-en-2', 'bein-sports-en-3'], true);
     }
     // 8H. Turkish Süper Lig
     else if (leagueSlug.includes('tur') || league.includes('türkiye') || league.includes('super lig')) {
-      const trPool = [
-        'bein-sports-1-tr',
-        'bein-sports-2-tr',
-        'bein-sports-3-tr',
-        'bein-sports-4-tr',
-        'bein-sports-5-tr',
-      ];
-      pushUnique(trPool[slotIndex % trPool.length], ...trPool, 'bein-sports-5-ar');
+      claimFirstAvailable(['bein-sports-1-tr', 'bein-sports-2-tr', 'bein-sports-3-tr', 'bein-sports-4-tr', 'bein-sports-5-tr'], true);
+      claimFirstAvailable(['bein-sports-7-ar', 'bein-sports-8-ar', 'bein-sports-9-ar'], true);
+      claimFirstAvailable(['bein-sports-fr-3', 'bein-sports-max-4-fr'], true);
     }
     // 8I. Moroccan Botola / CAF
     else if (
       leagueSlug.includes('mar') ||
       /\b(wydad|raja|far rabat|berkane|morocco|fath union|hassania|maghreb)\b/i.test(teamsText)
     ) {
-      pushUnique('arryadia-ar', 'bein-sports-5-ar', 'bein-sports-fr-1', 'bein-sports-en-1');
+      claimFirstAvailable(['arryadia-ar', 'bein-sports-5-ar', 'bein-sports-6-ar'], true);
+      claimFirstAvailable(['bein-sports-fr-1', 'bein-sports-fr-2'], true);
+      claimFirstAvailable(['bein-sports-en-1', 'bein-sports-en-2'], true);
     }
     // 8J. CONMEBOL Libertadores / Sudamericana / Liga MX / MLS / Americas
     else if (
@@ -3521,44 +4154,104 @@ function assignSmartChannelsForEvent(
       leagueSlug.includes('usa') ||
       league.includes('mls')
     ) {
-      const americasPool = [
-        'bein-sports-en-1',
-        'bein-sports-xtra-es',
-        'bein-sports-3-ar',
-        'fox-sports-1',
-        'espn-hd',
-        'bein-sports-en-2',
-      ];
-      pushUnique(americasPool[slotIndex % 3], ...americasPool);
+      claimFirstAvailable(['fox-sports-1', 'fox-sports-2', 'espn-hd', 'espn-2-hd', 'cbs-sports-golazo', 'nbc-sports-now'], true);
+      claimFirstAvailable(['dubai-sports-1-ar', 'ad-sports-1-ar', 'ad-sports-2-ar', 'bein-sports-3-ar', 'bein-sports-4-ar', 'bein-sports-7-ar'], true);
+      claimFirstAvailable(['bein-sports-en-1', 'bein-sports-en-2', 'bein-sports-en-3', 'bein-sports-xtra-en'], true);
+      claimFirstAvailable(['bein-sports-fr-2', 'bein-sports-fr-3', 'bein-sports-max-4-fr', 'bein-sports-max-5-fr'], true);
     }
     // 8K. Default International Football
     else {
-      const defaultSoccerPool = [
-        'bein-sports-1-ar',
-        'bein-sports-2-ar',
-        'bein-sports-en-1',
-        'tnt-sports-1',
-        'cbs-sports-golazo',
-        'bein-sports-fr-1',
-      ];
-      pushUnique(defaultSoccerPool[slotIndex % defaultSoccerPool.length], ...defaultSoccerPool);
+      claimFirstAvailable(['bein-sports-1-ar', 'bein-sports-2-ar', 'bein-sports-3-ar', 'bein-sports-4-ar', 'bein-sports-5-ar', 'bein-sports-6-ar'], true);
+      claimFirstAvailable(['bein-sports-en-1', 'bein-sports-en-2', 'tnt-sports-1', 'tnt-sports-2', 'premier-sports-1'], true);
+      claimFirstAvailable(['bein-sports-fr-1', 'bein-sports-fr-2', 'bein-sports-fr-3'], true);
     }
   }
 
-  // Pick a unique primary channel ONLY from this event's legitimate candidate broadcasters
-  let primaryChannelId = candidateIds.find((id) => !usedPrimaryInSlot.has(id)) || candidateIds[0] || 'bein-sports-1-ar';
-  usedPrimaryInSlot.add(primaryChannelId);
-
-  // Build 5-channel lineup strictly from the event's legitimate candidate broadcasters
-  const finalChannelIds: string[] = [primaryChannelId];
-  for (const id of candidateIds) {
-    if (finalChannelIds.length >= 5) break;
-    if (!finalChannelIds.includes(id)) {
-      finalChannelIds.push(id);
-    }
+  // STEP 2: Supplement with any unclaimed broadcaster family from the scraper's EPG / recommended channels
+  const supplementalEpgIds = Array.from(new Set([...(isLive ? epgLiveIds : []), ...epgUpcomingIds, ...scraperRecIds]));
+  for (const chId of supplementalEpgIds) {
+    // Never assign alias channels that share a physical stream with bein-sports-1..3-ar to a different match
+    if (chId.startsWith('bein-sports-premium-')) continue;
+    claimChannel(chId, true);
   }
 
-  return finalChannelIds.map((id) => buildRecommendedChannelItem(id));
+  // Fallback guarantee: if a high-concurrency time slot (e.g. Saturday 14:00 with 12+ simultaneous fixtures) exhausted the primary pools,
+  // pick the first unclaimed sports channel across the entire sports multiplex (excluding shared-stream aliases) so NO two matches in the same time slot ever share a channel
+  if (assignedIds.length === 0) {
+    const allSportsMultiplexPool = [
+      ...UEFA_ARABIC_POOL,
+      'bein-sports-7-ar',
+      'bein-sports-8-ar',
+      'bein-sports-9-ar',
+      'bein-sports-open-ar',
+      ...MENA_SAUDI_MULTIPLEX_POOL,
+      'ontime-sports-1-ar',
+      'ktv-sport-ar',
+      'arryadia-ar',
+      'sky-sports-premier-league',
+      'sky-sports-main-event',
+      'sky-sports-football',
+      'sky-sports-plus',
+      'sky-sports-action',
+      'sky-sports-mix',
+      'sky-sports-news',
+      'tnt-sports-1',
+      'tnt-sports-2',
+      'tnt-sports-3',
+      'tnt-sports-4',
+      'supersport-premier-league',
+      'supersport-grandstand',
+      'supersport-football',
+      'supersport-laliga',
+      'supersport-variety-1',
+      'premier-sports-1',
+      'premier-sports-2',
+      'bein-sports-en-1',
+      'bein-sports-en-2',
+      'bein-sports-en-3',
+      'bein-sports-xtra-en',
+      'usa-network-hd',
+      'nbc-sports-now',
+      'cbs-sports-golazo',
+      'espn-hd',
+      'espn-2-hd',
+      'espnu-hd',
+      'fox-sports-1',
+      'fox-sports-2',
+      'fox-sports-news',
+      'canal-plus-foot-fr',
+      'rmc-sport-1-fr',
+      'bein-sports-fr-1',
+      'bein-sports-fr-2',
+      'bein-sports-fr-3',
+      'bein-sports-max-4-fr',
+      'bein-sports-max-5-fr',
+      'bein-sports-max-6-fr',
+      'bein-sports-max-7-fr',
+      'bein-sports-max-9-fr',
+      'bein-sports-max-10-fr',
+      'lequipe-fr',
+      'fifa-plus-fr',
+      'fifa-plus-en',
+      'bein-sports-1-tr',
+      'bein-sports-2-tr',
+      'bein-sports-3-tr',
+      'bein-sports-4-tr',
+      'bein-sports-5-tr',
+      'bein-sports-haber-tr',
+      'bein-sports-xtra-es',
+      'eurosport-1',
+      'eurosport-2',
+    ];
+    const picked =
+      allSportsMultiplexPool.find((id) => !claimedInSlot.has(id)) ||
+      allSportsMultiplexPool[slotIndex % allSportsMultiplexPool.length] ||
+      'bein-sports-1-ar';
+    assignedIds.push(picked);
+    claimedInSlot.add(picked);
+  }
+
+  return sortEventChannelsForCardDisplay(assignedIds).map((id) => buildRecommendedChannelItem(id));
 }
 
 function parseEspnEventToLiveSportEvent(
@@ -3572,9 +4265,9 @@ function parseEspnEventToLiveSportEvent(
   const competitions = Array.isArray(ev.competitions) ? ev.competitions : [];
   if (competitions.length === 0) return [];
 
-  // For UFC / MMA events that have multiple bouts, pick the main event (last competition) and co-main
+  // For UFC / MMA events that have multiple bouts, pick only the main event (last competition) so the schedule isn't spammed with 3 separate fight cards
   if (sportType === 'mma' && competitions.length > 1) {
-    const mainBouts = competitions.slice(-3).reverse();
+    const mainBouts = competitions.slice(-1);
     return mainBouts
       .map((comp: any, idx: number) => {
         const competitors = Array.isArray(comp?.competitors) ? comp.competitors : [];
@@ -3609,7 +4302,7 @@ function parseEspnEventToLiveSportEvent(
             logo: c2?.athlete?.headshot?.href || c2?.athlete?.flag?.href,
             score: c2?.score ?? '0',
           },
-          broadcasts: ['ESPN+ PPV', 'TNT Sports', 'DAZN'],
+          broadcasts: ['TNT Sports 1', 'RMC Sport 1', 'ESPN'],
           recommendedChannels: [],
         };
       })
@@ -3671,23 +4364,10 @@ function parseEspnEventToLiveSportEvent(
 
   if (homeName === 'Home' && awayName === 'Away') return [];
 
+  // Strictly trust ESPN's real-time state ('in' = LIVE, 'post' = FINISHED, 'pre' = UPCOMING) — never fake LIVE status
   const rawState = String(comp?.status?.type?.state || ev?.status?.type?.state || 'pre').toLowerCase();
-  let status = rawState === 'in' ? 'LIVE' : rawState === 'post' ? 'FINISHED' : 'UPCOMING';
-  let statusDetail = comp?.status?.type?.shortDetail || ev?.status?.type?.shortDetail || 'Scheduled';
-
-  // If a soccer match kickoff is currently in-window (started within last 110 mins) and still marked UPCOMING, promote to LIVE
-  const startMs = Date.parse(comp?.date || ev.date || '');
-  const nowMs = Date.now();
-  if (
-    status === 'UPCOMING' &&
-    !Number.isNaN(startMs) &&
-    nowMs >= startMs &&
-    nowMs - startMs <= 110 * 60 * 1000
-  ) {
-    status = 'LIVE';
-    const elapsedMins = Math.max(1, Math.min(90, Math.floor((nowMs - startMs) / 60000)));
-    statusDetail = elapsedMins >= 45 && elapsedMins <= 58 ? 'HT' : `${elapsedMins}'`;
-  }
+  const status = rawState === 'in' ? 'LIVE' : rawState === 'post' ? 'FINISHED' : 'UPCOMING';
+  const statusDetail = comp?.status?.type?.shortDetail || ev?.status?.type?.shortDetail || 'Scheduled';
 
   const broadcasts: string[] = [];
   if (Array.isArray(comp?.broadcasts)) {
@@ -3739,54 +4419,45 @@ function parseEspnEventToLiveSportEvent(
   ];
 }
 
-// 1. GET ALL LIVE SPORTS EVENTS & MATCH SCHEDULE (REAL-TIME TODAY & LIVE AGGREGATION + COMPETITION-FIRST CHANNEL ROUTING)
-app.get(['/api/live/events', '/v1/live/events'], async (req: Request, res: Response) => {
+async function getOrRefreshLiveEventsPayload(maxAgeMs = 12000): Promise<{
+  status: string;
+  updatedAt: string;
+  count: number;
+  events: any[];
+}> {
+  if (
+    cachedLiveEventsPayload &&
+    Array.isArray(cachedLiveEventsPayload.data?.events) &&
+    cachedLiveEventsPayload.data.events.length > 0 &&
+    Date.now() - cachedLiveEventsPayload.timestamp < maxAgeMs
+  ) {
+    return cachedLiveEventsPayload.data;
+  }
+
   try {
-    const sportFilterParam = req.query.sport ? String(req.query.sport).toLowerCase() : 'all';
-    const statusFilterParam = req.query.status ? String(req.query.status).toLowerCase() : 'all';
-
-    if (
-      sportFilterParam === 'all' &&
-      statusFilterParam === 'all' &&
-      cachedLiveEventsPayload &&
-      Date.now() - cachedLiveEventsPayload.timestamp < 12000
-    ) {
-      return res.json(cachedLiveEventsPayload.data);
-    }
-
     const nowMs = Date.now();
     const todayIso = new Date(nowMs).toISOString().slice(0, 10).replace(/-/g, '');
-    const tomorrowIso = new Date(nowMs + 86400000).toISOString().slice(0, 10).replace(/-/g, '');
 
+    // Strictly fetch TODAY's active competitions so matches days away (like weekend fixtures on a weekday) never clutter the live arena
     const espnFeeds: Array<{ url: string; sport: string; league: string; slug: string }> = [
-      // Today's active football/soccer competitions
       { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'UEFA Champions League', slug: 'uefa.champions' },
       { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.europa/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'UEFA Europa League', slug: 'uefa.europa' },
       { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.europa.conf/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'UEFA Conference League', slug: 'uefa.europa.conf' },
       { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/ksa.1/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'Saudi Pro League', slug: 'ksa.1' },
       { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'English Premier League', slug: 'eng.1' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/eng.2/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'EFL Championship', slug: 'eng.2' },
       { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'Spanish LaLiga', slug: 'esp.1' },
       { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'Italian Serie A', slug: 'ita.1' },
       { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'German Bundesliga', slug: 'ger.1' },
       { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'French Ligue 1', slug: 'fra.1' },
       { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/afc.champions/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'AFC Champions League Elite', slug: 'afc.champions' },
       { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/conmebol.libertadores/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'CONMEBOL Libertadores', slug: 'conmebol.libertadores' },
-      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/mex.1/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'Liga MX', slug: 'mex.1' },
-      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard?dates=${todayIso}`, sport: 'soccer', league: 'Major League Soccer', slug: 'usa.1' },
-      // Tomorrow's major European football fixtures (next 24h)
-      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?dates=${tomorrowIso}`, sport: 'soccer', league: 'English Premier League', slug: 'eng.1' },
-      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard?dates=${tomorrowIso}`, sport: 'soccer', league: 'Spanish LaLiga', slug: 'esp.1' },
-      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard?dates=${tomorrowIso}`, sport: 'soccer', league: 'Italian Serie A', slug: 'ita.1' },
-      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard?dates=${tomorrowIso}`, sport: 'soccer', league: 'German Bundesliga', slug: 'ger.1' },
-      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard?dates=${tomorrowIso}`, sport: 'soccer', league: 'French Ligue 1', slug: 'fra.1' },
-      { url: `https://site.api.espn.com/apis/site/v2/sports/soccer/ksa.1/scoreboard?dates=${tomorrowIso}`, sport: 'soccer', league: 'Saudi Pro League', slug: 'ksa.1' },
-      // Today's US & Global Sports (NBA, NFL, NHL, UFC, F1, Tennis)
       { url: `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${todayIso}`, sport: 'basketball', league: 'NBA Basketball', slug: 'nba' },
       { url: `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${todayIso}`, sport: 'football', league: 'NFL Football', slug: 'nfl' },
       { url: `https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard?dates=${todayIso}`, sport: 'hockey', league: 'NHL Hockey', slug: 'nhl' },
-      { url: 'https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard', sport: 'mma', league: 'UFC / MMA', slug: 'ufc' },
-      { url: 'https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard', sport: 'motorsport', league: 'Formula 1', slug: 'f1' },
-      { url: 'https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard', sport: 'tennis', league: 'ATP Tour Tennis', slug: 'atp' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard?dates=${todayIso}`, sport: 'mma', league: 'UFC / MMA', slug: 'ufc' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard?dates=${todayIso}`, sport: 'motorsport', league: 'Formula 1', slug: 'f1' },
+      { url: `https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?dates=${todayIso}`, sport: 'tennis', league: 'ATP Tour Tennis', slug: 'atp' },
     ];
 
     const fetchJsonFast = async (url: string, timeoutMs = 4500): Promise<any> => {
@@ -3809,12 +4480,56 @@ app.get(['/api/live/events', '/v1/live/events'], async (req: Request, res: Respo
       }
     };
 
-    const [cineproRaw, ...espnResults] = await Promise.all([
+    const [cineproRaw, cineproEpgRaw, ...espnResults] = await Promise.all([
       fetchJsonFast(`${getCineproUrl()}/v1/live/events`, 5500),
+      fetchJsonFast(`${getCineproUrl()}/v1/live/epg`, 5500),
       ...espnFeeds.map((f) => fetchJsonFast(f.url, 4200)),
     ]);
 
+    // Build authoritative reverse index from Scraper's Real-Time EPG Engine (eventId -> broadcasting channelIds)
+    const epgLiveByEventId = new Map<string, string[]>();
+    const epgUpcomingByEventId = new Map<string, string[]>();
+    if (Array.isArray(cineproEpgRaw?.epg)) {
+      const nextUpstreamMap = new Map<string, any>();
+      for (const chEpg of cineproEpgRaw.epg) {
+        const chId = String(chEpg?.channelId || '').trim();
+        if (!chId) continue;
+        nextUpstreamMap.set(chId, chEpg);
+
+        const nowEvId = chEpg?.nowPlaying?.eventId ? String(chEpg.nowPlaying.eventId).trim() : '';
+        if (nowEvId) {
+          if (!epgLiveByEventId.has(nowEvId)) epgLiveByEventId.set(nowEvId, []);
+          const arr = epgLiveByEventId.get(nowEvId)!;
+          if (!arr.includes(chId)) arr.push(chId);
+        }
+
+        const upcomingItems = [
+          ...(chEpg?.nextUp ? [chEpg.nextUp] : []),
+          ...(Array.isArray(chEpg?.upcoming) ? chEpg.upcoming : []),
+        ];
+        for (const uItem of upcomingItems) {
+          const upEvId = uItem?.eventId ? String(uItem.eventId).trim() : '';
+          if (upEvId) {
+            if (!epgUpcomingByEventId.has(upEvId)) epgUpcomingByEventId.set(upEvId, []);
+            const arr = epgUpcomingByEventId.get(upEvId)!;
+            if (!arr.includes(chId)) arr.push(chId);
+          }
+        }
+      }
+      if (nextUpstreamMap.size > 0) {
+        cachedUpstreamEpgMap = nextUpstreamMap;
+      }
+    }
+
     const eventsMap = new Map<string, any>();
+    const teamMatchupKeySet = new Set<string>();
+
+    const makeTeamPairKey = (ev: any): string => {
+      const h = String(ev?.homeTeam?.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const a = String(ev?.awayTeam?.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (!h || !a) return '';
+      return [h, a].sort().join('__');
+    };
 
     const isLiveState = (s?: string) => {
       const u = String(s || '').toUpperCase();
@@ -3825,25 +4540,22 @@ app.get(['/api/live/events', '/v1/live/events'], async (req: Request, res: Respo
       return u === 'FINISHED' || u === 'POST' || u === 'FINAL' || u === 'FT';
     };
 
-    // Helper to keep only relevant Today/Live/Next-30h events (plus UFC/F1 weekend headliners)
+    // Keep only LIVE events, upcoming matches starting within the next 16 hours today, and matches finished within the last 6 hours
     const shouldKeepEventInWindow = (ev: any): boolean => {
       if (!ev) return false;
       if (isLiveState(ev.status)) return true;
       const startMs = Date.parse(ev.startTime || '');
-      if (Number.isNaN(startMs)) return true;
+      if (Number.isNaN(startMs)) return false;
 
       const diffHours = (startMs - nowMs) / (1000 * 60 * 60);
       if (isFinishedState(ev.status)) {
-        // Keep only matches that finished TODAY (within the last 16 hours), never yesterday's stale results
-        return diffHours >= -16 && diffHours <= 2;
+        return diffHours >= -6 && diffHours <= 1;
       }
-      // For UPCOMING events: keep matches starting within the next 30 hours (or up to 54h for weekend UFC/F1 cards)
-      const isSpecialWeekendCard = ev.sport === 'mma' || ev.sport === 'motorsport';
-      const maxFutureHours = isSpecialWeekendCard ? 54 : 30;
-      return diffHours >= -2.5 && diffHours <= maxFutureHours;
+      // For UPCOMING events: only show matches kicking off within the next 16 hours today (excludes multi-day future fixtures)
+      return diffHours >= -0.5 && diffHours <= 16;
     };
 
-    // 1. Ingest rich multi-league ESPN live & today events first
+    // 1. Ingest authoritative ESPN live & today events
     espnResults.forEach((data, idx) => {
       if (!data || !Array.isArray(data.events)) return;
       const feedMeta = espnFeeds[idx];
@@ -3855,8 +4567,10 @@ app.get(['/api/live/events', '/v1/live/events'], async (req: Request, res: Respo
           : undefined);
       const leagueName = feedMeta.league || leagueObj?.name || 'International';
 
-      // Limit NHL to top 4 games so hockey doesn't overwhelm football
-      const rawEventsList = feedMeta.slug === 'nhl' ? data.events.slice(0, 4) : data.events;
+      const rawEventsList =
+        feedMeta.slug === 'nhl' || feedMeta.slug === 'nba' || feedMeta.slug === 'nfl'
+          ? data.events.slice(0, 3)
+          : data.events;
 
       for (const rawEv of rawEventsList) {
         const parsedList = parseEspnEventToLiveSportEvent(
@@ -3868,56 +4582,67 @@ app.get(['/api/live/events', '/v1/live/events'], async (req: Request, res: Respo
         );
         for (const item of parsedList) {
           if (item && item.id && shouldKeepEventInWindow(item) && !eventsMap.has(String(item.id))) {
-            eventsMap.set(String(item.id), item);
+            const idStr = String(item.id);
+            eventsMap.set(idStr, {
+              ...item,
+              epgLiveChannelIds: epgLiveByEventId.get(idStr) || [],
+              epgUpcomingChannelIds: epgUpcomingByEventId.get(idStr) || [],
+            });
+            const pairKey = makeTeamPairKey(item);
+            if (pairKey) teamMatchupKeySet.add(pairKey);
           }
         }
       }
     });
 
-    // 2. Merge any additional today/live events from CinePro /v1/live/events (skipping placeholder "Home vs Away" entries and stale/distant games)
+    // 2. Merge EPG events from the updated CinePro scraper (/v1/live/events), enriching existing events with scraper EPG broadcasts/channels and adding any missing today events
     const cineproEvents = Array.isArray(cineproRaw?.events) ? cineproRaw.events : [];
     for (const ev of cineproEvents) {
       if (!ev || !ev.id) continue;
       if (ev.homeTeam?.name === 'Home' && ev.awayTeam?.name === 'Away') continue;
       const idStr = String(ev.id);
-      if (!eventsMap.has(idStr)) {
-        let status = ev.status || 'UPCOMING';
-        let statusDetail = ev.statusDetail || 'Scheduled';
-        const startMs = Date.parse(ev.startTime || '');
-        if (
-          status === 'UPCOMING' &&
-          !Number.isNaN(startMs) &&
-          nowMs >= startMs &&
-          nowMs - startMs <= 110 * 60 * 1000
-        ) {
-          status = 'LIVE';
-          const elapsedMins = Math.max(1, Math.min(90, Math.floor((nowMs - startMs) / 60000)));
-          statusDetail = elapsedMins >= 45 && elapsedMins <= 58 ? 'HT' : `${elapsedMins}'`;
-        } else if (
-          (status === 'LIVE' || status === 'UPCOMING') &&
-          !Number.isNaN(startMs) &&
-          nowMs - startMs > 135 * 60 * 1000
-        ) {
-          status = 'FINISHED';
-          statusDetail = 'FT';
-        }
+      const pairKey = makeTeamPairKey(ev);
 
-        const candidateEv = {
-          ...ev,
-          title:
-            ev.homeTeam?.name && ev.awayTeam?.name
-              ? `${ev.homeTeam.name} vs ${ev.awayTeam.name}`
-              : ev.title,
-          status,
-          statusDetail,
-        };
-        if (shouldKeepEventInWindow(candidateEv)) {
-          eventsMap.set(idStr, candidateEv);
+      if (eventsMap.has(idStr)) {
+        const existing = eventsMap.get(idStr);
+        if (Array.isArray(ev.broadcasts) && ev.broadcasts.length > 0 && (!existing.broadcasts || existing.broadcasts.length === 0)) {
+          existing.broadcasts = ev.broadcasts;
         }
+        if (Array.isArray(ev.recommendedChannels) && ev.recommendedChannels.length > 0) {
+          existing.scraperRecommendedChannels = ev.recommendedChannels;
+        }
+        if (!existing.epgLiveChannelIds?.length && epgLiveByEventId.has(idStr)) {
+          existing.epgLiveChannelIds = epgLiveByEventId.get(idStr);
+        }
+        if (!existing.epgUpcomingChannelIds?.length && epgUpcomingByEventId.has(idStr)) {
+          existing.epgUpcomingChannelIds = epgUpcomingByEventId.get(idStr);
+        }
+        continue;
+      }
+
+      if (pairKey && teamMatchupKeySet.has(pairKey)) continue;
+
+      const candidateEv = {
+        ...ev,
+        title:
+          ev.homeTeam?.name && ev.awayTeam?.name
+            ? `${ev.homeTeam.name} vs ${ev.awayTeam.name}`
+            : ev.title,
+        status: ev.status || 'UPCOMING',
+        statusDetail: ev.statusDetail || 'Scheduled',
+        scraperRecommendedChannels: Array.isArray(ev.recommendedChannels) ? ev.recommendedChannels : [],
+        epgLiveChannelIds: epgLiveByEventId.get(idStr) || [],
+        epgUpcomingChannelIds: epgUpcomingByEventId.get(idStr) || [],
+      };
+
+      if (shouldKeepEventInWindow(candidateEv)) {
+        eventsMap.set(idStr, candidateEv);
+        if (pairKey) teamMatchupKeySet.add(pairKey);
       }
     }
 
-    // 3. Sort events: LIVE first, then UPCOMING by kickoff time ascending, then FINISHED by kickoff time descending
+    // 3. Sort events: LIVE first, then UPCOMING by kickoff time ascending, then FINISHED by kickoff time descending,
+    //    and within the same kickoff time window sort by broadcast prestige so headline matches get flagship channels (1..6)
     const allEvents = Array.from(eventsMap.values()).sort((a, b) => {
       const aLive = isLiveState(a.status);
       const bLive = isLiveState(b.status);
@@ -3927,39 +4652,110 @@ app.get(['/api/live/events', '/v1/live/events'], async (req: Request, res: Respo
       const bFin = isFinishedState(b.status);
       if (aFin !== bFin) return aFin ? 1 : -1;
 
-      const tA = Date.parse(a.startTime || '') || 0;
-      const tB = Date.parse(b.startTime || '') || 0;
-      return aFin ? tB - tA : tA - tB;
-    });
-
-    // 4. Assign accurate per-match broadcast channels grouped by simultaneous kickoff time slot & broadcast pool
-    const slotCounters = new Map<string, number>();
-    const slotUsedPrimary = new Map<string, Set<string>>();
-
-    const normalizedEvents = allEvents.map((ev: any) => {
-      const lgSlug = String(ev.leagueSlug || ev.league || 'general').toLowerCase();
-      const broadcasterPoolGroup = lgSlug.includes('uefa')
-        ? 'uefa'
-        : lgSlug.includes('ksa') || lgSlug.includes('afc')
-          ? 'mena'
-          : lgSlug;
-      const timeSlotKey = isLiveState(ev.status)
-        ? 'LIVE_NOW'
-        : `${ev.status}_${String(ev.startTime || '').slice(0, 16)}`;
-      const fullSlotKey = `${broadcasterPoolGroup}__${timeSlotKey}`;
-
-      const idxInSlot = slotCounters.get(fullSlotKey) || 0;
-      slotCounters.set(fullSlotKey, idxInSlot + 1);
-
-      let usedSet = slotUsedPrimary.get(fullSlotKey);
-      if (!usedSet) {
-        usedSet = new Set<string>();
-        slotUsedPrimary.set(fullSlotKey, usedSet);
+      if (aLive && bLive) {
+        return getMatchBroadcastPrestige(b) - getMatchBroadcastPrestige(a);
       }
 
-      const recChannels = assignSmartChannelsForEvent(ev, idxInSlot, usedSet);
+      const tA = Date.parse(a.startTime || '') || 0;
+      const tB = Date.parse(b.startTime || '') || 0;
+      const timeDiff = aFin ? tB - tA : tA - tB;
+      if (Math.abs(timeDiff) > 45 * 60 * 1000) {
+        return timeDiff;
+      }
+      return getMatchBroadcastPrestige(b) - getMatchBroadcastPrestige(a);
+    });
+
+    // 4. Assign accurate per-match broadcast channels with a GLOBAL per-time-window claim registry
+    //    so two simultaneous events in the same time slot can NEVER share the same TV channel across any league or sport
+    const getSimultaneousSlotKey = (ev: any): string => {
+      if (isLiveState(ev.status)) return 'LIVE_NOW';
+      const startMs = Date.parse(ev.startTime || '');
+      if (Number.isNaN(startMs)) return `${ev.status}_UNKNOWN`;
+      // Group matches kicking off within the same 60-minute broadcast window globally
+      const sixtyMinBucket = Math.floor(startMs / (60 * 60 * 1000));
+      return `${ev.status}_${sixtyMinBucket}`;
+    };
+
+    const getBroadcasterPoolGroup = (ev: any): string => {
+      const lgSlug = String(ev.leagueSlug || ev.league || ev.sport || 'general').toLowerCase();
+      if (lgSlug.includes('uefa')) return 'uefa';
+      if (lgSlug.includes('ksa') || lgSlug.includes('afc') || lgSlug.includes('saudi')) return 'mena';
+      return lgSlug;
+    };
+
+    const BRITISH_CLUB_REGEX =
+      /\b(arsenal|aston villa|bournemouth|brentford|brighton|chelsea|crystal palace|everton|fulham|ipswich|leicester|liverpool|manchester city|manchester united|newcastle|nottingham forest|southampton|sunderland|tottenham|west ham|wolves|wolverhampton|celtic|rangers|heart of midlothian|hearts|aberdeen|hibernian)\b/i;
+    const FRENCH_CLUB_REGEX =
+      /\b(paris saint-germain|psg|marseille|lyon|olympique lyonnais|monaco|as monaco|lille|lens|stade rennais|rennes|nice|brest|strasbourg)\b/i;
+    const TURKISH_CLUB_REGEX =
+      /\b(galatasaray|fenerbahce|fenerbahçe|besiktas|beşiktaş|trabzonspor|basaksehir|başakşehir|samsunspor)\b/i;
+
+    // Pre-count British/French clubs per simultaneous competition time window
+    const slotBritishTotals = new Map<string, number>();
+    const slotFrenchTotals = new Map<string, number>();
+    for (const ev of allEvents) {
+      const groupSlotKey = `${getBroadcasterPoolGroup(ev)}__${getSimultaneousSlotKey(ev)}`;
+      const teams = `${ev?.homeTeam?.name || ''} ${ev?.awayTeam?.name || ''}`;
+      if (BRITISH_CLUB_REGEX.test(teams)) {
+        slotBritishTotals.set(groupSlotKey, (slotBritishTotals.get(groupSlotKey) || 0) + 1);
+      }
+      if (FRENCH_CLUB_REGEX.test(teams)) {
+        slotFrenchTotals.set(groupSlotKey, (slotFrenchTotals.get(groupSlotKey) || 0) + 1);
+      }
+    }
+
+    const slotCounters = new Map<string, number>();
+    const slotBritishCounters = new Map<string, number>();
+    const slotFrenchCounters = new Map<string, number>();
+    const slotTurkishCounters = new Map<string, number>();
+    // Keyed GLOBALLY by time slot (without league group) so no two concurrent matches ever claim the same channel
+    const globalSlotClaimedChannels = new Map<string, Set<string>>();
+
+    const normalizedEvents = allEvents.map((ev: any) => {
+      const globalTimeSlotKey = getSimultaneousSlotKey(ev);
+      const groupSlotKey = `${getBroadcasterPoolGroup(ev)}__${globalTimeSlotKey}`;
+
+      const idxInSlot = slotCounters.get(globalTimeSlotKey) || 0;
+      slotCounters.set(globalTimeSlotKey, idxInSlot + 1);
+
+      const teams = `${ev?.homeTeam?.name || ''} ${ev?.awayTeam?.name || ''}`;
+      let britishRank = 0;
+      if (BRITISH_CLUB_REGEX.test(teams)) {
+        britishRank = slotBritishCounters.get(groupSlotKey) || 0;
+        slotBritishCounters.set(groupSlotKey, britishRank + 1);
+      }
+      let frenchRank = 0;
+      if (FRENCH_CLUB_REGEX.test(teams)) {
+        frenchRank = slotFrenchCounters.get(groupSlotKey) || 0;
+        slotFrenchCounters.set(groupSlotKey, frenchRank + 1);
+      }
+      let turkishRank = 0;
+      if (TURKISH_CLUB_REGEX.test(teams)) {
+        turkishRank = slotTurkishCounters.get(groupSlotKey) || 0;
+        slotTurkishCounters.set(groupSlotKey, turkishRank + 1);
+      }
+
+      let claimedSet = globalSlotClaimedChannels.get(globalTimeSlotKey);
+      if (!claimedSet) {
+        claimedSet = new Set<string>();
+        globalSlotClaimedChannels.set(globalTimeSlotKey, claimedSet);
+      }
+
+      const recChannels = assignSmartChannelsForEvent(ev, idxInSlot, claimedSet, {
+        britishRank,
+        totalBritishInSlot: slotBritishTotals.get(groupSlotKey) || 0,
+        frenchRank,
+        totalFrenchInSlot: slotFrenchTotals.get(groupSlotKey) || 0,
+        turkishRank,
+      });
+      const {
+        scraperRecommendedChannels: _unusedScraper,
+        epgLiveChannelIds: _unusedLiveEpg,
+        epgUpcomingChannelIds: _unusedUpEpg,
+        ...cleanEv
+      } = ev;
       return {
-        ...ev,
+        ...cleanEv,
         recommendedChannels: recChannels,
       };
     });
@@ -3975,8 +4771,166 @@ app.get(['/api/live/events', '/v1/live/events'], async (req: Request, res: Respo
       cachedLiveEventsPayload = { data: fullPayload, timestamp: Date.now() };
     }
 
-    // Apply optional sport/status query filters if requested
-    let filtered = normalizedEvents;
+    return fullPayload;
+  } catch (err: any) {
+    console.warn('[Live Events Proxy] Error:', err?.message || err);
+    if (cachedLiveEventsPayload) return cachedLiveEventsPayload.data;
+    return { status: 'error', updatedAt: new Date().toISOString(), count: 0, events: [] };
+  }
+}
+
+// Helper to build per-channel EPG (nowPlaying, nextUp, upcoming, currentProgram, nextProgram) combining de-conflicted live events + scraper 24/7 EPG
+function buildChannelEpgDirectory(events: any[]): Record<
+  string,
+  {
+    nowPlaying: any | null;
+    nextUp: any | null;
+    upcoming: any[];
+    currentProgram: any | null;
+    nextProgram: any | null;
+  }
+> {
+  const epgMap: Record<
+    string,
+    {
+      nowPlaying: any | null;
+      nextUp: any | null;
+      upcoming: any[];
+      currentProgram: any | null;
+      nextProgram: any | null;
+    }
+  > = {};
+  const nowMs = Date.now();
+
+  // 1. Seed with upstream 24/7 studio/entertainment EPG programs (for non-conflicting studio shows, movies, etc.)
+  for (const [chId, upEpg] of cachedUpstreamEpgMap.entries()) {
+    const rawNow = upEpg?.nowPlaying || null;
+    const rawNext = upEpg?.nextUp || null;
+    const rawUpcoming = Array.isArray(upEpg?.upcoming) ? upEpg.upcoming : [];
+    // Only keep upstream studio/entertainment blocks as fallback; match broadcasts are populated from de-conflicted events below
+    const nonMatchNow = rawNow && !rawNow.eventId ? rawNow : null;
+    const nonMatchUpcoming = rawUpcoming.filter((u: any) => !u?.eventId);
+    const nonMatchNext = rawNext && !rawNext.eventId ? rawNext : nonMatchUpcoming[0] || null;
+
+    epgMap[chId] = {
+      nowPlaying: nonMatchNow,
+      nextUp: nonMatchNext,
+      upcoming: nonMatchUpcoming,
+      currentProgram: nonMatchNow,
+      nextProgram: nonMatchNext,
+    };
+  }
+
+  // 2. Overlay de-conflicted LIVE & UPCOMING match broadcasts so every channel's EPG matches the event cards 1-to-1
+  for (const ev of events) {
+    if (!ev || !Array.isArray(ev.recommendedChannels)) continue;
+    const statusUpper = String(ev.status || '').toUpperCase();
+    const isLive =
+      statusUpper === 'LIVE' ||
+      statusUpper === 'IN' ||
+      statusUpper === 'IN_PROGRESS' ||
+      statusUpper === 'HT' ||
+      statusUpper === '1H' ||
+      statusUpper === '2H';
+    const isFinished =
+      statusUpper === 'FINISHED' || statusUpper === 'POST' || statusUpper === 'FINAL' || statusUpper === 'FT';
+    if (isFinished) continue;
+
+    const startMs = Date.parse(ev.startTime || '');
+    const minsUntil = !Number.isNaN(startMs) ? Math.round((startMs - nowMs) / 60000) : 999;
+    const matchTitle =
+      ev.homeTeam?.name && ev.awayTeam?.name
+        ? `${ev.homeTeam.name} vs ${ev.awayTeam.name}`
+        : ev.title || 'Live Match';
+
+    const progEntry = {
+      id: `epg-ev-${ev.id}`,
+      eventId: String(ev.id),
+      title: isLive && ev.homeTeam?.score !== undefined && ev.awayTeam?.score !== undefined
+        ? `${ev.homeTeam.name} ${ev.homeTeam.score} - ${ev.awayTeam.score} ${ev.awayTeam.name}`
+        : matchTitle,
+      subtitle: `${ev.league || 'Live Sports'} • ${ev.statusDetail || (isLive ? 'LIVE' : 'Scheduled')}`,
+      league: ev.league || 'Live Sports',
+      sport: ev.sport || 'soccer',
+      startTime: ev.startTime,
+      endTime: ev.endTime || (!Number.isNaN(startMs) ? new Date(startMs + 2 * 3600 * 1000).toISOString() : undefined),
+      isLive,
+      status: isLive ? 'LIVE' : 'UPCOMING',
+      statusDetail: ev.statusDetail,
+      matchInfo: {
+        homeTeam: ev.homeTeam,
+        awayTeam: ev.awayTeam,
+        statusDetail: ev.statusDetail,
+      },
+    };
+
+    for (const rc of ev.recommendedChannels) {
+      const chId = rc?.channelId;
+      if (!chId) continue;
+      if (!epgMap[chId]) {
+        epgMap[chId] = {
+          nowPlaying: null,
+          nextUp: null,
+          upcoming: [],
+          currentProgram: null,
+          nextProgram: null,
+        };
+      }
+      if (isLive || (minsUntil >= -15 && minsUntil <= 15)) {
+        if (!epgMap[chId].nowPlaying || !epgMap[chId].nowPlaying.eventId) {
+          epgMap[chId].nowPlaying = { ...progEntry, channelId: chId };
+          epgMap[chId].currentProgram = epgMap[chId].nowPlaying;
+        }
+      } else if (minsUntil > 15) {
+        const upItem = { ...progEntry, channelId: chId };
+        if (!epgMap[chId].nextUp || !epgMap[chId].nextUp.eventId) {
+          epgMap[chId].nextUp = upItem;
+          epgMap[chId].nextProgram = upItem;
+        }
+        if (!epgMap[chId].upcoming.some((u: any) => u?.eventId === progEntry.eventId)) {
+          epgMap[chId].upcoming.unshift(upItem);
+        }
+      }
+    }
+  }
+
+  // 3. Sync shared-stream alias channels (e.g. bein-sports-premium-1..3-ar share exact streams with bein-sports-1..3-ar)
+  const sharedStreamAliasPairs: Array<[string, string]> = [
+    ['bein-sports-1-ar', 'bein-sports-premium-1-ar'],
+    ['bein-sports-2-ar', 'bein-sports-premium-2-ar'],
+    ['bein-sports-3-ar', 'bein-sports-premium-3-ar'],
+  ];
+  for (const [primaryId, aliasId] of sharedStreamAliasPairs) {
+    if (epgMap[primaryId]) {
+      epgMap[aliasId] = {
+        nowPlaying: epgMap[primaryId].nowPlaying
+          ? { ...epgMap[primaryId].nowPlaying, channelId: aliasId }
+          : null,
+        nextUp: epgMap[primaryId].nextUp
+          ? { ...epgMap[primaryId].nextUp, channelId: aliasId }
+          : null,
+        upcoming: (epgMap[primaryId].upcoming || []).map((u: any) => ({ ...u, channelId: aliasId })),
+        currentProgram: epgMap[primaryId].currentProgram
+          ? { ...epgMap[primaryId].currentProgram, channelId: aliasId }
+          : null,
+        nextProgram: epgMap[primaryId].nextProgram
+          ? { ...epgMap[primaryId].nextProgram, channelId: aliasId }
+          : null,
+      };
+    }
+  }
+
+  return epgMap;
+}
+
+// 1. GET ALL LIVE SPORTS EVENTS & MATCH SCHEDULE (REAL-TIME TODAY & LIVE AGGREGATION + COMPETITION-FIRST CHANNEL ROUTING)
+app.get(['/api/live/events', '/v1/live/events'], async (req: Request, res: Response) => {
+  try {
+    const sportFilterParam = req.query.sport ? String(req.query.sport).toLowerCase() : 'all';
+    const statusFilterParam = req.query.status ? String(req.query.status).toLowerCase() : 'all';
+
+    const fullPayload = await getOrRefreshLiveEventsPayload(12000);
+    let filtered = Array.isArray(fullPayload.events) ? fullPayload.events : [];
     if (sportFilterParam !== 'all') {
       filtered = filtered.filter((e) => String(e.sport || '').toLowerCase().includes(sportFilterParam));
     }
@@ -3990,13 +4944,148 @@ app.get(['/api/live/events', '/v1/live/events'], async (req: Request, res: Respo
       events: filtered,
     });
   } catch (err: any) {
-    console.warn('[Live Events Proxy] Error:', err?.message || err);
     if (cachedLiveEventsPayload) return res.json(cachedLiveEventsPayload.data);
     return res.json({ status: 'error', count: 0, events: [] });
   }
 });
 
-// 2. GET ALL LIVE IPTV SPORTS CHANNELS (STRICTLY FROM CINEPRO API)
+// 1.2 GET XMLTV EPG FEED FOR IPTV PLAYERS (/api/live/epg.xml & /v1/live/epg.xml)
+app.get(['/api/live/epg.xml', '/v1/live/epg.xml'], async (req: Request, res: Response) => {
+  try {
+    const targetUrl = `${getCineproUrl()}/v1/live/epg.xml`;
+    const upstream = await fetch(targetUrl);
+    if (!upstream.ok) {
+      return res.status(upstream.status).type('application/xml').send('<?xml version="1.0" encoding="UTF-8"?><tv></tv>');
+    }
+    let xml = await upstream.text();
+    const hostOrigin = `${req.protocol}://${req.get('host')}`;
+    xml = xml.replace(/https?:\/\/62\.171\.179\.144:3001/gi, hostOrigin);
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    return res.send(xml);
+  } catch {
+    return res.status(502).type('application/xml').send('<?xml version="1.0" encoding="UTF-8"?><tv></tv>');
+  }
+});
+
+// 1.25 GET LIVE CHANNEL EPG GUIDE (FULL EPG ARRAY + FILTERING BY ?lang=, ?category=, ?channelId=, ?q=)
+app.get(['/api/live/epg', '/v1/live/epg'], async (req: Request, res: Response) => {
+  try {
+    const eventsPayload = await getOrRefreshLiveEventsPayload(15000);
+    const channelEpgMap = buildChannelEpgDirectory(eventsPayload.events || []);
+
+    const params = new URLSearchParams();
+    if (req.query.lang) params.set('lang', String(req.query.lang));
+    if (req.query.category) params.set('category', String(req.query.category));
+    if (req.query.channelId) params.set('channelId', String(req.query.channelId));
+    if (req.query.q) params.set('q', String(req.query.q));
+    const qs = params.toString() ? `?${params.toString()}` : '';
+
+    const upstreamRes = await fetch(`${getCineproUrl()}/v1/live/epg${qs}`, {
+      headers: { Accept: 'application/json' },
+    }).catch(() => null);
+
+    let epgArray: any[] = [];
+    if (upstreamRes && upstreamRes.ok) {
+      const rawEpgData: any = await upstreamRes.json();
+      if (Array.isArray(rawEpgData?.epg)) {
+        epgArray = rawEpgData.epg.map((entry: any) => {
+          const chId = String(entry?.channelId || '').trim();
+          const synced = channelEpgMap[chId];
+          const dirMeta = LIVE_CHANNEL_DIRECTORY[chId];
+          const resolvedName = dirMeta?.name || entry?.channelName || chId;
+          return {
+            ...entry,
+            channelName: resolvedName,
+            logo: resolveChannelLogo(chId, entry?.logo, resolvedName),
+            streamEndpoint: `/api/live/stream/${encodeURIComponent(chId)}`,
+            nowPlaying: synced?.nowPlaying || entry?.nowPlaying || null,
+            nextUp: synced?.nextUp || entry?.nextUp || null,
+            upcoming: synced?.upcoming?.length ? synced.upcoming : entry?.upcoming || [],
+          };
+        });
+      }
+    }
+
+    return res.json({
+      status: 'ok',
+      updatedAt: eventsPayload.updatedAt || new Date().toISOString(),
+      count: epgArray.length || Object.keys(channelEpgMap).length,
+      epg: epgArray,
+      channelsEpg: channelEpgMap,
+    });
+  } catch {
+    return res.json({ status: 'ok', updatedAt: new Date().toISOString(), count: 0, epg: [], channelsEpg: {} });
+  }
+});
+
+// 1.3 GET DETAILED 24-HOUR EPG FOR A SPECIFIC CHANNEL (/api/live/epg/:channelId & /v1/live/epg/:channelId)
+app.get(['/api/live/epg/:channelId', '/v1/live/epg/:channelId'], async (req: Request, res: Response) => {
+  const channelId = String(req.params.channelId || '').trim();
+  if (!channelId) {
+    return res.status(400).json({ status: 'error', message: 'Missing channelId' });
+  }
+  try {
+    const [eventsPayload, upstreamRes] = await Promise.all([
+      getOrRefreshLiveEventsPayload(15000),
+      fetch(`${getCineproUrl()}/v1/live/epg/${encodeURIComponent(channelId)}`, {
+        headers: { Accept: 'application/json' },
+      }).catch(() => null),
+    ]);
+    const channelEpgMap = buildChannelEpgDirectory(eventsPayload.events || []);
+    const synced = channelEpgMap[channelId];
+    const dirMeta = LIVE_CHANNEL_DIRECTORY[channelId];
+
+    if (upstreamRes && upstreamRes.ok) {
+      const raw: any = await upstreamRes.json();
+      const resolvedName = dirMeta?.name || raw?.channelName || channelId;
+      return res.json({
+        ...raw,
+        status: 'ok',
+        channelId,
+        channelName: resolvedName,
+        logo: resolveChannelLogo(channelId, raw?.logo, resolvedName),
+        streamEndpoint: `/api/live/stream/${encodeURIComponent(channelId)}`,
+        nowPlaying: synced?.nowPlaying || raw?.nowPlaying || null,
+        nextUp: synced?.nextUp || raw?.nextUp || null,
+        upcoming: synced?.upcoming?.length ? synced.upcoming : raw?.upcoming || [],
+      });
+    }
+
+    return res.json({
+      status: 'ok',
+      channelId,
+      channelName: dirMeta?.name || channelId,
+      logo: resolveChannelLogo(channelId, dirMeta?.logo, dirMeta?.name),
+      streamEndpoint: `/api/live/stream/${encodeURIComponent(channelId)}`,
+      updatedAt: new Date().toISOString(),
+      nowPlaying: synced?.nowPlaying || null,
+      nextUp: synced?.nextUp || null,
+      upcoming: synced?.upcoming || [],
+      schedule: [],
+    });
+  } catch {
+    return res.status(502).json({ status: 'error', channelId });
+  }
+});
+
+// 1.5 GET LIVE ARENA VIEWERS COUNT (Purely the number of active Live Arena viewers, no content tracking)
+app.get(['/api/live/viewers', '/v1/live/viewers', '/api/live-arena/viewers'], (req: Request, res: Response) => {
+  try {
+    const now = Date.now();
+    let liveArenaViewers = 0;
+    activeLiveViewers.forEach((data) => {
+      if (now - data.lastPing <= 75000 && data.mediaType === 'live') {
+        liveArenaViewers++;
+      }
+    });
+    return res.json({ success: true, liveArenaViewers, liveViewers: liveArenaViewers });
+  } catch {
+    return res.json({ success: true, liveArenaViewers: 0, liveViewers: 0 });
+  }
+});
+
+// 2. GET ALL LIVE IPTV SPORTS CHANNELS (STRICTLY FROM CINEPRO API + LIVE EPG ENRICHMENT)
 app.get(['/api/live/channels', '/v1/live/channels'], async (req: Request, res: Response) => {
   try {
     const params = new URLSearchParams();
@@ -4012,12 +5101,30 @@ app.get(['/api/live/channels', '/v1/live/channels'], async (req: Request, res: R
     const qs = params.toString() ? `?${params.toString()}` : '';
     const isUnfiltered = !qs;
 
+    const eventsPayload = await getOrRefreshLiveEventsPayload(20000);
+    const channelEpgMap = buildChannelEpgDirectory(eventsPayload?.events || []);
+
     if (
       isUnfiltered &&
       cachedLiveChannelsPayload &&
       Date.now() - cachedLiveChannelsPayload.timestamp < 30000
     ) {
-      return res.json(cachedLiveChannelsPayload.data);
+      const enrichedCached = (cachedLiveChannelsPayload.data.channels || []).map((ch: any) => {
+        const synced = channelEpgMap[ch.id];
+        return {
+          ...ch,
+          epg: synced
+            ? {
+                ...(ch.epg || {}),
+                ...synced,
+              }
+            : ch.epg || { nowPlaying: null, nextUp: null, upcoming: [], currentProgram: null, nextProgram: null },
+        };
+      });
+      return res.json({
+        ...cachedLiveChannelsPayload.data,
+        channels: enrichedCached,
+      });
     }
 
     const targetUrl = `${getCineproUrl()}/v1/live/channels${qs}`;
@@ -4045,6 +5152,8 @@ app.get(['/api/live/channels', '/v1/live/channels'], async (req: Request, res: R
     const rawChannels = Array.isArray(rawData?.channels) ? rawData.channels : [];
 
     const normalizedChannels = rawChannels.map((ch: any) => {
+      const chId = String(ch?.id || '').trim();
+      const dirMeta = LIVE_CHANNEL_DIRECTORY[chId];
       const cleanLang = toCleanEnglishLanguage(ch?.language, ch?.languageLabel);
       const validStreams: any[] = [];
 
@@ -4053,6 +5162,7 @@ app.get(['/api/live/channels', '/v1/live/channels'], async (req: Request, res: R
           const rawStreamUrl = String(st?.url || '').trim();
           const underlyingUrl = extractRawUrlFromProxyLink(rawStreamUrl);
           if (!underlyingUrl) return;
+          if (isMismatchedSecondaryMirror(chId, underlyingUrl, st?.label)) return;
 
           const proxiedUrl = rawStreamUrl.includes('/v1/live/proxy/')
             ? rewriteCineproLiveProxyUrl(rawStreamUrl)
@@ -4060,7 +5170,7 @@ app.get(['/api/live/channels', '/v1/live/channels'], async (req: Request, res: R
 
           validStreams.push({
             ...st,
-            id: `${ch.id}-s${idx + 1}`,
+            id: `${chId}-s${idx + 1}`,
             languageLabel: cleanLang,
             url: proxiedUrl,
             rawUrl: underlyingUrl,
@@ -4088,24 +5198,12 @@ app.get(['/api/live/channels', '/v1/live/channels'], async (req: Request, res: R
             headers: DEMBED_HEADERS,
           },
         ],
-        'ssc-extra-1-ar': [
-          {
-            url: 'https://edge.cowedd4855ws.sbs/premium620/index.m3u8',
-            label: 'SSC EXTRA HD Failover 1 (AR)',
-            headers: DEMBED_HEADERS,
-          },
-          {
-            url: 'https://edge.cowedd4855ws.sbs/premium616/index.m3u8',
-            label: 'SSC Sports HD Failover 2 (AR)',
-            headers: DEMBED_HEADERS,
-          },
-        ],
       };
 
-      const failovers = CHANNEL_FAILOVER_RAW_URLS[ch?.id];
+      const failovers = CHANNEL_FAILOVER_RAW_URLS[chId];
       if (failovers && failovers.length > 0) {
         const failoverStreams = failovers.map((fo, idx) => ({
-          id: `${ch.id}-fo${idx + 1}`,
+          id: `${chId}-fo${idx + 1}`,
           label: fo.label,
           quality: ch?.quality || '1080p',
           language: ch?.language || 'ar',
@@ -4118,18 +5216,35 @@ app.get(['/api/live/channels', '/v1/live/channels'], async (req: Request, res: R
       }
 
       const cleanDefaultProxyUrl =
-        failovers && failovers.length > 0
-          ? validStreams[0]?.url || ''
-          : ch?.defaultProxyUrl
-            ? rewriteCineproLiveProxyUrl(String(ch.defaultProxyUrl))
-            : validStreams[0]?.url || '';
+        validStreams[0]?.url ||
+        (ch?.defaultProxyUrl ? rewriteCineproLiveProxyUrl(String(ch.defaultProxyUrl)) : '');
+
+      const resolvedName =
+        chId === 'canal-plus-foot-fr' && dirMeta?.name
+          ? dirMeta.name
+          : dirMeta?.name || ch?.name || chId;
+
+      const syncedEpg = channelEpgMap[chId];
+      const upstreamChEpg = ch?.epg || {};
+      const mergedNowPlaying = syncedEpg?.nowPlaying || (!upstreamChEpg?.nowPlaying?.eventId ? upstreamChEpg?.nowPlaying : null) || null;
+      const mergedNextUp = syncedEpg?.nextUp || (!upstreamChEpg?.nextUp?.eventId ? upstreamChEpg?.nextUp : null) || null;
+      const mergedUpcoming = syncedEpg?.upcoming?.length ? syncedEpg.upcoming : upstreamChEpg?.upcoming || [];
 
       return {
         ...ch,
-        logo: resolveChannelLogo(ch?.id, ch?.logo, ch?.name),
+        name: resolvedName,
+        logo: resolveChannelLogo(chId, ch?.logo, resolvedName),
         languageLabel: cleanLang,
         defaultProxyUrl: cleanDefaultProxyUrl,
         streams: validStreams,
+        epg: {
+          ...upstreamChEpg,
+          nowPlaying: mergedNowPlaying,
+          nextUp: mergedNextUp,
+          upcoming: mergedUpcoming,
+          currentProgram: mergedNowPlaying,
+          nextProgram: mergedNextUp,
+        },
       };
     });
 
@@ -4194,11 +5309,13 @@ app.get(['/api/live/stream/event/:eventId', '/v1/live/stream/event/:eventId'], a
   for (const chId of orderedChannelIds) {
     const chObj = cachedChannelsList.find((c: any) => c?.id === chId);
     const meta = LIVE_CHANNEL_DIRECTORY[chId];
-    const chName = chObj?.name || meta?.name || chId;
+    const chName = meta?.name || chObj?.name || chId;
     const chLang = toCleanEnglishLanguage(chObj?.language || meta?.language || 'en', chObj?.languageLabel || meta?.languageLabel);
     if (Array.isArray(chObj?.streams)) {
       chObj.streams.forEach((st: any, idx: number) => {
         if (!st?.url) return;
+        const underlying = st?.rawUrl || extractRawUrlFromProxyLink(String(st.url));
+        if (isMismatchedSecondaryMirror(chId, underlying, st?.label)) return;
         if (aggregatedSources.some((existing) => existing.url === st.url)) return;
         aggregatedSources.push({
           id: `${chId}-evsrc-${idx + 1}`,
@@ -4225,6 +5342,8 @@ app.get(['/api/live/stream/event/:eventId', '/v1/live/stream/event/:eventId'], a
         const rawData: any = await upstream.json();
         const rawSources = Array.isArray(rawData?.sources) ? rawData.sources : [];
         rawSources.forEach((s: any, idx: number) => {
+          const underlying = String(s?.rawUrl || extractRawUrlFromProxyLink(String(s?.url || ''))).trim();
+          if (isMismatchedSecondaryMirror(primaryChannelId, underlying, s?.server || s?.label)) return;
           const proxiedUrl = s?.url ? rewriteCineproLiveProxyUrl(String(s.url)) : '';
           if (proxiedUrl) {
             aggregatedSources.push({
@@ -4256,7 +5375,7 @@ app.get(['/api/live/stream/event/:eventId', '/v1/live/stream/event/:eventId'], a
   });
 });
 
-// 3. GET STREAM MIRRORS FOR A SPECIFIC CHANNEL (STRICTLY FROM CINEPRO API + CACHED CHANNEL STREAM FALLBACK)
+// 3. GET STREAM MIRRORS FOR A SPECIFIC CHANNEL (STRICTLY FROM CINEPRO API + CACHED CHANNEL STREAM FALLBACK + EPG)
 app.get(['/api/live/stream/:channelId', '/v1/live/stream/:channelId'], async (req: Request, res: Response) => {
   const channelId = String(req.params.channelId || '').trim();
   if (!channelId) {
@@ -4309,9 +5428,10 @@ app.get(['/api/live/stream/:channelId', '/v1/live/stream/:channelId'], async (re
     rawData?.channel?.languageLabel || rawData?.channel?.language || cachedChannelObj?.languageLabel || directoryMeta?.languageLabel
   );
   const channelName =
+    (channelId === 'canal-plus-foot-fr' && directoryMeta?.name) ||
+    directoryMeta?.name ||
     rawData?.channel?.name ||
     cachedChannelObj?.name ||
-    directoryMeta?.name ||
     channelId.replace(/-/g, ' ').toUpperCase();
 
   const cineproSources: any[] = [];
@@ -4336,18 +5456,6 @@ app.get(['/api/live/stream/:channelId', '/v1/live/stream/:channelId'], async (re
         headers: DEMBED_STREAM_HEADERS,
       },
     ],
-    'ssc-extra-1-ar': [
-      {
-        url: 'https://edge.cowedd4855ws.sbs/premium620/index.m3u8',
-        server: 'SSC EXTRA 1 HD Primary Failover (AR)',
-        headers: DEMBED_STREAM_HEADERS,
-      },
-      {
-        url: 'https://edge.cowedd4855ws.sbs/premium616/index.m3u8',
-        server: 'SSC Sports HD Backup Mirror (AR)',
-        headers: DEMBED_STREAM_HEADERS,
-      },
-    ],
   };
 
   const failoverList = STREAM_FAILOVER_MAP[channelId];
@@ -4367,17 +5475,57 @@ app.get(['/api/live/stream/:channelId', '/v1/live/stream/:channelId'], async (re
     });
   }
 
+  // Resolve authoritative de-conflicted EPG for this channel so the player bar EPG and server labels always match what is actually airing
+  const eventsListForEpg = Array.isArray(cachedLiveEventsPayload?.data?.events)
+    ? cachedLiveEventsPayload!.data.events
+    : (await getOrRefreshLiveEventsPayload(15000).catch(() => ({ events: [] }))).events || [];
+  const syncedChannelEpgMap = buildChannelEpgDirectory(eventsListForEpg);
+  const syncedEpgForChannel = syncedChannelEpgMap[channelId];
+  const upstreamRawEpg = rawData?.epg || rawData?.channel?.epg || cachedChannelObj?.epg || {};
+  const authoritativeNowPlaying =
+    syncedEpgForChannel?.nowPlaying ||
+    (!upstreamRawEpg?.nowPlaying?.eventId ? upstreamRawEpg?.nowPlaying : null) ||
+    null;
+  const authoritativeNextUp =
+    syncedEpgForChannel?.nextUp ||
+    (!upstreamRawEpg?.nextUp?.eventId ? upstreamRawEpg?.nextUp : null) ||
+    null;
+  const authoritativeUpcoming =
+    syncedEpgForChannel?.upcoming?.length
+      ? syncedEpgForChannel.upcoming
+      : (upstreamRawEpg?.upcoming || []).filter((u: any) => !u?.eventId);
+
+  const channelEpg = {
+    ...upstreamRawEpg,
+    nowPlaying: authoritativeNowPlaying,
+    nextUp: authoritativeNextUp,
+    upcoming: authoritativeUpcoming,
+    currentProgram: authoritativeNowPlaying,
+    nextProgram: authoritativeNextUp,
+  };
+
   rawSources.forEach((s: any, idx: number) => {
     const rawUrl = String(s?.rawUrl || extractRawUrlFromProxyLink(String(s?.url || ''))).trim();
     if (!rawUrl && !s?.url) return;
+    if (isMismatchedSecondaryMirror(channelId, rawUrl, s?.server || s?.label)) return;
 
     const proxiedUrl = s?.url
       ? rewriteCineproLiveProxyUrl(String(s.url))
       : buildLocalLiveProxyUrl(rawUrl, undefined, true);
 
+    // Strip any stale/inverted "• LIVE: ..." suffix attached by the upstream scraper and replace with our synced EPG title
+    const baseServerLabel = String(s?.server || s?.label || `${channelName} Mirror ${idx + 1}`)
+      .replace(/\s*•\s*LIVE:.*$/i, '')
+      .trim();
+    const syncedServerLabel =
+      authoritativeNowPlaying?.isLive && authoritativeNowPlaying?.title
+        ? `${baseServerLabel} • LIVE: ${authoritativeNowPlaying.title}`
+        : baseServerLabel;
+
     cineproSources.push({
       ...s,
       id: s?.id || `${channelId}-src-${idx + 1}`,
+      server: syncedServerLabel,
       url: proxiedUrl,
       rawUrl,
       language: cleanChannelLang,
@@ -4395,6 +5543,7 @@ app.get(['/api/live/stream/:channelId', '/v1/live/stream/:channelId'], async (re
     const rawStreamUrl = String(st?.url || '').trim();
     const underlyingUrl = st?.rawUrl || extractRawUrlFromProxyLink(rawStreamUrl);
     if (!underlyingUrl) return;
+    if (isMismatchedSecondaryMirror(channelId, underlyingUrl, st?.label)) return;
     if (cineproSources.some((cs) => cs.rawUrl === underlyingUrl || cs.url === rawStreamUrl)) return;
 
     const proxiedUrl =
@@ -4402,9 +5551,13 @@ app.get(['/api/live/stream/:channelId', '/v1/live/stream/:channelId'], async (re
         ? rewriteCineproLiveProxyUrl(rawStreamUrl)
         : buildLocalLiveProxyUrl(underlyingUrl, st?.headers || undefined, true);
 
+    const baseLabel = String(st?.label || `${channelName} Mirror ${idx + 1}`)
+      .replace(/\s*•\s*LIVE:.*$/i, '')
+      .trim();
+
     cineproSources.push({
       id: `${channelId}-chstream-${idx + 1}`,
-      server: st?.label || `${channelName} Mirror ${idx + 1}`,
+      server: baseLabel,
       url: proxiedUrl,
       rawUrl: underlyingUrl,
       quality: st?.quality || rawData?.channel?.quality || cachedChannelObj?.quality || '1080p',
@@ -4423,9 +5576,11 @@ app.get(['/api/live/stream/:channelId', '/v1/live/stream/:channelId'], async (re
     channel: rawData?.channel
       ? {
           ...rawData.channel,
+          name: channelName,
           logo: resolveChannelLogo(channelId, rawData.channel.logo, channelName),
           language: cleanChannelLang,
           languageLabel: cleanChannelLang,
+          epg: channelEpg,
         }
       : {
           id: channelId,
@@ -4433,7 +5588,9 @@ app.get(['/api/live/stream/:channelId', '/v1/live/stream/:channelId'], async (re
           logo: resolveChannelLogo(channelId, cachedChannelObj?.logo, channelName),
           language: cleanChannelLang,
           languageLabel: cleanChannelLang,
+          epg: channelEpg,
         },
+    epg: channelEpg,
     count: cineproSources.length,
     sources: cineproSources,
   });
@@ -4480,7 +5637,7 @@ app.get(['/api/live/stream/:channelId/sse', '/v1/live/stream/:channelId/sse'], a
   }
 });
 
-// 5. FULL M3U8 IPTV PLAYLIST GENERATOR
+// 5. FULL M3U8 IPTV PLAYLIST GENERATOR (WITH AUTOMATIC XMLTV EPG LINKING)
 app.get(['/api/live/playlist.m3u8', '/v1/live/playlist.m3u8'], async (req: Request, res: Response) => {
   try {
     const params = new URLSearchParams();
@@ -4495,6 +5652,7 @@ app.get(['/api/live/playlist.m3u8', '/v1/live/playlist.m3u8'], async (req: Reque
     }
     let text = await upstream.text();
     const hostOrigin = `${req.protocol}://${req.get('host')}`;
+    text = text.replace(/https?:\/\/[^/\s"']+\/v1\/live\/epg\.xml/gi, `${hostOrigin}/api/live/epg.xml`);
     text = text.replace(/https?:\/\/[^/\s"']+\/v1\/live\/proxy\//gi, `${hostOrigin}/api/live/proxy/`);
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
     res.setHeader('Content-Disposition', 'inline; filename="notflix-live-iptv.m3u8"');
@@ -4549,6 +5707,10 @@ app.all(['/api/live/proxy/:endpoint', '/v1/live/proxy/:endpoint'], async (req: R
     let upstream: globalThis.Response | null = null;
     let fetchedDirectly = false;
 
+    if (directUrl && !isSafeExternalProxyUrl(directUrl)) {
+      return res.status(403).send('Forbidden: Internal or invalid proxy target URL');
+    }
+
     // Fast-path direct fetch for public CDNs that block datacenter scraper IPs (Rotana HibridCDN, Amagi, RMTV Akamai)
     const preferDirectFetch =
       Boolean(directUrl) &&
@@ -4557,7 +5719,7 @@ app.all(['/api/live/proxy/:endpoint', '/v1/live/proxy/:endpoint'], async (req: R
     if (!preferDirectFetch) {
       // 1. Fetch from CinePro's /v1/live/proxy/:endpoint FIRST so CinePro's
       //    built-in PNG/TIKTIKPX/gzip segment unwrapper and IP-bound session headers are used.
-      const cineproProxyUrl = `${getCineproUrl()}/v1/live/proxy/${endpoint}${queryString}`;
+      const cineproProxyUrl = `${getCineproUrl()}/v1/live/proxy/${encodeURIComponent(endpoint)}${queryString}`;
       const cpController = new AbortController();
       const cpTimeout = setTimeout(() => cpController.abort(), 14000);
       try {
@@ -4576,7 +5738,7 @@ app.all(['/api/live/proxy/:endpoint', '/v1/live/proxy/:endpoint'], async (req: R
     }
 
     // 2. Fall back to direct fetch (or run first for preferDirectFetch CDNs)
-    if (!upstream && directUrl && /^https?:\/\//i.test(directUrl)) {
+    if (!upstream && directUrl && isSafeExternalProxyUrl(directUrl)) {
       const requestHeaders: Record<string, string> = {
         'User-Agent':
           customHeaders['User-Agent'] ||
@@ -4603,6 +5765,9 @@ app.all(['/api/live/proxy/:endpoint', '/v1/live/proxy/:endpoint'], async (req: R
           redirect: 'follow',
         });
         clearTimeout(directTimeout);
+        if (resp.url && !isSafeExternalProxyUrl(resp.url)) {
+          return res.status(403).send('Forbidden: Redirect to internal network blocked');
+        }
         if (resp.ok || resp.status === 206) {
           upstream = resp;
           fetchedDirectly = true;
@@ -4815,7 +5980,7 @@ function verifyAdminToken(token: string): { username: string; expiresAt: number 
     const [payload, sig] = token.split('.');
     if (payload && sig) {
       const expectedSig = crypto.createHmac('sha256', ADMIN_TOKEN_SECRET).update(payload).digest('base64url');
-      if (sig === expectedSig) {
+      if (safeCompareStrings(sig, expectedSig)) {
         try {
           const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8'));
           if (decoded && decoded.u === ADMIN_USERNAME && typeof decoded.exp === 'number' && Date.now() <= decoded.exp) {
@@ -4892,6 +6057,15 @@ let analyticsStore: AnalyticsData = {
 
 function sanitizeAnalyticsEvents(events: AnalyticsEvent[]): AnalyticsEvent[] {
   return events.map((ev) => {
+    if (ev.mediaType === 'live') {
+      return {
+        ...ev,
+        mediaType: 'live',
+        season: undefined,
+        episode: undefined,
+      };
+    }
+
     // If it's a known movie or explicitly marked movie
     const isMovie =
       ev.mediaType === 'movie' ||
@@ -4920,27 +6094,57 @@ function sanitizeAnalyticsEvents(events: AnalyticsEvent[]): AnalyticsEvent[] {
   });
 }
 
+function mergeAnalyticsEventsIntoStore(incomingEvents: any[]): number {
+  if (!Array.isArray(incomingEvents) || incomingEvents.length === 0) return 0;
+  const sanitized = sanitizeAnalyticsEvents(incomingEvents);
+  const existingMap = new Map<string, AnalyticsEvent>();
+  for (const ev of analyticsStore.events) {
+    if (ev && ev.id) existingMap.set(ev.id, ev);
+  }
+
+  let added = 0;
+  for (const ev of sanitized) {
+    if (!ev) continue;
+    const id = ev.id || (ev.ts ? `${ev.ts}-${ev.sessionId || 'anon'}-${ev.type || 'ev'}` : crypto.randomUUID());
+    if (!existingMap.has(id)) {
+      existingMap.set(id, { ...ev, id });
+      added++;
+    }
+  }
+
+  if (added > 0) {
+    analyticsStore.events = Array.from(existingMap.values())
+      .sort((a, b) => (a.ts || 0) - (b.ts || 0))
+      .slice(-20000);
+    analyticsStore.lastUpdated = Date.now();
+  }
+  return added;
+}
+
 function readAnalyticsData(): AnalyticsData {
-  const candidatePaths = [
-    ANALYTICS_DATA_FILE,
-    ANALYTICS_BACKUP_MIRROR_FILE,
-    '/data/analytics.json',
-    '/app/data/analytics.json',
-    path.join(process.cwd(), 'data', 'analytics.json'),
-    path.join(__dirname, 'data', 'analytics.json'),
-    '/app/data_seed/analytics.json',
-    path.join(process.cwd(), 'data_seed', 'analytics.json'),
-  ];
+  const candidatePaths = Array.from(
+    new Set([
+      ...PERSISTENT_READ_DIRS.map((d) => path.join(d, 'analytics.json')),
+      ANALYTICS_DATA_FILE,
+      ANALYTICS_BACKUP_MIRROR_FILE,
+    ])
+  );
 
   const mergedMap = new Map<string, AnalyticsEvent>();
 
   for (const candidate of candidatePaths) {
     try {
       if (fs.existsSync(candidate)) {
-        const content = fs.readFileSync(candidate, 'utf-8');
+        const content = fs.readFileSync(candidate, 'utf-8').trim();
+        if (!content) continue;
         const parsed = JSON.parse(content);
-        if (Array.isArray(parsed.events) && parsed.events.length > 0) {
-          const sanitized = sanitizeAnalyticsEvents(parsed.events);
+        const eventsArr = Array.isArray(parsed?.events)
+          ? parsed.events
+          : Array.isArray(parsed)
+          ? parsed
+          : [];
+        if (eventsArr.length > 0) {
+          const sanitized = sanitizeAnalyticsEvents(eventsArr);
           let addedFromCandidate = 0;
           for (const ev of sanitized) {
             if (ev && ev.id && !mergedMap.has(ev.id)) {
@@ -4951,6 +6155,10 @@ function readAnalyticsData(): AnalyticsData {
           if (addedFromCandidate > 0) {
             console.log(`📊 Merged ${addedFromCandidate} analytics events from ${candidate} (total: ${mergedMap.size})`);
           }
+        }
+        // Also merge any embedded security bans if present in a unified backup file
+        if (parsed?.security || parsed?.bans) {
+          mergePermanentBansAndSecurityPayload(parsed.security || parsed);
         }
       }
     } catch (e) {
@@ -4969,15 +6177,7 @@ function flushAnalyticsToDiskSync() {
       analyticsStore.events = analyticsStore.events.slice(-20000);
     }
     const serialized = JSON.stringify(analyticsStore);
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    fs.writeFileSync(ANALYTICS_DATA_FILE, serialized, 'utf-8');
-    try {
-      fs.writeFileSync(ANALYTICS_BACKUP_MIRROR_FILE, serialized, 'utf-8');
-    } catch {
-      // Ignore if /var/tmp is read-only
-    }
+    writeFileAtomicallyToMirrors('analytics.json', serialized, ANALYTICS_BACKUP_MIRROR_FILE);
   } catch (err) {
     console.error('Error saving analytics data:', err);
   }
@@ -5057,14 +6257,24 @@ const activeLiveViewers = new Map<
 
 // POST /api/admin/login
 app.post('/api/admin/login', (req: Request, res: Response) => {
+  const clientIp = getClientIp(req);
+  if (!isInternalOrLoopbackIp(clientIp) && !checkRateLimit(clientIp, adminLoginRateLimiter, 10, 15 * 60 * 1000)) {
+    res.setHeader('Retry-After', '900');
+    return res.status(429).json({ error: 'Too many login attempts. Please wait 15 minutes before retrying.' });
+  }
+
   const { username, password } = req.body || {};
-  if (!username || !password) {
+  if (!username || !password || typeof username !== 'string' || typeof password !== 'string') {
     return res.status(400).json({ error: 'Username and password required' });
   }
 
-  if (username !== ADMIN_USERNAME || password !== ADMIN_PASSWORD) {
+  const userOk = safeCompareStrings(username, ADMIN_USERNAME);
+  const passOk = safeCompareStrings(password, ADMIN_PASSWORD);
+  if (!userOk || !passOk) {
     return res.status(401).json({ error: 'Invalid username or password' });
   }
+
+  adminLoginRateLimiter.delete(clientIp);
 
   const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000; // 30 days session
   const token = createStatelessAdminToken(ADMIN_USERNAME, expiresAt);
@@ -5145,12 +6355,20 @@ app.post('/api/analytics/ping', (req: Request, res: Response) => {
 
     const now = Date.now();
 
+    const isLiveMedia = mediaType === 'live';
     const isTv =
+      !isLiveMedia &&
       mediaType === 'tv' &&
       !/spider-man|oppenheimer|avatar|batman|avengers|barbie|dune|gladiator|wicked|interstellar|inception|deadpool|joker/i.test(title || '');
 
-    const normalizedMediaType: 'movie' | 'tv' | undefined =
-      eventType === 'play' || eventType === 'heartbeat' ? (isTv ? 'tv' : 'movie') : undefined;
+    const normalizedMediaType: 'movie' | 'tv' | 'live' | undefined =
+      eventType === 'play' || eventType === 'heartbeat'
+        ? isLiveMedia
+          ? 'live'
+          : isTv
+          ? 'tv'
+          : 'movie'
+        : undefined;
 
     const normalizedSeason = isTv ? (season ? Number(season) : 1) : undefined;
     const normalizedEpisode = isTv ? (episode ? Number(episode) : 1) : undefined;
@@ -5218,26 +6436,35 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
       secondsAgo: number;
     }> = [];
 
+    let liveArenaViewersCount = 0;
+    let vodViewersCount = 0;
+
     activeLiveViewers.forEach((data, sessId) => {
       const diff = now - data.lastPing;
       if (diff <= liveTimeout) {
-        currentLiveList.push({
-          sessionId: sessId,
-          title: data.title,
-          device: data.device,
-          mediaType: data.mediaType,
-          season: data.season,
-          episode: data.episode,
-          poster: data.poster,
-          secondsAgo: Math.round(diff / 1000),
-        });
+        if (data.mediaType === 'live') {
+          // Strictly aggregate Live Arena viewers as total count (no individual viewing detail exposed)
+          liveArenaViewersCount++;
+        } else {
+          vodViewersCount++;
+          currentLiveList.push({
+            sessionId: sessId,
+            title: data.title,
+            device: data.device,
+            mediaType: data.mediaType,
+            season: data.season,
+            episode: data.episode,
+            poster: data.poster,
+            secondsAgo: Math.round(diff / 1000),
+          });
+        }
       } else {
         // Clean up stale sessions
         activeLiveViewers.delete(sessId);
       }
     });
 
-    const liveViewersCount = currentLiveList.length;
+    const liveViewersCount = liveArenaViewersCount + vodViewersCount;
 
     // 2. Filter events by selected date range
     let cutoffTs = 0;
@@ -5320,7 +6547,8 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
         dayData.views++;
 
         if (e.title) {
-          const effectiveMediaType: 'movie' | 'tv' = e.mediaType === 'tv' ? 'tv' : 'movie';
+          const effectiveMediaType: 'movie' | 'tv' | 'live' =
+            e.mediaType === 'live' ? 'live' : e.mediaType === 'tv' ? 'tv' : 'movie';
           const tKey = `${e.title}_${effectiveMediaType}`;
           if (!titlesMap.has(tKey)) {
             titlesMap.set(tKey, {
@@ -5339,7 +6567,8 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
         dayData.watchHours = Number((dayData.watchHours + secs / 3600).toFixed(2));
 
         if (e.title) {
-          const effectiveMediaType: 'movie' | 'tv' = e.mediaType === 'tv' ? 'tv' : 'movie';
+          const effectiveMediaType: 'movie' | 'tv' | 'live' =
+            e.mediaType === 'live' ? 'live' : e.mediaType === 'tv' ? 'tv' : 'movie';
           const tKey = `${e.title}_${effectiveMediaType}`;
           if (!titlesMap.has(tKey)) {
             titlesMap.set(tKey, {
@@ -5401,8 +6630,14 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
       .reverse()
       .slice(0, 30)
       .map((ev) => {
-        const effectiveMediaType: 'movie' | 'tv' | undefined =
-          ev.type === 'play' || ev.type === 'heartbeat' ? (ev.mediaType === 'tv' ? 'tv' : 'movie') : undefined;
+        const effectiveMediaType: 'movie' | 'tv' | 'live' | undefined =
+          ev.type === 'play' || ev.type === 'heartbeat'
+            ? ev.mediaType === 'live'
+              ? 'live'
+              : ev.mediaType === 'tv'
+              ? 'tv'
+              : 'movie'
+            : undefined;
         return {
           id: ev.id,
           ts: ev.ts,
@@ -5438,6 +6673,8 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
       totalStoredEvents: analyticsStore.events.length,
       kpis: {
         liveViewers: liveViewersCount,
+        liveArenaViewers: liveArenaViewersCount,
+        vodViewers: vodViewersCount,
         totalViews,
         totalWatchHours: Number((totalWatchSeconds / 3600).toFixed(1)),
         totalWatchMinutes: Math.round(totalWatchSeconds / 60),
@@ -5471,11 +6708,14 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
   }
 });
 
-// GET /api/admin/security/bans (Fetch all permanently blocked IPs)
+// GET /api/admin/security/bans (Fetch all permanently blocked IPs + tombstones + security metrics)
 app.get('/api/admin/security/bans', requireAdminAuth, (_req: Request, res: Response) => {
   return res.json({
     success: true,
     count: permanentlyBannedIps.size,
+    lastClearedAllBansAt,
+    unblockedTombstones: Object.fromEntries(unblockedIpTombstones.entries()),
+    securityMetrics,
     bans: Array.from(permanentlyBannedIps.values()).sort((a, b) => b.lastAttemptAt - a.lastAttemptAt),
   });
 });
@@ -5500,6 +6740,9 @@ app.post('/api/admin/security/ban', requireAdminAuth, (req: Request, res: Respon
   return res.json({
     success: true,
     record,
+    lastClearedAllBansAt,
+    unblockedTombstones: Object.fromEntries(unblockedIpTombstones.entries()),
+    securityMetrics,
     bans: Array.from(permanentlyBannedIps.values()).sort((a, b) => b.lastAttemptAt - a.lastAttemptAt),
   });
 });
@@ -5509,12 +6752,15 @@ app.post('/api/admin/security/unblock', requireAdminAuth, (req: Request, res: Re
   const { ip, all } = req.body || {};
   if (all === true) {
     const cleared = permanentlyBannedIps.size;
+    lastClearedAllBansAt = Date.now();
     permanentlyBannedIps.clear();
     rateLimitStrikes.clear();
     savePermanentBansToDiskSync();
     return res.json({
       success: true,
       cleared,
+      lastClearedAllBansAt,
+      unblockedTombstones: Object.fromEntries(unblockedIpTombstones.entries()),
       bans: [],
     });
   }
@@ -5525,18 +6771,35 @@ app.post('/api/admin/security/unblock', requireAdminAuth, (req: Request, res: Re
   return res.json({
     success: true,
     removed,
+    lastClearedAllBansAt,
+    unblockedTombstones: Object.fromEntries(unblockedIpTombstones.entries()),
     bans: Array.from(permanentlyBannedIps.values()).sort((a, b) => b.lastAttemptAt - a.lastAttemptAt),
   });
 });
 
-// GET /api/admin/analytics/export (Export raw analytics.json backup)
+// GET /api/admin/analytics/export (Export complete analytics + blocked IPs + security metrics backup)
 app.get('/api/admin/analytics/export', requireAdminAuth, (_req: Request, res: Response) => {
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', `attachment; filename="notflix-analytics-backup-${new Date().toISOString().slice(0, 10)}.json"`);
-  return res.send(JSON.stringify(analyticsStore, null, 2));
+  return res.send(
+    JSON.stringify(
+      {
+        ...analyticsStore,
+        security: {
+          schemaVersion: BAN_STORAGE_SCHEMA_VERSION,
+          lastClearedAllBansAt,
+          unblockedTombstones: Object.fromEntries(unblockedIpTombstones.entries()),
+          bans: Array.from(permanentlyBannedIps.values()),
+          securityMetrics,
+        },
+      },
+      null,
+      2
+    )
+  );
 });
 
-// POST /api/admin/analytics/import (Restore or merge analytics backup)
+// POST /api/admin/analytics/import (Restore or merge analytics + blocked IPs backup)
 app.post('/api/admin/analytics/import', requireAdminAuth, (req: Request, res: Response) => {
   try {
     const payload = req.body;
@@ -5545,37 +6808,192 @@ app.post('/api/admin/analytics/import', requireAdminAuth, (req: Request, res: Re
       newEvents = payload;
     } else if (payload && Array.isArray(payload.events)) {
       newEvents = payload.events;
-    } else {
+    } else if (!payload?.security && !payload?.bans) {
       return res.status(400).json({ error: 'Invalid format. Expected JSON with { events: [...] } or an array of events.' });
     }
 
-    const existingIds = new Set(analyticsStore.events.map((e) => e.id));
-    let addedCount = 0;
-    for (const ev of newEvents) {
-      if (ev && ev.id && !existingIds.has(ev.id)) {
-        analyticsStore.events.push(ev);
-        existingIds.add(ev.id);
-        addedCount++;
-      } else if (ev && !ev.id && ev.ts) {
-        analyticsStore.events.push({ ...ev, id: crypto.randomUUID() });
-        addedCount++;
+    const addedCount = mergeAnalyticsEventsIntoStore(newEvents);
+    if (addedCount > 0) {
+      flushAnalyticsToDiskSync();
+    }
+
+    let bansChanged = false;
+    if (payload?.security || payload?.bans) {
+      bansChanged = mergePermanentBansAndSecurityPayload(payload.security || payload);
+      if (bansChanged) {
+        savePermanentBansToDiskSync();
       }
     }
 
-    analyticsStore.events.sort((a, b) => a.ts - b.ts);
-    flushAnalyticsToDiskSync();
-
     return res.json({
       success: true,
-      message: `Successfully imported ${addedCount} analytics events. Total in database: ${analyticsStore.events.length}`,
+      message: `Successfully imported ${addedCount} analytics events (${analyticsStore.events.length} total) and synced ${permanentlyBannedIps.size} permanently blocked IPs.`,
       importedCount: addedCount,
       totalEvents: analyticsStore.events.length,
+      totalBannedIps: permanentlyBannedIps.size,
     });
   } catch (err: any) {
     console.error('Error importing analytics:', err);
     return res.status(500).json({ error: 'Failed to import analytics: ' + (err?.message || err) });
   }
 });
+
+// POST /api/admin/state/sync (Atomic bidirectional sync for Analytics Events + Blocked IPs + Security Metrics)
+app.post('/api/admin/state/sync', requireAdminAuth, (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    let addedEvents = 0;
+    if (Array.isArray(body.events) && body.events.length > 0) {
+      addedEvents = mergeAnalyticsEventsIntoStore(body.events);
+      if (addedEvents > 0) {
+        flushAnalyticsToDiskSync();
+      }
+    }
+
+    const bansChanged = mergePermanentBansAndSecurityPayload({
+      bans: body.bans,
+      unblockedTombstones: body.unblockedTombstones,
+      lastClearedAllBansAt: body.lastClearedAllBansAt,
+      securityMetrics: body.securityMetrics,
+    });
+    if (bansChanged) {
+      savePermanentBansToDiskSync();
+    }
+
+    return res.json({
+      success: true,
+      restoredEvents: addedEvents,
+      restoredBans: bansChanged,
+      totalEvents: analyticsStore.events.length,
+      events: analyticsStore.events,
+      security: {
+        lastClearedAllBansAt,
+        unblockedTombstones: Object.fromEntries(unblockedIpTombstones.entries()),
+        bans: Array.from(permanentlyBannedIps.values()).sort((a, b) => b.lastAttemptAt - a.lastAttemptAt),
+        securityMetrics,
+      },
+    });
+  } catch (err: any) {
+    console.error('Error in /api/admin/state/sync:', err);
+    return res.status(500).json({ error: 'State sync failed: ' + (err?.message || err) });
+  }
+});
+
+// GET /api/internal/handover-snapshot (Zero-downtime container-to-container state handover during updates)
+app.get('/api/internal/handover-snapshot', (req: Request, res: Response) => {
+  const tsHeader = String(req.headers['x-notflix-handover-ts'] || '');
+  const sigHeader = String(req.headers['x-notflix-handover-sig'] || '');
+  const tsNum = Number(tsHeader) || 0;
+  if (!tsNum || Math.abs(Date.now() - tsNum) > 5 * 60 * 1000) {
+    return res.status(401).json({ error: 'Expired or missing handover timestamp' });
+  }
+  const expectedSig = crypto
+    .createHmac('sha256', ADMIN_TOKEN_SECRET)
+    .update(`handover:${tsHeader}`)
+    .digest('hex');
+  if (!safeCompareStrings(sigHeader, expectedSig)) {
+    return res.status(401).json({ error: 'Invalid handover signature' });
+  }
+
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  return res.json({
+    success: true,
+    bootId: SERVER_BOOT_TIME,
+    deploymentVersion: DEPLOYMENT_VERSION,
+    analyticsEvents: analyticsStore.events,
+    security: {
+      schemaVersion: BAN_STORAGE_SCHEMA_VERSION,
+      lastClearedAllBansAt,
+      unblockedTombstones: Object.fromEntries(unblockedIpTombstones.entries()),
+      bans: Array.from(permanentlyBannedIps.values()),
+      securityMetrics,
+    },
+    scraperConfig: scraperConfigStore,
+    adBlockPolicy: adBlockPolicyStore,
+  });
+});
+
+async function pullStateFromLivePeerOnStartup(): Promise<void> {
+  const candidateOrigins = Array.from(
+    new Set(
+      [
+        process.env.PUBLIC_URL,
+        process.env.APP_URL,
+        process.env.COOLIFY_URL,
+        process.env.COOLIFY_FQDN ? `https://${process.env.COOLIFY_FQDN.replace(/^https?:\/\//i, '')}` : '',
+        'https://notflixtv.com',
+        DEFAULT_SCRAPER_GATEWAY_URL,
+      ]
+        .map((u) => String(u || '').trim().replace(/\/+$/, ''))
+        .filter((u) => u.startsWith('http'))
+    )
+  );
+
+  const ts = String(Date.now());
+  const sig = crypto.createHmac('sha256', ADMIN_TOKEN_SECRET).update(`handover:${ts}`).digest('hex');
+
+  await Promise.allSettled(
+    candidateOrigins.map(async (origin) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 3800);
+      try {
+        const res = await fetch(`${origin}/api/internal/handover-snapshot?_cb=${ts}`, {
+          signal: controller.signal,
+          headers: {
+            Accept: 'application/json',
+            'x-notflix-handover-ts': ts,
+            'x-notflix-handover-sig': sig,
+            'User-Agent': 'Notflix-Container-Handover/2.0',
+          },
+        });
+        clearTimeout(timer);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data || !data.success || data.bootId === SERVER_BOOT_TIME) return;
+
+        let mergedAny = false;
+        if (Array.isArray(data.analyticsEvents) && data.analyticsEvents.length > 0) {
+          const added = mergeAnalyticsEventsIntoStore(data.analyticsEvents);
+          if (added > 0) {
+            flushAnalyticsToDiskSync();
+            mergedAny = true;
+          }
+        }
+        if (data.security) {
+          if (mergePermanentBansAndSecurityPayload(data.security)) {
+            savePermanentBansToDiskSync();
+            mergedAny = true;
+          }
+        }
+        if (
+          data.scraperConfig &&
+          data.scraperConfig.updatedAt > scraperConfigStore.updatedAt &&
+          data.scraperConfig.scrapers
+        ) {
+          scraperConfigStore = data.scraperConfig;
+          saveScraperConfigToDiskSync(scraperConfigStore);
+          mergedAny = true;
+        }
+        if (
+          data.adBlockPolicy &&
+          data.adBlockPolicy.updatedAt > adBlockPolicyStore.updatedAt &&
+          (data.adBlockPolicy.mode === 'strict' || data.adBlockPolicy.mode === 'dismissible')
+        ) {
+          adBlockPolicyStore = data.adBlockPolicy;
+          saveAdBlockPolicyToDiskSync(adBlockPolicyStore);
+          mergedAny = true;
+        }
+        if (mergedAny) {
+          console.log(
+            `🔄 [Container Handover] Pulled live state from ${origin}: ${analyticsStore.events.length} analytics events & ${permanentlyBannedIps.size} blocked IPs preserved.`
+          );
+        }
+      } catch {
+        clearTimeout(timer);
+      }
+    })
+  );
+}
 
 // ============================================================================
 // ADMIN SCRAPER API SERVER CONFIGURATION & LIVE PING ENDPOINTS
@@ -5763,7 +7181,7 @@ app.post('/api/admin/scrapers/test', requireAdminAuth, async (req: Request, res:
 // ============================================================================
 // AD-BLOCKER NOTIFICATION POPUP POLICY (Admin-Controlled: Dismissible vs Strict Lock)
 // ============================================================================
-export type AdBlockPopupMode = 'dismissible' | 'strict';
+type AdBlockPopupMode = 'dismissible' | 'strict';
 
 interface AdBlockPolicyStore {
   mode: AdBlockPopupMode;
@@ -5778,7 +7196,9 @@ function loadAdBlockPolicyFromDisk(): AdBlockPolicyStore {
   for (const file of candidates) {
     try {
       if (fs.existsSync(file)) {
-        const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
+        const raw = fs.readFileSync(file, 'utf-8').trim();
+        if (!raw) continue;
+        const parsed = JSON.parse(raw);
         if (parsed && (parsed.mode === 'dismissible' || parsed.mode === 'strict')) {
           return {
             mode: parsed.mode,
@@ -5788,10 +7208,12 @@ function loadAdBlockPolicyFromDisk(): AdBlockPolicyStore {
       }
     } catch {}
   }
-  return {
+  const fallback: AdBlockPolicyStore = {
     mode: 'dismissible',
     updatedAt: 0,
   };
+  saveAdBlockPolicyToDiskSync(fallback);
+  return fallback;
 }
 
 function saveAdBlockPolicyToDiskSync(store: AdBlockPolicyStore): void {
@@ -5913,7 +7335,13 @@ async function startServer() {
       fs.mkdirSync(downloadsPath, { recursive: true });
     } catch {}
   }
-  app.use('/downloads', express.static(downloadsPath));
+  app.use('/downloads', (req: Request, res: Response, next: NextFunction) => {
+    const cleanRel = (req.path || '').toLowerCase();
+    if (cleanRel.includes('.persistence') || cleanRel.endsWith('.json') || cleanRel.includes('/.')) {
+      return res.status(403).send('Forbidden');
+    }
+    next();
+  }, express.static(downloadsPath, { dotfiles: 'deny', index: false }));
 
   // Android APK direct download endpoint with mobile-friendly headers
   app.get(['/download/app', '/download/apk', '/notflix.apk', '/app.apk'], (req: Request, res: Response) => {
@@ -5997,6 +7425,15 @@ async function startServer() {
       .replace(/>/g, '&gt;');
   }
 
+  function safeJsonLdStringify(data: unknown): string {
+    return JSON.stringify(data)
+      .replace(/</g, '\\u003c')
+      .replace(/>/g, '\\u003e')
+      .replace(/&/g, '\\u0026')
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029');
+  }
+
   async function refreshSeoCatalog(force = false): Promise<SeoCatalogEntry[]> {
     const SIX_HOURS = 6 * 60 * 60 * 1000;
     if (!force && seoCatalogCache.entries.length > 0 && Date.now() - seoCatalogCache.updatedAt < SIX_HOURS) {
@@ -6071,10 +7508,24 @@ async function startServer() {
     return seoCatalogCache.entries;
   }
 
-  // Warm up the Programmatic SEO catalog in the background shortly after server start
+  // Warm up the Programmatic SEO catalog + Live Arena events in the background shortly after server start
   setTimeout(() => {
     refreshSeoCatalog().catch(() => {});
+    getOrRefreshLiveEventsPayload(60000).catch(() => {});
   }, 2500);
+
+  function buildLiveMatchSeoPath(ev: any): string {
+    const idPart = String(ev?.id || 'match').trim();
+    const homeName = String(ev?.homeTeam?.name || '').trim();
+    const awayName = String(ev?.awayTeam?.name || '').trim();
+    const leagueName = String(ev?.league || '').trim();
+    const rawTitle = homeName && awayName ? `${homeName} vs ${awayName} ${leagueName}` : `${ev?.title || 'live-match'} ${leagueName}`;
+    return `/live/match/${encodeURIComponent(idPart)}-${toServerSeoSlug(rawTitle)}`;
+  }
+
+  function buildLiveChannelSeoPath(channelId: string): string {
+    return `/live/channel/${encodeURIComponent(String(channelId || '').trim())}`;
+  }
 
   async function resolveSeoTitleDetails(mediaType: 'movie' | 'tv', tmdbId: number): Promise<SeoCatalogEntry | null> {
     const key = `${mediaType}:${tmdbId}`;
@@ -6126,11 +7577,17 @@ async function startServer() {
   }
 
   async function buildDynamicSitemapXml(): Promise<string> {
-    const entries = await refreshSeoCatalog();
+    const [entries, livePayload] = await Promise.all([
+      refreshSeoCatalog(),
+      getOrRefreshLiveEventsPayload(180000),
+    ]);
+    const liveEventsList = Array.isArray(livePayload?.events) ? livePayload.events : [];
+    const channelEntries = Object.values(LIVE_CHANNEL_DIRECTORY);
     const today = new Date().toISOString().split('T')[0];
 
     const staticUrls = [
       { loc: 'https://notflixtv.com/', priority: '1.0', changefreq: 'hourly' },
+      { loc: 'https://notflixtv.com/live', priority: '0.95', changefreq: 'always' },
       { loc: 'https://notflixtv.com/movies', priority: '0.9', changefreq: 'daily' },
       { loc: 'https://notflixtv.com/series', priority: '0.9', changefreq: 'daily' },
       { loc: 'https://notflixtv.com/anime', priority: '0.9', changefreq: 'daily' },
@@ -6149,6 +7606,73 @@ async function startServer() {
       xml += `  </url>\n`;
     }
 
+    // 1. Live & Upcoming Sports Matches in Notflix Live Arena
+    for (const ev of liveEventsList) {
+      if (!ev || !ev.id) continue;
+      const matchPath = buildLiveMatchSeoPath(ev);
+      const fullLoc = `https://notflixtv.com${matchPath}`;
+      const matchTitle =
+        ev.homeTeam?.name && ev.awayTeam?.name
+          ? `${ev.homeTeam.name} vs ${ev.awayTeam.name}`
+          : String(ev.title || 'Live Sports Match');
+      const leagueLabel = ev.league ? ` — ${ev.league}` : '';
+      const chNames = Array.isArray(ev.recommendedChannels)
+        ? ev.recommendedChannels
+            .slice(0, 4)
+            .map((c: any) => String(c.name || '').replace(/\s*\([^)]*\)/g, ''))
+            .filter(Boolean)
+            .join(', ')
+        : 'beIN Sports, Sky Sports, ESPN';
+      const imgTitle = escapeXml(`Watch ${matchTitle}${leagueLabel} Live Stream Free HD — Notflix Arena`);
+      const imgCaption = escapeXml(
+        `Stream ${matchTitle}${leagueLabel} live in 1080p HD on ${chNames || 'Notflix Arena'}.`
+      );
+      const candidateImg = [ev.homeTeam?.logo, ev.awayTeam?.logo, ev.leagueLogo].find(
+        (u) => typeof u === 'string' && u.startsWith('http')
+      );
+      const isLiveNow = String(ev.status || '').toUpperCase() === 'LIVE';
+
+      xml += `  <url>\n`;
+      xml += `    <loc>${escapeXml(fullLoc)}</loc>\n`;
+      xml += `    <lastmod>${today}</lastmod>\n`;
+      xml += `    <changefreq>${isLiveNow ? 'always' : 'hourly'}</changefreq>\n`;
+      xml += `    <priority>${isLiveNow ? '0.95' : '0.90'}</priority>\n`;
+      if (candidateImg) {
+        xml += `    <image:image>\n`;
+        xml += `      <image:loc>${escapeXml(candidateImg)}</image:loc>\n`;
+        xml += `      <image:title>${imgTitle}</image:title>\n`;
+        xml += `      <image:caption>${imgCaption}</image:caption>\n`;
+        xml += `    </image:image>\n`;
+      }
+      xml += `  </url>\n`;
+    }
+
+    // 2. 24/7 Live Sports & Entertainment TV Channels in Notflix Arena
+    for (const ch of channelEntries) {
+      if (!ch || !ch.channelId) continue;
+      const fullLoc = `https://notflixtv.com${buildLiveChannelSeoPath(ch.channelId)}`;
+      const cleanName = ch.name.replace(/\s*\([^)]*\)/g, '').trim();
+      const imgTitle = escapeXml(`Watch ${cleanName} (${ch.languageLabel}) Live Stream 24/7 Free HD — Notflix Arena`);
+      const imgCaption = escapeXml(
+        `Watch ${ch.name} live stream 24/7 online free in 1080p Full HD on Notflix Live Arena.`
+      );
+
+      xml += `  <url>\n`;
+      xml += `    <loc>${escapeXml(fullLoc)}</loc>\n`;
+      xml += `    <lastmod>${today}</lastmod>\n`;
+      xml += `    <changefreq>hourly</changefreq>\n`;
+      xml += `    <priority>0.88</priority>\n`;
+      if (ch.logo && ch.logo.startsWith('http')) {
+        xml += `    <image:image>\n`;
+        xml += `      <image:loc>${escapeXml(ch.logo)}</image:loc>\n`;
+        xml += `      <image:title>${imgTitle}</image:title>\n`;
+        xml += `      <image:caption>${imgCaption}</image:caption>\n`;
+        xml += `    </image:image>\n`;
+      }
+      xml += `  </url>\n`;
+    }
+
+    // 3. Movies & TV Series Catalog
     for (const item of entries) {
       const fullLoc = `https://notflixtv.com${item.path}`;
       const yearLabel = item.year ? ` (${item.year})` : '';
@@ -6185,15 +7709,19 @@ async function startServer() {
         return rawHtml;
       }
 
-      let pageTitle = 'Notflix — Watch Movies, TV Series & Anime Online Free in HD (1080p/4K)';
+      let pageTitle = 'Notflix — Watch Movies, TV Series, Live Sports & 24/7 TV Online Free in HD';
       let pageDesc =
-        'Stream trending movies, full TV series seasons, and anime online free in 1080p & 4K HD on Notflix. Instant multi-server playback with English, Arabic, Spanish & 35+ subtitle languages.';
+        'Stream trending movies, full TV series seasons, anime, and live football & sports channels (beIN Sports, Sky Sports, ESPN, SSC) free in 1080p & 4K HD on Notflix.';
       let canonicalUrl = `https://notflixtv.com${cleanPath === '/' ? '/' : cleanPath}`;
       let ogImage = 'https://image.tmdb.org/t/p/w1280/8Y43POKjjKDGI9MH89NW0NAzzp8.jpg';
       let extraJsonLd = '';
       let noscriptCatalogHtml = '';
 
       const watchMatch = cleanPath.match(/^\/watch\/(movie|tv)\/(\d+)/i);
+      const liveMatchRoute = cleanPath.match(/^\/live\/match\/([^/?#]+)/i);
+      const liveChannelRoute = cleanPath.match(/^\/live\/channel\/([^/?#]+)/i);
+      const isLiveHubRoute = /^\/(live|arena)(\/|$)/i.test(cleanPath);
+
       if (watchMatch) {
         const mediaType = watchMatch[1].toLowerCase() === 'tv' ? 'tv' : 'movie';
         const tmdbId = parseInt(watchMatch[2], 10);
@@ -6238,7 +7766,7 @@ async function startServer() {
               },
             },
           };
-          extraJsonLd = `<script type="application/ld+json">${JSON.stringify(schemaObj)}</script>`;
+          extraJsonLd = `<script type="application/ld+json">${safeJsonLdStringify(schemaObj)}</script>`;
 
           const related = seoCatalogCache.entries.slice(0, 24);
           noscriptCatalogHtml = `<noscript><article><h1>${escapeHtmlAttr(pageTitle)}</h1><p>${escapeHtmlAttr(
@@ -6252,6 +7780,319 @@ async function startServer() {
             )
             .join('')}</ul></article></noscript>`;
         }
+      } else if (liveMatchRoute) {
+        const rawParam = decodeURIComponent(liveMatchRoute[1]);
+        const livePayload = await getOrRefreshLiveEventsPayload(180000);
+        const allEvents = Array.isArray(livePayload?.events) ? livePayload.events : [];
+        const matchedEv =
+          allEvents.find((e) => String(e.id) === rawParam) ||
+          allEvents.find((e) => rawParam.startsWith(`${e.id}-`)) ||
+          allEvents.find((e) => buildLiveMatchSeoPath(e).endsWith(rawParam));
+
+        const fallbackSlugTitle = rawParam
+          .replace(/^[0-9a-z]+-/i, '')
+          .replace(/-/g, ' ')
+          .replace(/\b\w/g, (c) => c.toUpperCase());
+
+        const homeName = matchedEv?.homeTeam?.name || fallbackSlugTitle.split(/ Vs /i)[0] || 'Home Team';
+        const awayName = matchedEv?.awayTeam?.name || fallbackSlugTitle.split(/ Vs /i)[1] || 'Away Team';
+        const matchTitle =
+          matchedEv?.homeTeam?.name && matchedEv?.awayTeam?.name
+            ? `${matchedEv.homeTeam.name} vs ${matchedEv.awayTeam.name}`
+            : matchedEv?.title || fallbackSlugTitle || 'Live Sports Match';
+        const leagueName = matchedEv?.league || 'Live Sports Broadcast';
+        const startIso = matchedEv?.startTime || new Date().toISOString();
+        const startMs = Date.parse(startIso) || Date.now();
+        const endIso = new Date(startMs + 2 * 60 * 60 * 1000).toISOString();
+        const isLiveNow = String(matchedEv?.status || '').toUpperCase() === 'LIVE';
+        const recChannels = Array.isArray(matchedEv?.recommendedChannels) ? matchedEv.recommendedChannels : [];
+        const channelListText =
+          recChannels.length > 0
+            ? recChannels
+                .slice(0, 4)
+                .map((c: any) => String(c.name || '').replace(/\s*\([^)]*\)/g, ''))
+                .join(', ')
+            : 'beIN Sports HD, Sky Sports HD, ESPN HD';
+
+        pageTitle = `Watch ${matchTitle} Live Stream Free HD — ${leagueName} | Notflix Arena`;
+        pageDesc = `Watch ${matchTitle} (${leagueName}) live stream online free in 1080p Full HD on Notflix Arena. Multi-language commentary on ${channelListText}.`.slice(
+          0,
+          158
+        );
+        canonicalUrl = matchedEv
+          ? `https://notflixtv.com${buildLiveMatchSeoPath(matchedEv)}`
+          : `https://notflixtv.com/live/match/${encodeURIComponent(rawParam)}`;
+
+        const candidateLogo = [matchedEv?.homeTeam?.logo, matchedEv?.awayTeam?.logo, matchedEv?.leagueLogo].find(
+          (u) => typeof u === 'string' && u.startsWith('http')
+        );
+        if (candidateLogo) {
+          ogImage = candidateLogo;
+        }
+
+        const sportsEventSchema = {
+          '@context': 'https://schema.org',
+          '@graph': [
+            {
+              '@type': 'SportsEvent',
+              '@id': `${canonicalUrl}#sportsevent`,
+              name: `${matchTitle} — ${leagueName}`,
+              description: pageDesc,
+              url: canonicalUrl,
+              startDate: startIso,
+              endDate: endIso,
+              eventStatus: isLiveNow
+                ? 'https://schema.org/EventInProgress'
+                : 'https://schema.org/EventScheduled',
+              eventAttendanceMode: 'https://schema.org/OnlineEventAttendanceMode',
+              sport: matchedEv?.sport || 'Soccer',
+              image: [candidateLogo, ogImage].filter(Boolean),
+              location: {
+                '@type': 'VirtualLocation',
+                url: canonicalUrl,
+                name: `Notflix Live Arena — ${leagueName}`,
+              },
+              organizer: {
+                '@type': 'SportsOrganization',
+                name: leagueName,
+                url: 'https://notflixtv.com/live',
+              },
+              homeTeam: {
+                '@type': 'SportsTeam',
+                name: homeName,
+                logo: matchedEv?.homeTeam?.logo?.startsWith('http') ? matchedEv.homeTeam.logo : undefined,
+              },
+              awayTeam: {
+                '@type': 'SportsTeam',
+                name: awayName,
+                logo: matchedEv?.awayTeam?.logo?.startsWith('http') ? matchedEv.awayTeam.logo : undefined,
+              },
+              competitor: [
+                { '@type': 'SportsTeam', name: homeName },
+                { '@type': 'SportsTeam', name: awayName },
+              ],
+              potentialAction: {
+                '@type': 'WatchAction',
+                target: {
+                  '@type': 'EntryPoint',
+                  urlTemplate: canonicalUrl,
+                  actionPlatform: [
+                    'http://schema.org/DesktopWebPlatform',
+                    'http://schema.org/MobileWebPlatform',
+                    'http://schema.org/IOSPlatform',
+                    'http://schema.org/AndroidPlatform',
+                  ],
+                },
+              },
+            },
+            {
+              '@type': 'BroadcastEvent',
+              '@id': `${canonicalUrl}#broadcast`,
+              name: `Live Broadcast: ${matchTitle} (${leagueName})`,
+              description: pageDesc,
+              isLiveBroadcast: true,
+              startDate: startIso,
+              endDate: endIso,
+              videoFormat: 'HD 1080p',
+              inLanguage: ['en', 'ar', 'fr', 'es'],
+              workPerformed: {
+                '@id': `${canonicalUrl}#sportsevent`,
+              },
+              publishedOn: recChannels.slice(0, 4).map((rc: any) => ({
+                '@type': 'BroadcastService',
+                name: rc.name,
+                inLanguage: rc.language || 'en',
+                url: `https://notflixtv.com${buildLiveChannelSeoPath(rc.channelId)}`,
+              })),
+            },
+          ],
+        };
+        extraJsonLd = `<script type="application/ld+json">${safeJsonLdStringify(sportsEventSchema)}</script>`;
+
+        const otherMatches = allEvents.slice(0, 20);
+        noscriptCatalogHtml = `<noscript><article><h1>${escapeHtmlAttr(pageTitle)}</h1><p>${escapeHtmlAttr(
+          pageDesc
+        )}</p><h2>Live Broadcast Channels for ${escapeHtmlAttr(matchTitle)}</h2><ul>${recChannels
+          .map(
+            (rc: any) =>
+              `<li><a href="https://notflixtv.com${buildLiveChannelSeoPath(rc.channelId)}">Watch ${escapeHtmlAttr(
+                rc.name
+              )} (${escapeHtmlAttr(rc.languageLabel || 'HD')}) Live Stream</a></li>`
+          )
+          .join('')}</ul><h2>More Live &amp; Upcoming Matches on Notflix Arena</h2><ul>${otherMatches
+          .map(
+            (m: any) =>
+              `<li><a href="https://notflixtv.com${buildLiveMatchSeoPath(m)}">Watch ${escapeHtmlAttr(
+                m.title || `${m.homeTeam?.name} vs ${m.awayTeam?.name}`
+              )} (${escapeHtmlAttr(m.league || 'Live')}) Online Free HD</a></li>`
+          )
+          .join('')}</ul></article></noscript>`;
+      } else if (liveChannelRoute) {
+        const rawChannelId = decodeURIComponent(liveChannelRoute[1]).toLowerCase();
+        const chEntry =
+          LIVE_CHANNEL_DIRECTORY[rawChannelId] ||
+          Object.values(LIVE_CHANNEL_DIRECTORY).find((c) => c.channelId.toLowerCase() === rawChannelId);
+
+        const channelId = chEntry?.channelId || rawChannelId;
+        const channelName = chEntry?.name || rawChannelId.replace(/-/g, ' ').toUpperCase();
+        const cleanName = channelName.replace(/\s*\([^)]*\)/g, '').trim();
+        const langLabel = chEntry?.languageLabel || 'English';
+        const langCode = chEntry?.language || 'en';
+
+        pageTitle = `Watch ${cleanName} (${langLabel}) Live Stream 24/7 Free in 1080p HD | Notflix Arena`;
+        pageDesc = `Watch ${channelName} live stream 24/7 online free in 1080p Full HD on Notflix Arena. Instant multi-mirror sports, football, and entertainment broadcast.`;
+        canonicalUrl = `https://notflixtv.com${buildLiveChannelSeoPath(channelId)}`;
+        if (chEntry?.logo && chEntry.logo.startsWith('http')) {
+          ogImage = chEntry.logo;
+        }
+
+        const tvChannelSchema = {
+          '@context': 'https://schema.org',
+          '@graph': [
+            {
+              '@type': 'TelevisionChannel',
+              '@id': `${canonicalUrl}#channel`,
+              name: channelName,
+              url: canonicalUrl,
+              image: chEntry?.logo?.startsWith('http') ? chEntry.logo : ogImage,
+              description: pageDesc,
+              inLanguage: langCode,
+              providesBroadcastService: {
+                '@type': 'BroadcastService',
+                name: `${cleanName} 24/7 HD Live Stream`,
+                broadcastDisplayName: cleanName,
+                videoFormat: '1080p HD',
+                inLanguage: langCode,
+                broadcaster: {
+                  '@type': 'Organization',
+                  name: 'Notflix Live Arena',
+                  url: 'https://notflixtv.com/live',
+                },
+              },
+            },
+            {
+              '@type': 'BroadcastEvent',
+              name: `${cleanName} 24/7 Live Broadcast`,
+              isLiveBroadcast: true,
+              videoFormat: '1080p HD',
+              inLanguage: langCode,
+              publishedOn: {
+                '@id': `${canonicalUrl}#channel`,
+              },
+              potentialAction: {
+                '@type': 'WatchAction',
+                target: {
+                  '@type': 'EntryPoint',
+                  urlTemplate: canonicalUrl,
+                  actionPlatform: [
+                    'http://schema.org/DesktopWebPlatform',
+                    'http://schema.org/MobileWebPlatform',
+                    'http://schema.org/IOSPlatform',
+                    'http://schema.org/AndroidPlatform',
+                  ],
+                },
+              },
+            },
+          ],
+        };
+        extraJsonLd = `<script type="application/ld+json">${safeJsonLdStringify(tvChannelSchema)}</script>`;
+
+        const allChannelsList = Object.values(LIVE_CHANNEL_DIRECTORY);
+        noscriptCatalogHtml = `<noscript><article><h1>${escapeHtmlAttr(pageTitle)}</h1><p>${escapeHtmlAttr(
+          pageDesc
+        )}</p><h2>All 24/7 Live Sports &amp; TV Channels on Notflix Arena</h2><ul>${allChannelsList
+          .map(
+            (c) =>
+              `<li><a href="https://notflixtv.com${buildLiveChannelSeoPath(c.channelId)}">Watch ${escapeHtmlAttr(
+                c.name
+              )} Live Stream 24/7 HD</a></li>`
+          )
+          .join('')}</ul></article></noscript>`;
+      } else if (isLiveHubRoute) {
+        pageTitle =
+          'Notflix Arena — Watch Live Sports, Football Matches & 24/7 TV Channels Free in 1080p HD';
+        pageDesc =
+          'Watch live football matches (UEFA Champions League, Premier League, La Liga, Serie A, Saudi Pro League), NBA, UFC, F1 & 102+ 24/7 live TV channels (beIN Sports, Sky Sports, ESPN, SSC) free in 1080p HD.';
+        canonicalUrl = 'https://notflixtv.com/live';
+
+        const livePayload = await getOrRefreshLiveEventsPayload(180000);
+        const liveMatches = Array.isArray(livePayload?.events) ? livePayload.events : [];
+        const allChannelsList = Object.values(LIVE_CHANNEL_DIRECTORY);
+
+        const arenaSchema = {
+          '@context': 'https://schema.org',
+          '@graph': [
+            {
+              '@type': 'CollectionPage',
+              '@id': 'https://notflixtv.com/live#webpage',
+              name: pageTitle,
+              description: pageDesc,
+              url: 'https://notflixtv.com/live',
+              isPartOf: {
+                '@type': 'WebSite',
+                name: 'Notflix',
+                url: 'https://notflixtv.com/',
+              },
+            },
+            {
+              '@type': 'ItemList',
+              name: 'Live & Upcoming Sports Matches on Notflix Arena',
+              itemListElement: liveMatches.slice(0, 30).map((ev: any, idx: number) => ({
+                '@type': 'ListItem',
+                position: idx + 1,
+                item: {
+                  '@type': 'SportsEvent',
+                  name:
+                    ev.homeTeam?.name && ev.awayTeam?.name
+                      ? `${ev.homeTeam.name} vs ${ev.awayTeam.name} (${ev.league || 'Live'})`
+                      : ev.title,
+                  url: `https://notflixtv.com${buildLiveMatchSeoPath(ev)}`,
+                  startDate: ev.startTime || new Date().toISOString(),
+                  eventStatus:
+                    String(ev.status || '').toUpperCase() === 'LIVE'
+                      ? 'https://schema.org/EventInProgress'
+                      : 'https://schema.org/EventScheduled',
+                  homeTeam: { '@type': 'SportsTeam', name: ev.homeTeam?.name || 'Home' },
+                  awayTeam: { '@type': 'SportsTeam', name: ev.awayTeam?.name || 'Away' },
+                },
+              })),
+            },
+            {
+              '@type': 'ItemList',
+              name: '24/7 Live Sports & Entertainment TV Channels',
+              itemListElement: allChannelsList.slice(0, 40).map((ch, idx) => ({
+                '@type': 'ListItem',
+                position: idx + 1,
+                url: `https://notflixtv.com${buildLiveChannelSeoPath(ch.channelId)}`,
+                name: `${ch.name} (${ch.languageLabel})`,
+              })),
+            },
+          ],
+        };
+        extraJsonLd = `<script type="application/ld+json">${safeJsonLdStringify(arenaSchema)}</script>`;
+
+        noscriptCatalogHtml = `<noscript><section><h1>${escapeHtmlAttr(pageTitle)}</h1><p>${escapeHtmlAttr(
+          pageDesc
+        )}</p><nav aria-label="Live Sports Matches Today"><h2>Live &amp; Upcoming Sports Matches</h2><ul>${liveMatches
+          .slice(0, 40)
+          .map(
+            (ev: any) =>
+              `<li><a href="https://notflixtv.com${buildLiveMatchSeoPath(ev)}">Watch ${escapeHtmlAttr(
+                ev.homeTeam?.name && ev.awayTeam?.name
+                  ? `${ev.homeTeam.name} vs ${ev.awayTeam.name}`
+                  : ev.title || 'Live Match'
+              )} — ${escapeHtmlAttr(ev.league || 'Live Sports')} Free HD</a></li>`
+          )
+          .join(
+            ''
+          )}</ul></nav><nav aria-label="24/7 Live Sports TV Channels Directory"><h2>24/7 Live TV Channels (beIN Sports, Sky Sports, ESPN, SSC, MBC)</h2><ul>${allChannelsList
+          .map(
+            (ch) =>
+              `<li><a href="https://notflixtv.com${buildLiveChannelSeoPath(ch.channelId)}">Watch ${escapeHtmlAttr(
+                ch.name
+              )} Live Stream 24/7 HD</a></li>`
+          )
+          .join('')}</ul></nav></section></noscript>`;
       } else {
         if (cleanPath.startsWith('/movies')) {
           pageTitle = 'Watch Movies Online Free in HD (1080p & 4K) — New & Trending Films | Notflix';
@@ -6266,29 +8107,60 @@ async function startServer() {
           pageDesc =
             'Stream top-rated and trending Japanese anime series and movies online in 1080p HD with English, Arabic, and multi-language subtitles on Notflix.';
         } else if (cleanPath.startsWith('/search')) {
-          pageTitle = 'Search Movies, TV Shows & Anime Online in HD | Notflix';
+          pageTitle = 'Search Movies, TV Shows, Anime & Live Sports Online in HD | Notflix';
           pageDesc =
-            'Search and stream any movie, TV series, or anime in 1080p HD with instant multi-language subtitles on Notflix.';
+            'Search and stream any movie, TV series, anime, or live football match in 1080p HD with instant multi-language subtitles on Notflix.';
         }
 
-        // Inject crawlable ItemList Schema.org + semantic links for Googlebot discovery
-        const catalogSample = seoCatalogCache.entries.slice(0, 60);
-        if (catalogSample.length > 0) {
+        // Inject crawlable ItemList Schema.org + semantic links for Googlebot discovery (Movies/Series + Live Arena)
+        const catalogSample = seoCatalogCache.entries.slice(0, 50);
+        const liveMatchesSample = Array.isArray(cachedLiveEventsPayload?.data?.events)
+          ? cachedLiveEventsPayload!.data.events.slice(0, 15)
+          : [];
+        const topChannelsSample = Object.values(LIVE_CHANNEL_DIRECTORY).slice(0, 20);
+
+        if (catalogSample.length > 0 || liveMatchesSample.length > 0) {
           const itemListSchema = {
             '@context': 'https://schema.org',
             '@type': 'ItemList',
             name: pageTitle,
-            itemListElement: catalogSample.slice(0, 30).map((entry, idx) => ({
-              '@type': 'ListItem',
-              position: idx + 1,
-              url: `https://notflixtv.com${entry.path}`,
-              name: `${entry.title}${entry.year ? ` (${entry.year})` : ''}`,
-            })),
+            itemListElement: [
+              {
+                '@type': 'ListItem',
+                position: 1,
+                url: 'https://notflixtv.com/live',
+                name: 'Notflix Live Arena — Live Football Matches & 24/7 Sports TV Channels',
+              },
+              ...catalogSample.slice(0, 29).map((entry, idx) => ({
+                '@type': 'ListItem',
+                position: idx + 2,
+                url: `https://notflixtv.com${entry.path}`,
+                name: `${entry.title}${entry.year ? ` (${entry.year})` : ''}`,
+              })),
+            ],
           };
-          extraJsonLd = `<script type="application/ld+json">${JSON.stringify(itemListSchema)}</script>`;
+          extraJsonLd = `<script type="application/ld+json">${safeJsonLdStringify(itemListSchema)}</script>`;
           noscriptCatalogHtml = `<noscript><section><h1>${escapeHtmlAttr(pageTitle)}</h1><p>${escapeHtmlAttr(
             pageDesc
-          )}</p><nav aria-label="Trending Movies and TV Series Directory"><ul>${catalogSample
+          )}</p><nav aria-label="Notflix Live Arena Sports and TV Directory"><h2><a href="https://notflixtv.com/live">Notflix Live Arena — Live Matches &amp; 24/7 Sports Channels</a></h2><ul>${liveMatchesSample
+            .map(
+              (ev: any) =>
+                `<li><a href="https://notflixtv.com${buildLiveMatchSeoPath(ev)}">Watch ${escapeHtmlAttr(
+                  ev.homeTeam?.name && ev.awayTeam?.name
+                    ? `${ev.homeTeam.name} vs ${ev.awayTeam.name}`
+                    : ev.title || 'Live Match'
+                )} Live Stream HD</a></li>`
+            )
+            .join('')}${topChannelsSample
+            .map(
+              (ch) =>
+                `<li><a href="https://notflixtv.com${buildLiveChannelSeoPath(ch.channelId)}">Watch ${escapeHtmlAttr(
+                  ch.name
+                )} Live 24/7 HD</a></li>`
+            )
+            .join(
+              ''
+            )}</ul></nav><nav aria-label="Trending Movies and TV Series Directory"><ul>${catalogSample
             .map(
               (entry) =>
                 `<li><a href="https://notflixtv.com${entry.path}">Watch ${escapeHtmlAttr(entry.title)}${
@@ -6358,6 +8230,9 @@ async function startServer() {
 
   const ROBOTS_TXT = `User-agent: *
 Allow: /
+Allow: /live
+Allow: /live/match/
+Allow: /live/channel/
 Allow: /watch/
 Allow: /movies
 Allow: /series
@@ -6379,7 +8254,7 @@ Sitemap: https://notflixtv.com/sitemap.xml
     try {
       const xml = await buildDynamicSitemapXml();
       res.setHeader('Content-Type', 'application/xml; charset=utf-8');
-      res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=3600');
+      res.setHeader('Cache-Control', 'public, max-age=1800, s-maxage=1800');
       return res.status(200).send(xml);
     } catch {
       res.setHeader('Content-Type', 'application/xml; charset=utf-8');
@@ -6392,22 +8267,151 @@ Sitemap: https://notflixtv.com/sitemap.xml
   // GET /api/admin/seo/status - Returns live Programmatic SEO & Sitemap metrics for Admin Dashboard
   app.get('/api/admin/seo/status', requireAdminAuth, async (req: Request, res: Response) => {
     const force = req.query.refresh === '1';
-    const entries = await refreshSeoCatalog(force);
+    const [entries, livePayload] = await Promise.all([
+      refreshSeoCatalog(force),
+      getOrRefreshLiveEventsPayload(force ? 0 : 120000),
+    ]);
     const moviesCount = entries.filter((e) => e.type === 'movie').length;
     const tvCount = entries.filter((e) => e.type === 'tv').length;
+    const liveMatchesCount = Array.isArray(livePayload?.events) ? livePayload.events.length : 0;
+    const allChannels = Object.values(LIVE_CHANNEL_DIRECTORY);
+    const liveChannelsCount = allChannels.length;
     return res.json({
       success: true,
-      totalUrls: entries.length + 5,
+      totalUrls: entries.length + liveMatchesCount + liveChannelsCount + 6,
       moviesCount,
       tvCount,
+      liveMatchesCount,
+      liveChannelsCount,
       updatedAt: seoCatalogCache.updatedAt || Date.now(),
       sitemapUrl: 'https://notflixtv.com/sitemap.xml',
-      sampleUrls: entries.slice(0, 6).map((e) => ({
-        title: `${e.title}${e.year ? ` (${e.year})` : ''}`,
-        url: `https://notflixtv.com${e.path}`,
-        type: e.type,
-      })),
+      sampleUrls: [
+        {
+          title: 'Notflix Live Arena — Live Football & 24/7 Sports TV Hub',
+          url: 'https://notflixtv.com/live',
+          type: 'live',
+        },
+        ...(Array.isArray(livePayload?.events) ? livePayload.events.slice(0, 2) : []).map((ev: any) => ({
+          title: `${ev.homeTeam?.name || ''} vs ${ev.awayTeam?.name || ''} (${ev.league || 'Live'})`,
+          url: `https://notflixtv.com${buildLiveMatchSeoPath(ev)}`,
+          type: 'live-match',
+        })),
+        ...allChannels.slice(0, 2).map((ch) => ({
+          title: `${ch.name} — 24/7 Live Broadcast`,
+          url: `https://notflixtv.com${buildLiveChannelSeoPath(ch.channelId)}`,
+          type: 'live-channel',
+        })),
+        ...entries.slice(0, 4).map((e) => ({
+          title: `${e.title}${e.year ? ` (${e.year})` : ''}`,
+          url: `https://notflixtv.com${e.path}`,
+          type: e.type,
+        })),
+      ],
     });
+  });
+
+  // GET /api/admin/live-arena/status - Returns real-time Live Arena matches, channels, categories & SEO metrics for Admin Dashboard
+  app.get('/api/admin/live-arena/status', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const force = req.query.refresh === '1';
+      if (force) {
+        cachedLiveEventsPayload = null;
+        cachedLiveChannelsPayload = null;
+      }
+      const livePayload = await getOrRefreshLiveEventsPayload(force ? 0 : 90000);
+      const eventsList = Array.isArray(livePayload?.events) ? livePayload.events : [];
+      const allChannels = Object.values(LIVE_CHANNEL_DIRECTORY);
+
+      const liveNowCount = eventsList.filter(
+        (ev: any) => String(ev?.status || '').toUpperCase() === 'LIVE'
+      ).length;
+      const upcomingCount = eventsList.filter(
+        (ev: any) => String(ev?.status || '').toUpperCase() === 'UPCOMING'
+      ).length;
+      const finishedCount = eventsList.filter(
+        (ev: any) => String(ev?.status || '').toUpperCase() === 'FT'
+      ).length;
+
+      const activeLeagues = Array.from(
+        new Set(
+          eventsList
+            .map((ev: any) => String(ev?.league || '').trim())
+            .filter(Boolean)
+        )
+      );
+
+      const groupCounts: Record<string, number> = {};
+      for (const ch of allChannels) {
+        const g = ch.group || 'Sports';
+        groupCounts[g] = (groupCounts[g] || 0) + 1;
+      }
+
+      const now = Date.now();
+      let activeArenaViewers = 0;
+      activeLiveViewers.forEach((v) => {
+        if (now - v.lastPing <= 75000 && v.mediaType === 'live') {
+          activeArenaViewers++;
+        }
+      });
+
+      const formattedEvents = eventsList.slice(0, 30).map((ev: any) => ({
+        id: ev.id,
+        title:
+          ev.homeTeam?.name && ev.awayTeam?.name
+            ? `${ev.homeTeam.name} vs ${ev.awayTeam.name}`
+            : ev.title || 'Live Match',
+        sport: ev.sport || 'Soccer',
+        league: ev.league || 'Football',
+        leagueLogo: ev.leagueLogo || '',
+        status: ev.status || 'UPCOMING',
+        statusDetail: ev.statusDetail || '',
+        startTime: ev.startTime || '',
+        homeTeam: ev.homeTeam,
+        awayTeam: ev.awayTeam,
+        seoPath: buildLiveMatchSeoPath(ev),
+        seoUrl: `https://notflixtv.com${buildLiveMatchSeoPath(ev)}`,
+        recommendedChannels: Array.isArray(ev.recommendedChannels)
+          ? ev.recommendedChannels.map((rc: any) => ({
+              channelId: rc.channelId,
+              name: rc.name,
+              language: rc.language,
+              languageLabel: rc.languageLabel,
+              logo: rc.logo,
+            }))
+          : [],
+      }));
+
+      const formattedChannels = allChannels.map((ch) => ({
+        channelId: ch.channelId,
+        name: ch.name,
+        group: ch.group,
+        language: ch.language,
+        languageLabel: ch.languageLabel,
+        logo: ch.logo,
+        seoPath: buildLiveChannelSeoPath(ch.channelId),
+        seoUrl: `https://notflixtv.com${buildLiveChannelSeoPath(ch.channelId)}`,
+      }));
+
+      return res.json({
+        success: true,
+        updatedAt: livePayload?.updatedAt || Date.now(),
+        totalEvents: eventsList.length,
+        liveNowCount,
+        upcomingCount,
+        finishedCount,
+        totalChannels: allChannels.length,
+        activeArenaViewers,
+        activeLeagues,
+        channelGroups: groupCounts,
+        events: formattedEvents,
+        channels: formattedChannels,
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        error: err?.message || 'Failed to load Live Arena status',
+      });
+    }
   });
 
   // Serve static assets from public directory (favicons, manifest, robots, etc.)
@@ -6426,7 +8430,7 @@ Sitemap: https://notflixtv.com/sitemap.xml
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
-      appType: 'spa',
+      appType: 'custom',
     });
     app.use(vite.middlewares);
 
@@ -6440,7 +8444,7 @@ Sitemap: https://notflixtv.com/sitemap.xml
         const indexPath = path.resolve(__dirname, 'index.html');
         let template = fs.readFileSync(indexPath, 'utf-8');
         template = await vite.transformIndexHtml(req.originalUrl, template);
-        template = await injectDynamicSeoIntoHtml(template, req.path);
+        template = await injectDynamicSeoIntoHtml(template, req.originalUrl || req.path);
         res.status(200).set({ 'Content-Type': 'text/html; charset=utf-8' }).end(template);
       } catch (e) {
         next(e);
@@ -6471,7 +8475,7 @@ Sitemap: https://notflixtv.com/sitemap.xml
       res.status(404).type('text/plain').send('Asset chunk superseded by new deployment');
     });
 
-    // Single-Page Application (SPA) catch-all route with Server-Side SEO Pre-Rendering for /, /watch/:type/:id, /movies, /series, /anime
+    // Single-Page Application (SPA) catch-all route with Server-Side SEO Pre-Rendering for /, /live*, /watch/:type/:id, /movies, /series, /anime
     app.get('*', async (req: Request, res: Response) => {
       setNoStoreHtmlHeaders(res);
       const prodIndex = path.join(distPath, 'index.html');
@@ -6479,7 +8483,7 @@ Sitemap: https://notflixtv.com/sitemap.xml
       const targetIndex = fs.existsSync(prodIndex) ? prodIndex : rootIndex;
       try {
         const rawHtml = fs.readFileSync(targetIndex, 'utf-8');
-        const seoHtml = await injectDynamicSeoIntoHtml(rawHtml, req.path);
+        const seoHtml = await injectDynamicSeoIntoHtml(rawHtml, req.originalUrl || req.path);
         return res.status(200).type('text/html; charset=utf-8').send(seoHtml);
       } catch {
         return res.sendFile(targetIndex, { etag: false, lastModified: false });
@@ -6488,6 +8492,9 @@ Sitemap: https://notflixtv.com/sitemap.xml
 
     console.log(`📦 Serving production build from ${distPath} (version: ${DEPLOYMENT_VERSION})`);
   }
+
+  // Before binding port 3000 and passing healthcheck, pull live Analytics & Blocked IPs from the outgoing container
+  await pullStateFromLivePeerOnStartup().catch(() => {});
 
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Notflix Full-Stack Server running on http://0.0.0.0:${PORT}`);

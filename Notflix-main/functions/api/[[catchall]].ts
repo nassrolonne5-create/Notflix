@@ -343,7 +343,13 @@ export async function onRequest(context: { request: Request; env: Env; params: {
 
   // 2. TMDB Proxy
   if (pathname.startsWith('/api/tmdb/')) {
-    const tmdbEndpoint = pathname.replace('/api/tmdb/', '');
+    const tmdbEndpoint = pathname.replace('/api/tmdb/', '').replace(/^\/+/, '');
+    if (!tmdbEndpoint || tmdbEndpoint.includes('..') || !/^[a-zA-Z0-9/_-]+$/.test(tmdbEndpoint)) {
+      return new Response(JSON.stringify({ error: 'Invalid TMDB endpoint path' }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
     const searchParams = new URLSearchParams(url.search);
     const tmdbKey = env.TMDB_API_KEY || DEFAULT_TMDB_KEY;
 
@@ -529,28 +535,50 @@ export async function onRequest(context: { request: Request; env: Env; params: {
   }
 
   if (pathname === '/api/subtitles/proxy') {
-    const subUrl = url.searchParams.get('url');
+    const subUrl = (url.searchParams.get('url') || '').trim();
     if (!subUrl) {
       return new Response('URL required', { status: 400 });
     }
 
-    const subRes = await fetch(subUrl);
-    let text = await subRes.text();
-    if (!text.trim().startsWith('WEBVTT')) {
-      text =
-        'WEBVTT\n\n' +
-        text
-          .replace(/\{\\([ibu])\}/g, '<$1>')
-          .replace(/\{\\\/([ibu])\}/g, '</$1>')
-          .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
-    }
+    try {
+      const parsedSub = new URL(subUrl);
+      const h = parsedSub.hostname.toLowerCase();
+      if (
+        (parsedSub.protocol !== 'http:' && parsedSub.protocol !== 'https:') ||
+        h === 'localhost' ||
+        h.startsWith('127.') ||
+        h.startsWith('10.') ||
+        h.startsWith('192.168.') ||
+        h.startsWith('169.254.') ||
+        h === '0.0.0.0' ||
+        h.includes(':')
+      ) {
+        return new Response('Forbidden URL', { status: 403 });
+      }
 
-    return new Response(text, {
-      headers: {
-        ...corsHeaders,
-        'Content-Type': 'text/vtt; charset=utf-8',
-      },
-    });
+      const subRes = await fetch(subUrl);
+      if (!subRes.ok) {
+        return new Response('', { status: subRes.status });
+      }
+      let text = await subRes.text();
+      if (!text.trim().startsWith('WEBVTT')) {
+        text =
+          'WEBVTT\n\n' +
+          text
+            .replace(/\{\\([ibu])\}/g, '<$1>')
+            .replace(/\{\\\/([ibu])\}/g, '</$1>')
+            .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+      }
+
+      return new Response(text, {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'text/vtt; charset=utf-8',
+        },
+      });
+    } catch {
+      return new Response('', { status: 502 });
+    }
   }
 
   // 5. User data
