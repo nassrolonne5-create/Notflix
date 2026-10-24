@@ -16,6 +16,8 @@ import {
   Download,
   Sparkles,
   Users,
+  PictureInPicture2,
+  Headphones,
 } from 'lucide-react';
 import { telemetry } from '../services/telemetry';
 
@@ -463,18 +465,44 @@ export const LiveTvArena: React.FC = () => {
   const [, setIsPlaying] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [isAudioCleanEnabled, setIsAudioCleanEnabled] = useState<boolean>(true);
+  const [isPipActive, setIsPipActive] = useState<boolean>(false);
+  const [isBackgroundPlayEnabled, setIsBackgroundPlayEnabled] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    try {
+      return localStorage.getItem('notflix_live_bg_play') !== 'false';
+    } catch {
+      return true;
+    }
+  });
   const [liveArenaViewersCount, setLiveArenaViewersCount] = useState<number>(0);
 
   // Video & HLS refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const bgVideoParkingRef = useRef<HTMLDivElement | null>(null);
+  const arenaVideoSlotRef = useRef<HTMLDivElement | null>(null);
+  const miniVideoSlotRef = useRef<HTMLDivElement | null>(null);
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const arenaScrollRef = useRef<HTMLDivElement | null>(null);
   const bufferingTimerRef = useRef<number | null>(null);
+  const userPausedRef = useRef<boolean>(false);
+  const wakeLockRef = useRef<any>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('notflix_live_bg_play', isBackgroundPlayEnabled ? 'true' : 'false');
+    } catch {}
+    const v = videoRef.current as any;
+    if (v) {
+      v.autoPictureInPicture = isBackgroundPlayEnabled;
+      v.disablePictureInPicture = false;
+    }
+  }, [isBackgroundPlayEnabled]);
 
   useEffect(() => {
     setBufferingLogoFailed(false);
     setIsVideoBuffering(false);
+    userPausedRef.current = false;
     if (bufferingTimerRef.current !== null) {
       window.clearTimeout(bufferingTimerRef.current);
       bufferingTimerRef.current = null;
@@ -495,9 +523,66 @@ export const LiveTvArena: React.FC = () => {
       window.clearTimeout(bufferingTimerRef.current);
       bufferingTimerRef.current = null;
     }
+    userPausedRef.current = false;
     setIsVideoBuffering(false);
     setLoadingStream(false);
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      try {
+        navigator.mediaSession.playbackState = 'playing';
+      } catch {}
+    }
   }, []);
+
+  const handleVideoPause = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    // If the browser automatically paused the video because the tab was hidden or phone screen locked,
+    // immediately resume playback when Background Play is enabled!
+    if (document.hidden && isBackgroundPlayEnabled && activeChannel && !userPausedRef.current) {
+      const graph = videoAudioGraphMap.get(v);
+      if (graph && graph.ctx.state === 'suspended') {
+        graph.ctx.resume().catch(() => {});
+      }
+      v.play().catch(() => {});
+      return;
+    }
+    if (!document.hidden && !v.ended && !loadingStream) {
+      userPausedRef.current = true;
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        try {
+          navigator.mediaSession.playbackState = 'paused';
+        } catch {}
+      }
+    }
+  }, [isBackgroundPlayEnabled, activeChannel, loadingStream]);
+
+  // Mount the single persistent <video> element into whichever container slot is currently active (Full Arena, Mini-Player, or Hidden Background Parking)
+  // so minimizing, expanding, entering PiP, or locking the screen NEVER unmounts the video or restarts the HLS stream
+  useEffect(() => {
+    const video = videoRef.current;
+    const parking = bgVideoParkingRef.current;
+    if (!video || !parking) return;
+
+    const targetHost =
+      isArenaOpen && activeChannel && arenaVideoSlotRef.current
+        ? arenaVideoSlotRef.current
+        : !isArenaOpen && isMiniPlayerMode && activeChannel && miniVideoSlotRef.current
+        ? miniVideoSlotRef.current
+        : parking;
+
+    if (video.parentElement !== targetHost) {
+      targetHost.appendChild(video);
+      if (activeChannel && video.paused && !userPausedRef.current) {
+        video.play().catch(() => {});
+      }
+    }
+
+    return () => {
+      if (parking && video.parentElement !== parking) {
+        parking.appendChild(video);
+      }
+    };
+  }, [isArenaOpen, isMiniPlayerMode, activeChannel]);
 
   const activeChannelLogo = useMemo(() => {
     if (!activeChannel) return '';
@@ -1075,7 +1160,7 @@ export const LiveTvArena: React.FC = () => {
   useEffect(() => {
     const video = videoRef.current;
     const currentSource = sources[activeSourceIndex];
-    if (!video || !currentSource || (!isArenaOpen && !isMiniPlayerMode)) {
+    if (!video || !currentSource || !activeChannel) {
       return;
     }
 
@@ -1089,6 +1174,7 @@ export const LiveTvArena: React.FC = () => {
 
     setStreamError(null);
     setLoadingStream(true);
+    userPausedRef.current = false;
     let playbackStarted = false;
     let failoverTriggered = false;
     let recoveryAttempts = 0;
@@ -1230,7 +1316,7 @@ export const LiveTvArena: React.FC = () => {
         hlsRef.current = null;
       }
     };
-  }, [sources, activeSourceIndex, usingFallbackProxy, isArenaOpen, isMiniPlayerMode]);
+  }, [sources, activeSourceIndex, usingFallbackProxy, Boolean(activeChannel)]);
 
   useEffect(() => {
     if (videoRef.current) {
@@ -1239,6 +1325,11 @@ export const LiveTvArena: React.FC = () => {
   }, [isAudioCleanEnabled]);
 
   const stopLiveStream = useCallback(() => {
+    userPausedRef.current = true;
+    if (typeof document !== 'undefined' && document.pictureInPictureElement) {
+      document.exitPictureInPicture().catch(() => {});
+    }
+    setIsPipActive(false);
     if (hlsRef.current) {
       hlsRef.current.destroy();
       hlsRef.current = null;
@@ -1248,12 +1339,249 @@ export const LiveTvArena: React.FC = () => {
       videoRef.current.removeAttribute('src');
       videoRef.current.load();
     }
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      try {
+        navigator.mediaSession.playbackState = 'none';
+        navigator.mediaSession.metadata = null;
+      } catch {}
+    }
     setActiveChannel(null);
     setActiveMatch(null);
     setSources([]);
     setIsPlaying(false);
     setIsMiniPlayerMode(false);
   }, []);
+
+  const togglePictureInPicture = useCallback(async () => {
+    const video = videoRef.current as any;
+    if (!video) return;
+    try {
+      if (typeof document !== 'undefined' && document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+        setIsPipActive(false);
+        return;
+      }
+      if (
+        typeof video.webkitSetPresentationMode === 'function' &&
+        video.webkitPresentationMode === 'picture-in-picture'
+      ) {
+        video.webkitSetPresentationMode('inline');
+        setIsPipActive(false);
+        return;
+      }
+      if (
+        typeof document !== 'undefined' &&
+        document.pictureInPictureEnabled &&
+        typeof video.requestPictureInPicture === 'function'
+      ) {
+        if (video.paused && !userPausedRef.current) {
+          await video.play().catch(() => {});
+        }
+        await video.requestPictureInPicture();
+        setIsPipActive(true);
+        return;
+      }
+      if (typeof video.webkitSetPresentationMode === 'function') {
+        video.webkitSetPresentationMode('picture-in-picture');
+        setIsPipActive(true);
+        return;
+      }
+      // Fallback if OS PiP is unavailable: undock into floating Mini-Player
+      if (isArenaOpen) {
+        closeArenaRestoreSeoUrl(true);
+      }
+    } catch {
+      if (isArenaOpen) {
+        closeArenaRestoreSeoUrl(true);
+      }
+    }
+  }, [isArenaOpen, closeArenaRestoreSeoUrl]);
+
+  // Picture-in-Picture event listeners (Standard Web API + iOS Safari webkitpresentationmodechanged)
+  useEffect(() => {
+    const video = videoRef.current as any;
+    if (!video) return;
+
+    const onEnterPip = () => setIsPipActive(true);
+    const onLeavePip = () => {
+      setIsPipActive(false);
+      if (activeChannel && !userPausedRef.current && video.paused) {
+        video.play().catch(() => {});
+      }
+    };
+    const onWebkitModeChange = () => {
+      const inPip = video.webkitPresentationMode === 'picture-in-picture';
+      setIsPipActive(inPip);
+      if (!inPip && activeChannel && !userPausedRef.current && video.paused) {
+        video.play().catch(() => {});
+      }
+    };
+
+    video.addEventListener('enterpictureinpicture', onEnterPip);
+    video.addEventListener('leavepictureinpicture', onLeavePip);
+    video.addEventListener('webkitpresentationmodechanged', onWebkitModeChange);
+
+    return () => {
+      video.removeEventListener('enterpictureinpicture', onEnterPip);
+      video.removeEventListener('leavepictureinpicture', onLeavePip);
+      video.removeEventListener('webkitpresentationmodechanged', onWebkitModeChange);
+    };
+  }, [activeChannel]);
+
+  // Background Play, MediaSession Lock-Screen Controls & Screen Wake Lock
+  useEffect(() => {
+    if (!activeChannel || typeof window === 'undefined') return;
+
+    // 1. Configure MediaSession metadata & lock-screen / headset transport controls
+    if ('mediaSession' in navigator && typeof MediaMetadata !== 'undefined') {
+      try {
+        const title = activeMatch
+          ? `${activeMatch.homeTeam?.name || 'Home'} vs ${activeMatch.awayTeam?.name || 'Away'}`
+          : cleanActiveChannelName;
+        const artist = activeMatch
+          ? `${activeMatch.league || 'Live Sports'} · ${cleanActiveChannelName}`
+          : `${activeChannel.network || 'Notflix Live Arena'} · ${activeChannel.languageLabel || 'HD'}`;
+        const artworkUrl =
+          activeChannelLogo && activeChannelLogo.startsWith('http')
+            ? activeChannelLogo
+            : activeMatch?.homeTeam?.logo ||
+              activeMatch?.leagueLogo ||
+              `${window.location.origin}/icon-192.png`;
+
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title,
+          artist,
+          album: 'Notflix Live Arena',
+          artwork: artworkUrl
+            ? [
+                { src: artworkUrl, sizes: '192x192', type: 'image/png' },
+                { src: artworkUrl, sizes: '512x512', type: 'image/png' },
+              ]
+            : [],
+        });
+
+        navigator.mediaSession.playbackState = userPausedRef.current ? 'paused' : 'playing';
+
+        navigator.mediaSession.setActionHandler('play', () => {
+          userPausedRef.current = false;
+          const v = videoRef.current;
+          if (v) {
+            const graph = videoAudioGraphMap.get(v);
+            if (graph && graph.ctx.state === 'suspended') {
+              graph.ctx.resume().catch(() => {});
+            }
+            v.play().catch(() => {});
+          }
+          navigator.mediaSession.playbackState = 'playing';
+        });
+
+        navigator.mediaSession.setActionHandler('pause', () => {
+          userPausedRef.current = true;
+          videoRef.current?.pause();
+          navigator.mediaSession.playbackState = 'paused';
+        });
+
+        navigator.mediaSession.setActionHandler('stop', () => {
+          stopLiveStream();
+        });
+
+        navigator.mediaSession.setActionHandler('nexttrack', () => {
+          if (activeMatch?.recommendedChannels && activeMatch.recommendedChannels.length > 1) {
+            const curIdx = activeMatch.recommendedChannels.findIndex((r) => r.channelId === activeChannel.id);
+            const nextCh =
+              activeMatch.recommendedChannels[(curIdx + 1) % activeMatch.recommendedChannels.length];
+            if (nextCh) tuneChannel(nextCh.channelId, activeMatch);
+          } else if (sources.length > 1) {
+            setUsingFallbackProxy(false);
+            setActiveSourceIndex((prev) => (prev + 1) % sources.length);
+          }
+        });
+
+        navigator.mediaSession.setActionHandler('previoustrack', () => {
+          if (activeMatch?.recommendedChannels && activeMatch.recommendedChannels.length > 1) {
+            const curIdx = activeMatch.recommendedChannels.findIndex((r) => r.channelId === activeChannel.id);
+            const prevCh =
+              activeMatch.recommendedChannels[
+                (curIdx - 1 + activeMatch.recommendedChannels.length) %
+                  activeMatch.recommendedChannels.length
+              ];
+            if (prevCh) tuneChannel(prevCh.channelId, activeMatch);
+          } else if (sources.length > 1) {
+            setUsingFallbackProxy(false);
+            setActiveSourceIndex((prev) => (prev - 1 + sources.length) % sources.length);
+          }
+        });
+
+        try {
+          (navigator.mediaSession as any).setActionHandler('enterpictureinpicture', () => {
+            togglePictureInPicture();
+          });
+        } catch {}
+      } catch {}
+    }
+
+    // 2. Keep stream alive across tab switches & mobile screen lock when Background Play is enabled
+    const handleVisibilityChange = () => {
+      const v = videoRef.current;
+      if (!v || !activeChannel) return;
+      if (document.hidden) {
+        if (isBackgroundPlayEnabled && !userPausedRef.current) {
+          const graph = videoAudioGraphMap.get(v);
+          if (graph && graph.ctx.state === 'suspended') {
+            graph.ctx.resume().catch(() => {});
+          }
+          if (v.paused) {
+            v.play().catch(() => {});
+          }
+        }
+      } else {
+        // Tab returned to foreground: resume playback & re-acquire screen wake lock
+        if (!userPausedRef.current && v.paused) {
+          v.play().catch(() => {});
+        }
+        if ('wakeLock' in navigator && !wakeLockRef.current) {
+          (navigator as any).wakeLock
+            .request('screen')
+            .then((lock: any) => {
+              wakeLockRef.current = lock;
+            })
+            .catch(() => {});
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // 3. Acquire Screen Wake Lock while watching live sports
+    if ('wakeLock' in navigator && !document.hidden) {
+      (navigator as any).wakeLock
+        .request('screen')
+        .then((lock: any) => {
+          wakeLockRef.current = lock;
+        })
+        .catch(() => {});
+    }
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (wakeLockRef.current) {
+        try {
+          wakeLockRef.current.release();
+        } catch {}
+        wakeLockRef.current = null;
+      }
+    };
+  }, [
+    activeChannel,
+    activeMatch,
+    cleanActiveChannelName,
+    activeChannelLogo,
+    isBackgroundPlayEnabled,
+    sources.length,
+    stopLiveStream,
+    tuneChannel,
+    togglePictureInPicture,
+  ]);
 
   const handleOrbPointerDown = (e: React.PointerEvent<HTMLElement>) => {
     if (e.button !== undefined && e.button !== 0) return;
@@ -1485,6 +1813,27 @@ export const LiveTvArena: React.FC = () => {
 
   return (
     <>
+      {/* Persistent Parking Host for the Single Shared Live TV <video> Element
+          Ensures zero re-buffering or interruption when switching between Full Arena, Mini-Player, Picture-in-Picture, and Background Play */}
+      <div
+        ref={bgVideoParkingRef}
+        className="fixed -left-[9999px] -top-[9999px] w-px h-px overflow-hidden opacity-0 pointer-events-none"
+        aria-hidden="true"
+      >
+        <video
+          ref={videoRef}
+          playsInline
+          autoPlay
+          muted={isMuted}
+          controls={!loadingStream && !isVideoBuffering && !streamError && isArenaOpen}
+          onWaiting={handleVideoWaiting}
+          onPlaying={handleVideoPlaying}
+          onCanPlay={handleVideoPlaying}
+          onPause={handleVideoPause}
+          className="w-full h-full object-contain"
+        />
+      </div>
+
       {/* =====================================================================
           1. MOVABLE FLOATING LIVE TV ICON / DRAGGABLE MINI-PLAYER
              - Original compact pill design
@@ -1539,6 +1888,18 @@ export const LiveTvArena: React.FC = () => {
                   </button>
                   <button
                     type="button"
+                    onClick={togglePictureInPicture}
+                    title={isPipActive ? 'Exit Picture-in-Picture' : 'Picture-in-Picture (PiP)'}
+                    className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                      isPipActive
+                        ? 'bg-indigo-600 text-white'
+                        : 'hover:bg-white/10 text-indigo-400 hover:text-indigo-300'
+                    }`}
+                  >
+                    <PictureInPicture2 className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => {
                       openArenaWithSeoUrl();
                       scrollToPlayer();
@@ -1560,16 +1921,7 @@ export const LiveTvArena: React.FC = () => {
               </div>
 
               <div className="relative aspect-video bg-black">
-                <video
-                  ref={videoRef}
-                  playsInline
-                  autoPlay
-                  muted={isMuted}
-                  onWaiting={handleVideoWaiting}
-                  onPlaying={handleVideoPlaying}
-                  onCanPlay={handleVideoPlaying}
-                  className="w-full h-full object-contain"
-                />
+                <div ref={miniVideoSlotRef} className="w-full h-full flex items-center justify-center" />
                 {(loadingStream || isVideoBuffering) && !streamError && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-[#070b14]/90 backdrop-blur-sm select-none pointer-events-none">
                     <div className="relative flex items-center justify-center">
@@ -1994,16 +2346,7 @@ export const LiveTvArena: React.FC = () => {
                 className="max-w-5xl mx-auto bg-[#0c1220] border border-rose-500/40 rounded-xl overflow-hidden shadow-2xl"
               >
                 <div className="relative aspect-video max-h-[52vh] w-full bg-black flex items-center justify-center overflow-hidden">
-                  <video
-                    ref={videoRef}
-                    playsInline
-                    autoPlay
-                    controls={!loadingStream && !isVideoBuffering && !streamError}
-                    onWaiting={handleVideoWaiting}
-                    onPlaying={handleVideoPlaying}
-                    onCanPlay={handleVideoPlaying}
-                    className="w-full h-full object-contain"
-                  />
+                  <div ref={arenaVideoSlotRef} className="w-full h-full flex items-center justify-center" />
 
                   {(loadingStream || isVideoBuffering) && !streamError && (
                     <div className="absolute inset-0 bg-[#070b14]/92 backdrop-blur-md flex flex-col items-center justify-center z-10 select-none pointer-events-none">
@@ -2158,6 +2501,34 @@ export const LiveTvArena: React.FC = () => {
                     >
                       <Sparkles className="w-3 h-3" />
                       <span>{isAudioCleanEnabled ? 'Clean Audio ON' : 'Clean Audio OFF'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setIsBackgroundPlayEnabled((prev) => !prev)}
+                      title="Background Play & Lock-Screen Audio (Keeps Live TV playing when switching tabs or locking phone screen)"
+                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 transition-colors cursor-pointer ${
+                        isBackgroundPlayEnabled
+                          ? 'bg-emerald-500/20 border border-emerald-500/40 text-emerald-300'
+                          : 'bg-white/[0.07] hover:bg-white/[0.14] text-slate-400'
+                      }`}
+                    >
+                      <Headphones className="w-3 h-3" />
+                      <span>{isBackgroundPlayEnabled ? 'BG Play ON' : 'BG Play OFF'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={togglePictureInPicture}
+                      title={isPipActive ? 'Exit Picture-in-Picture' : 'Picture-in-Picture (PiP)'}
+                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 transition-colors cursor-pointer ${
+                        isPipActive
+                          ? 'bg-indigo-600 text-white shadow-[0_2px_10px_rgba(79,70,229,0.45)]'
+                          : 'bg-white/[0.07] hover:bg-white/[0.14] text-slate-200 hover:text-white'
+                      }`}
+                    >
+                      <PictureInPicture2 className="w-3.5 h-3.5" />
+                      <span>{isPipActive ? 'PiP Active' : 'PiP'}</span>
                     </button>
 
                     <button
