@@ -402,9 +402,17 @@ function formatCleanEpgTitle(rawTitle?: string): string {
 }
 
 export const LiveTvArena: React.FC = () => {
-  const [isArenaOpen, setIsArenaOpen] = useState<boolean>(false);
+  const [isArenaOpen, setIsArenaOpen] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return isLiveArenaUrlPath(window.location.pathname);
+  });
   const [isMiniPlayerMode, setIsMiniPlayerMode] = useState(false);
-  const [activeView, setActiveView] = useState<'events' | 'channels'>('events');
+  const [activeView, setActiveView] = useState<'events' | 'channels'>(() => {
+    if (typeof window !== 'undefined' && /^\/live\/channel\//i.test(window.location.pathname)) {
+      return 'channels';
+    }
+    return 'events';
+  });
 
   // Data state
   const [events, setEvents] = useState<LiveSportEvent[]>([]);
@@ -815,9 +823,19 @@ export const LiveTvArena: React.FC = () => {
     }
   }, []);
 
-  const openArenaWithSeoUrl = useCallback((_targetPath?: string) => {
+  const openArenaWithSeoUrl = useCallback((targetPath?: string) => {
     setIsArenaOpen(true);
     setIsMiniPlayerMode(false);
+    if (typeof window !== 'undefined') {
+      const nextPath =
+        targetPath ||
+        (isLiveArenaUrlPath(window.location.pathname) ? window.location.pathname : '/live');
+      if (window.location.pathname !== nextPath) {
+        try {
+          window.history.replaceState({}, '', nextPath);
+        } catch {}
+      }
+    }
   }, []);
 
   const closeArenaRestoreSeoUrl = useCallback((minimizeToFloating = false) => {
@@ -826,7 +844,9 @@ export const LiveTvArena: React.FC = () => {
       setIsMiniPlayerMode(true);
     }
     if (typeof window !== 'undefined' && isLiveArenaUrlPath(window.location.pathname)) {
-      window.history.replaceState({}, '', '/');
+      try {
+        window.history.replaceState({}, '', '/');
+      } catch {}
     }
     const existingArenaSchema = document.getElementById('notflix-live-arena-jsonld');
     if (existingArenaSchema) existingArenaSchema.remove();
@@ -870,15 +890,15 @@ export const LiveTvArena: React.FC = () => {
     return () => window.clearInterval(interval);
   }, [fetchLiveArenaViewers]);
 
-  // Active viewer presence tracking while user is in Live Arena
+  // Active viewer presence tracking while user is in Live Arena, Mini-Player, PiP, or Background Play
   useEffect(() => {
-    if (!isArenaOpen && !isMiniPlayerMode) return;
+    if (!isArenaOpen && !isMiniPlayerMode && !activeChannel) return;
     telemetry.trackArenaPresence(25);
     const interval = window.setInterval(() => {
       telemetry.trackArenaPresence(25);
     }, 25000);
     return () => window.clearInterval(interval);
-  }, [isArenaOpen, isMiniPlayerMode]);
+  }, [isArenaOpen, isMiniPlayerMode, Boolean(activeChannel)]);
 
   const scrollToPlayer = useCallback(() => {
     window.setTimeout(() => {
@@ -906,7 +926,17 @@ export const LiveTvArena: React.FC = () => {
       if (matchContext !== undefined) {
         setActiveMatch(matchContext);
       }
-      // Synchronously unmute & unlock Web Audio graph while inside the user's click/tap gesture
+      if (typeof window !== 'undefined' && isArenaOpen) {
+        try {
+          const nextSeoPath = matchContext
+            ? buildMatchSeoPath(matchContext)
+            : buildChannelSeoPath(channelId);
+          if (window.location.pathname !== nextSeoPath) {
+            window.history.replaceState({}, '', nextSeoPath);
+          }
+        } catch {}
+      }
+      // Synchronously unmute & unlock native audio while inside the user's click/tap gesture
       userMutedRef.current = false;
       userPausedRef.current = false;
       setIsMuted(false);
@@ -1045,45 +1075,95 @@ export const LiveTvArena: React.FC = () => {
     [channels, tuneChannel]
   );
 
-  // Keep each device session independent: never auto-tune a channel or match from the browser URL
+  // Resolve SEO Deep-Links (/live, /live/match/:slug, /live/channel/:channelId) for Google Search visitors & Social Shares
+  const initialDeepLinkResolvedRef = useRef<boolean>(false);
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    if (isLiveArenaUrlPath(window.location.pathname)) {
-      window.history.replaceState({}, '', '/');
+    if (typeof window === 'undefined' || initialDeepLinkResolvedRef.current) return;
+    const path = window.location.pathname || '';
+    if (!isLiveArenaUrlPath(path)) {
+      initialDeepLinkResolvedRef.current = true;
+      return;
     }
-  }, []);
+
+    setIsArenaOpen(true);
+
+    const channelMatch = path.match(/^\/live\/channel\/([^/?#]+)/i);
+    if (channelMatch) {
+      initialDeepLinkResolvedRef.current = true;
+      const targetChannelId = decodeURIComponent(channelMatch[1]).trim().toLowerCase();
+      if (targetChannelId) {
+        setActiveView('channels');
+        tuneChannel(targetChannelId, null);
+      }
+      return;
+    }
+
+    const matchRoute = path.match(/^\/live\/match\/([^/?#]+)/i);
+    if (matchRoute) {
+      if (events.length === 0) return; // Wait for events list to finish loading
+      initialDeepLinkResolvedRef.current = true;
+      const rawParam = decodeURIComponent(matchRoute[1]).trim();
+      const matchedEv =
+        events.find((e) => String(e.id) === rawParam) ||
+        events.find((e) => rawParam.startsWith(`${e.id}-`)) ||
+        events.find((e) => buildMatchSeoPath(e).toLowerCase().endsWith(rawParam.toLowerCase()));
+      if (matchedEv) {
+        setActiveView('events');
+        playEventDirectly(matchedEv);
+      }
+      return;
+    }
+
+    initialDeepLinkResolvedRef.current = true;
+  }, [events, tuneChannel, playEventDirectly]);
 
   // Dynamic Client-Side SEO Meta, OpenGraph, Canonical & Schema.org JSON-LD for Live Arena
   useEffect(() => {
     if (!isArenaOpen || typeof window === 'undefined') return;
 
+    const currentPath = window.location.pathname || '/live';
+    // If visitor landed directly on a deep /live/match/* or /live/channel/* URL and the match/channel
+    // state is still resolving during initial mount, preserve the server-rendered SEO tags & canonical URL!
+    if (
+      !activeMatch &&
+      !activeChannel &&
+      (/^\/live\/match\//i.test(currentPath) || /^\/live\/channel\//i.test(currentPath))
+    ) {
+      return;
+    }
+
     const origin = window.location.origin || 'https://notflixtv.com';
     let title =
-      'Notflix Arena — Watch Live Sports, Football Matches & 24/7 TV Channels Free in 1080p HD';
+      'Notflix Arena — Watch Live Football, Sports & 130+ 24/7 TV Channels Free in 1080p HD';
     let desc =
-      'Watch live football matches (UEFA Champions League, Premier League, La Liga, Serie A, Saudi Pro League), NBA, UFC, F1 & 102+ 24/7 live TV channels (beIN Sports, Sky Sports, ESPN, SSC) free in 1080p HD.';
+      'Watch live football matches today (Champions League, Premier League, LaLiga, Serie A, Saudi Pro League), NBA, UFC, F1 & 130+ 24/7 sports TV channels (beIN Sports AR, Sky Sports, ESPN, SSC) free in 1080p HD.';
+    let keywords =
+      'Notflix Arena, live football stream free, watch football online hd, bein sports 1 live arabic, بث مباشر مباريات اليوم, مشاهدة بي ان سبورت, sky sports live stream, champions league live, premier league live, laliga live, el clasico live stream';
     let canonicalPath = '/live';
     let ogImage = 'https://image.tmdb.org/t/p/w1280/8Y43POKjjKDGI9MH89NW0NAzzp8.jpg';
     let jsonLdPayload: Record<string, any> | null = null;
 
     if (activeMatch) {
+      const homeName = activeMatch.homeTeam?.name || 'Home Team';
+      const awayName = activeMatch.awayTeam?.name || 'Away Team';
       const matchTitle =
         activeMatch.homeTeam?.name && activeMatch.awayTeam?.name
-          ? `${activeMatch.homeTeam.name} vs ${activeMatch.awayTeam.name}`
+          ? `${homeName} vs ${awayName}`
           : activeMatch.title || 'Live Sports Match';
       const leagueName = activeMatch.league || 'Live Sports Broadcast';
-      const chNames = Array.isArray(activeMatch.recommendedChannels)
+      const chNames = Array.isArray(activeMatch.recommendedChannels) && activeMatch.recommendedChannels.length > 0
         ? activeMatch.recommendedChannels
             .slice(0, 4)
             .map((c) => c.name.replace(/\s*\([^)]*\)/g, ''))
             .join(', ')
         : activeChannel?.name || 'beIN Sports HD, Sky Sports HD';
 
-      title = `Watch ${matchTitle} Live Stream Free HD — ${leagueName} | Notflix Arena`;
-      desc = `Watch ${matchTitle} (${leagueName}) live stream online free in 1080p Full HD on Notflix Arena. Multi-language commentary on ${chNames}.`.slice(
+      title = `Watch ${matchTitle} Live Stream Free HD (${leagueName}) — ${chNames.split(',')[0]} | Notflix Arena`;
+      desc = `Watch ${matchTitle} (${leagueName}) live stream online free in 1080p Full HD on ${chNames}. Instant multi-language commentary (Arabic, English, French, Spanish) on Notflix Arena.`.slice(
         0,
-        158
+        160
       );
+      keywords = `${matchTitle} live stream, watch ${homeName} vs ${awayName} free hd, ${homeName} live, ${awayName} live, ${leagueName} live stream, ${chNames}, بث مباشر ${homeName} و ${awayName}, مشاهدة مباراة ${homeName}`;
       canonicalPath = buildMatchSeoPath(activeMatch);
       const logoCandidate = [
         activeMatch.homeTeam?.logo,
@@ -1112,15 +1192,16 @@ export const LiveTvArena: React.FC = () => {
               ? 'https://schema.org/EventInProgress'
               : 'https://schema.org/EventScheduled',
             eventAttendanceMode: 'https://schema.org/OnlineEventAttendanceMode',
+            isAccessibleForFree: true,
             sport: activeMatch.sport || 'Soccer',
             image: [logoCandidate, ogImage].filter(Boolean),
             homeTeam: {
               '@type': 'SportsTeam',
-              name: activeMatch.homeTeam?.name || 'Home Team',
+              name: homeName,
             },
             awayTeam: {
               '@type': 'SportsTeam',
-              name: activeMatch.awayTeam?.name || 'Away Team',
+              name: awayName,
             },
           },
           {
@@ -1129,11 +1210,28 @@ export const LiveTvArena: React.FC = () => {
             name: `Live Broadcast: ${matchTitle} (${leagueName})`,
             description: desc,
             isLiveBroadcast: true,
+            isAccessibleForFree: true,
             startDate: startIso,
             endDate: endIso,
             videoFormat: 'HD 1080p',
-            inLanguage: ['en', 'ar', 'fr', 'es'],
+            inLanguage: ['ar', 'en', 'fr', 'es'],
             workPerformed: { '@id': `${fullUrl}#sportsevent` },
+          },
+          {
+            '@type': 'VideoObject',
+            '@id': `${fullUrl}#video`,
+            name: `Watch ${matchTitle} Live Stream Free HD — ${leagueName}`,
+            description: desc,
+            thumbnailUrl: [logoCandidate, ogImage].filter(Boolean),
+            uploadDate: startIso,
+            contentUrl: fullUrl,
+            embedUrl: fullUrl,
+            publication: {
+              '@type': 'BroadcastEvent',
+              isLiveBroadcast: true,
+              startDate: startIso,
+              endDate: endIso,
+            },
           },
         ],
       };
@@ -1141,7 +1239,8 @@ export const LiveTvArena: React.FC = () => {
       const cleanName = activeChannel.name.replace(/\s*\([^)]*\)/g, '').trim();
       const langLabel = activeChannel.languageLabel || 'English';
       title = `Watch ${cleanName} (${langLabel}) Live Stream 24/7 Free in 1080p HD | Notflix Arena`;
-      desc = `Watch ${activeChannel.name} live stream 24/7 online free in 1080p Full HD on Notflix Arena. Instant multi-mirror sports and entertainment broadcast.`;
+      desc = `Watch ${activeChannel.name} live stream 24/7 online free in 1080p Full HD on Notflix Arena. Instant multi-mirror sports, football, and entertainment broadcast.`;
+      keywords = `${cleanName} live stream, watch ${cleanName} online free hd, ${activeChannel.name} 24/7 live, ${cleanName} ${langLabel}, بث مباشر ${cleanName}, Notflix Arena`;
       canonicalPath = buildChannelSeoPath(activeChannel.id);
       if (activeChannel.logo && activeChannel.logo.startsWith('http')) {
         ogImage = activeChannel.logo;
@@ -1163,6 +1262,7 @@ export const LiveTvArena: React.FC = () => {
             '@type': 'BroadcastEvent',
             name: `${cleanName} 24/7 Live Broadcast`,
             isLiveBroadcast: true,
+            isAccessibleForFree: true,
             videoFormat: '1080p HD',
             inLanguage: activeChannel.language || 'en',
             publishedOn: { '@id': `${fullUrl}#channel` },
@@ -1187,6 +1287,7 @@ export const LiveTvArena: React.FC = () => {
       if (el) el.setAttribute(attr, value);
     };
     setMeta('meta[name="description"]', 'content', desc);
+    setMeta('meta[name="keywords"]', 'content', keywords);
     setMeta('meta[property="og:title"]', 'content', title);
     setMeta('meta[property="og:description"]', 'content', desc);
     setMeta('meta[property="og:url"]', 'content', fullCanonical);
@@ -1211,7 +1312,7 @@ export const LiveTvArena: React.FC = () => {
 
   // Real-time Telemetry Tracking for Live Arena (sends play & 25s heartbeats to Admin Dashboard)
   useEffect(() => {
-    if ((!isArenaOpen && !isMiniPlayerMode) || (!activeMatch && !activeChannel)) return;
+    if (!activeMatch && !activeChannel) return;
 
     const telemetryTitle = activeMatch
       ? activeMatch.homeTeam?.name && activeMatch.awayTeam?.name

@@ -55,6 +55,11 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 
   // Expire any stale proxy/sticky-session cookies on HTML navigation requests so Traefik never pins a browser to a dead container
   const accept = (req.headers.accept || '').toLowerCase();
+  const ua = String(req.headers['user-agent'] || '');
+  const isSearchCrawler =
+    /googlebot|bingbot|yandex|baiduspider|duckduckbot|slurp|applebot|twitterbot|facebookexternalhit|linkedinbot|telegrambot|whatsapp|discordbot/i.test(
+      ua
+    );
   const isHtmlNav =
     req.method === 'GET' &&
     !req.path.startsWith('/api/') &&
@@ -62,7 +67,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     !req.path.startsWith('/v1/') &&
     (accept.includes('text/html') || req.path === '/' || req.path.startsWith('/admin'));
 
-  if (isHtmlNav && req.headers.cookie) {
+  if (isHtmlNav && req.headers.cookie && !isSearchCrawler) {
     try {
       const cookiePairs = req.headers.cookie.split(';');
       const clearHeaders: string[] = [];
@@ -217,19 +222,41 @@ export interface PermanentBanRecord {
   lastAttemptAt: number;
 }
 
-// Legitimate Search Engine Crawler Whitelist (Preserves SEO and favicon indexing)
+// Legitimate Search Engine & Social Preview Crawler Whitelist (Preserves SEO, Rich Results, and Social Cards)
 const SEARCH_ENGINE_BOTS = [
   /googlebot/i,
+  /google-inspectiontool/i,
+  /googleother/i,
+  /google-extended/i,
+  /storebot-google/i,
+  /adsbot-google/i,
+  /mediapartners-google/i,
+  /apis-google/i,
+  /google-read-aloud/i,
+  /google-safety/i,
+  /google-site-verification/i,
+  /chrome-lighthouse/i,
   /bingbot/i,
   /bingpreview/i,
+  /msnbot/i,
+  /adidxbot/i,
   /duckduckbot/i,
-  /yandexbot/i,
+  /yandex/i,
   /baiduspider/i,
   /applebot/i,
   /slurp/i,
   /linkedinbot/i,
   /twitterbot/i,
   /facebookexternalhit/i,
+  /facebot/i,
+  /telegrambot/i,
+  /whatsapp/i,
+  /discordbot/i,
+  /slackbot/i,
+  /pinterestbot/i,
+  /petalbot/i,
+  /seznambot/i,
+  /qwantify/i,
 ];
 
 function isLegitimateSearchCrawler(userAgent: string): boolean {
@@ -585,6 +612,20 @@ function loadPermanentBansFromDisk() {
       }
     } catch (e) {
       console.warn(`Could not read blocked_ips candidate ${candidate}:`, e);
+    }
+  }
+
+  // Self-heal: remove any accidentally banned search engine crawler or standard human browser (e.g. mobile CGNAT IP)
+  for (const [bannedIp, rec] of permanentlyBannedIps.entries()) {
+    if (
+      isLegitimateSearchCrawler(rec.userAgent || '') ||
+      (rec.category !== 'manual' &&
+        isStandardHumanBrowser(rec.userAgent || '') &&
+        !isDataInterceptionProbePath(rec.path || ''))
+    ) {
+      permanentlyBannedIps.delete(bannedIp);
+      unblockedIpTombstones.set(bannedIp, Date.now());
+      purgedLegacyV1Bans = true;
     }
   }
 
@@ -984,7 +1025,12 @@ const globalSecurityShieldMiddleware = (req: Request, res: Response, next: NextF
     return next();
   }
 
-  // 4. Enforce Permanent IP Blacklist across the entire website (HTML pages, APIs, and Stream Proxies)
+  // 4. Always allow whitelisted legitimate search engine & social preview crawlers FIRST (Googlebot, Google-InspectionTool, Bingbot, TelegramBot, etc.)
+  if (isLegitimateSearchCrawler(userAgent)) {
+    return next();
+  }
+
+  // 5. Enforce Permanent IP Blacklist across the entire website (HTML pages, APIs, and Stream Proxies)
   const existingBan = permanentlyBannedIps.get(ip);
   if (existingBan) {
     existingBan.blockedAttempts += 1;
@@ -992,11 +1038,6 @@ const globalSecurityShieldMiddleware = (req: Request, res: Response, next: NextF
     securityMetrics.totalBlockedScrapers++;
     scheduleSavePermanentBans();
     return sendPermanentBlockResponse(req, res, existingBan);
-  }
-
-  // 5. Allow whitelisted legitimate search engine crawlers (Googlebot, Bingbot, etc.)
-  if (isLegitimateSearchCrawler(userAgent)) {
-    return next();
   }
 
   // 6. Let explicit trap routes handle their own permanent ban logic
@@ -6799,7 +6840,7 @@ app.post('/api/analytics/ping', (req: Request, res: Response) => {
     const normalizedSeason = isTv ? (season ? Number(season) : 1) : undefined;
     const normalizedEpisode = isTv ? (episode ? Number(episode) : 1) : undefined;
 
-    // Track active live stream state (viewer currently playing)
+    // Track active live stream state (viewer currently playing or entering Movie/Series player or Live Arena)
     if (eventType === 'heartbeat' || eventType === 'play') {
       activeLiveViewers.set(sessionId, {
         lastPing: now,
@@ -6810,6 +6851,30 @@ app.post('/api/analytics/ping', (req: Request, res: Response) => {
         episode: normalizedEpisode,
         poster,
       });
+    } else if (eventType === 'pageview' && typeof title === 'string' && !activeLiveViewers.has(sessionId)) {
+      const cleanRoute = title.trim();
+      if (/^\/(live|arena)(\/|$)/i.test(cleanRoute)) {
+        activeLiveViewers.set(sessionId, {
+          lastPing: now,
+          title: 'Live Arena Hub',
+          device: device || 'desktop',
+          mediaType: 'live',
+        });
+      } else {
+        const watchRouteMatch = cleanRoute.match(/^\/watch\/(movie|tv)\/(\d+)(?:-(.+))?/i);
+        if (watchRouteMatch) {
+          const routeMediaType = watchRouteMatch[1].toLowerCase() === 'tv' ? 'tv' : 'movie';
+          const slugTitle = watchRouteMatch[3]
+            ? watchRouteMatch[3].replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+            : `TMDB #${watchRouteMatch[2]}`;
+          activeLiveViewers.set(sessionId, {
+            lastPing: now,
+            title: slugTitle,
+            device: device || 'desktop',
+            mediaType: routeMediaType,
+          });
+        }
+      }
     }
 
     // Save event
@@ -6848,8 +6913,8 @@ app.get('/api/admin/analytics', requireAdminAuth, (req: Request, res: Response) 
     const range = (req.query.range as string) || '7d';
     const now = Date.now();
 
-    // 1. Calculate live viewers (active in last 75 seconds)
-    const liveTimeout = 75 * 1000;
+    // 1. Calculate live viewers (active in last 120 seconds to include mobile background/PiP viewers where browser timers throttle to 60s)
+    const liveTimeout = 120 * 1000;
     const currentLiveList: Array<{
       sessionId: string;
       title: string;
@@ -7734,6 +7799,20 @@ function setNoStoreHtmlHeaders(res: Response) {
   res.setHeader('Cloudflare-CDN-Cache-Control', 'no-store');
 }
 
+function setHtmlResponseHeaders(req: Request, res: Response) {
+  const ua = String(req.headers['user-agent'] || '');
+  const isBot =
+    /googlebot|bingbot|yandex|baiduspider|duckduckbot|slurp|applebot|twitterbot|facebookexternalhit|linkedinbot|telegrambot|whatsapp|discordbot/i.test(
+      ua
+    );
+  if (isBot && !isShuttingDown) {
+    res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=600, stale-while-revalidate=3600');
+    res.setHeader('Vary', 'User-Agent, Accept-Encoding');
+    return;
+  }
+  setNoStoreHtmlHeaders(res);
+}
+
 // ==========================================
 // 6. DEV & PROD VITE STATIC INTEGRATION
 // ==========================================
@@ -7871,14 +7950,22 @@ async function startServer() {
       { path: 'trending/movie/week', type: 'movie' },
       { path: 'movie/popular?page=1&without_genres=10749', type: 'movie' },
       { path: 'movie/popular?page=2&without_genres=10749', type: 'movie' },
+      { path: 'movie/popular?page=3&without_genres=10749', type: 'movie' },
       { path: 'movie/top_rated?page=1&without_genres=10749', type: 'movie' },
+      { path: 'movie/top_rated?page=2&without_genres=10749', type: 'movie' },
       { path: 'movie/now_playing?page=1&without_genres=10749', type: 'movie' },
+      { path: 'movie/now_playing?page=2&without_genres=10749', type: 'movie' },
+      { path: 'movie/upcoming?page=1&without_genres=10749', type: 'movie' },
       { path: 'trending/tv/day', type: 'tv' },
       { path: 'trending/tv/week', type: 'tv' },
       { path: 'tv/popular?page=1&without_genres=10749', type: 'tv' },
       { path: 'tv/popular?page=2&without_genres=10749', type: 'tv' },
+      { path: 'tv/popular?page=3&without_genres=10749', type: 'tv' },
       { path: 'tv/top_rated?page=1&without_genres=10749', type: 'tv' },
+      { path: 'tv/top_rated?page=2&without_genres=10749', type: 'tv' },
+      { path: 'tv/on_the_air?page=1&without_genres=10749', type: 'tv' },
       { path: 'discover/tv?with_genres=16&with_original_language=ja&sort_by=popularity.desc&page=1', type: 'tv' },
+      { path: 'discover/tv?with_genres=16&with_original_language=ja&sort_by=popularity.desc&page=2', type: 'tv' },
     ];
 
     const collected = new Map<string, SeoCatalogEntry>();
@@ -7934,11 +8021,11 @@ async function startServer() {
     return seoCatalogCache.entries;
   }
 
-  // Warm up the Programmatic SEO catalog + Live Arena events in the background shortly after server start
+  // Warm up the Programmatic SEO catalog + Live Arena events immediately on server start
   setTimeout(() => {
     refreshSeoCatalog().catch(() => {});
     getOrRefreshLiveEventsPayload(60000).catch(() => {});
-  }, 2500);
+  }, 250);
 
   function buildLiveMatchSeoPath(ev: any): string {
     const idPart = String(ev?.id || 'match').trim();
@@ -8013,11 +8100,11 @@ async function startServer() {
 
     const staticUrls = [
       { loc: 'https://notflixtv.com/', priority: '1.0', changefreq: 'hourly' },
+      { loc: 'https://notflixtv.com/movies', priority: '0.95', changefreq: 'hourly' },
+      { loc: 'https://notflixtv.com/series', priority: '0.95', changefreq: 'hourly' },
+      { loc: 'https://notflixtv.com/anime', priority: '0.95', changefreq: 'daily' },
       { loc: 'https://notflixtv.com/live', priority: '0.95', changefreq: 'always' },
-      { loc: 'https://notflixtv.com/movies', priority: '0.9', changefreq: 'daily' },
-      { loc: 'https://notflixtv.com/series', priority: '0.9', changefreq: 'daily' },
-      { loc: 'https://notflixtv.com/anime', priority: '0.9', changefreq: 'daily' },
-      { loc: 'https://notflixtv.com/search', priority: '0.8', changefreq: 'weekly' },
+      { loc: 'https://notflixtv.com/search', priority: '0.85', changefreq: 'weekly' },
     ];
 
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
@@ -8032,7 +8119,34 @@ async function startServer() {
       xml += `  </url>\n`;
     }
 
-    // 1. Live & Upcoming Sports Matches in Notflix Live Arena
+    // 1. Movies, TV Series & Anime Catalog FIRST (Primary Core Pages for Google Crawl Priority)
+    for (const item of entries) {
+      const fullLoc = `https://notflixtv.com${item.path}`;
+      const yearLabel = item.year ? ` (${item.year})` : '';
+      const typeLabel = item.type === 'tv' ? 'Full TV Series' : 'Full Movie';
+      const imgTitle = escapeXml(`Watch ${item.title}${yearLabel} ${typeLabel} Online Free in HD — Notflix`);
+      const imgCaption = escapeXml(
+        item.overview
+          ? `Stream ${item.title}${yearLabel} in 1080p & 4K HD with subtitles: ${item.overview.slice(0, 140)}`
+          : `Watch ${item.title}${yearLabel} online free in 1080p HD on Notflix.`
+      );
+
+      xml += `  <url>\n`;
+      xml += `    <loc>${escapeXml(fullLoc)}</loc>\n`;
+      xml += `    <lastmod>${today}</lastmod>\n`;
+      xml += `    <changefreq>daily</changefreq>\n`;
+      xml += `    <priority>0.92</priority>\n`;
+      if (item.poster && item.poster.startsWith('http')) {
+        xml += `    <image:image>\n`;
+        xml += `      <image:loc>${escapeXml(item.poster)}</image:loc>\n`;
+        xml += `      <image:title>${imgTitle}</image:title>\n`;
+        xml += `      <image:caption>${imgCaption}</image:caption>\n`;
+        xml += `    </image:image>\n`;
+      }
+      xml += `  </url>\n`;
+    }
+
+    // 2. Live & Upcoming Sports Matches in Notflix Live Arena
     for (const ev of liveEventsList) {
       if (!ev || !ev.id) continue;
       const matchPath = buildLiveMatchSeoPath(ev);
@@ -8062,7 +8176,7 @@ async function startServer() {
       xml += `    <loc>${escapeXml(fullLoc)}</loc>\n`;
       xml += `    <lastmod>${today}</lastmod>\n`;
       xml += `    <changefreq>${isLiveNow ? 'always' : 'hourly'}</changefreq>\n`;
-      xml += `    <priority>${isLiveNow ? '0.95' : '0.90'}</priority>\n`;
+      xml += `    <priority>${isLiveNow ? '0.90' : '0.86'}</priority>\n`;
       if (candidateImg) {
         xml += `    <image:image>\n`;
         xml += `      <image:loc>${escapeXml(candidateImg)}</image:loc>\n`;
@@ -8073,7 +8187,7 @@ async function startServer() {
       xml += `  </url>\n`;
     }
 
-    // 2. 24/7 Live Sports & Entertainment TV Channels in Notflix Arena
+    // 3. 24/7 Live Sports & Entertainment TV Channels in Notflix Arena
     for (const ch of channelEntries) {
       if (!ch || !ch.channelId) continue;
       const fullLoc = `https://notflixtv.com${buildLiveChannelSeoPath(ch.channelId)}`;
@@ -8087,36 +8201,10 @@ async function startServer() {
       xml += `    <loc>${escapeXml(fullLoc)}</loc>\n`;
       xml += `    <lastmod>${today}</lastmod>\n`;
       xml += `    <changefreq>hourly</changefreq>\n`;
-      xml += `    <priority>0.88</priority>\n`;
+      xml += `    <priority>0.84</priority>\n`;
       if (ch.logo && ch.logo.startsWith('http')) {
         xml += `    <image:image>\n`;
         xml += `      <image:loc>${escapeXml(ch.logo)}</image:loc>\n`;
-        xml += `      <image:title>${imgTitle}</image:title>\n`;
-        xml += `      <image:caption>${imgCaption}</image:caption>\n`;
-        xml += `    </image:image>\n`;
-      }
-      xml += `  </url>\n`;
-    }
-
-    // 3. Movies & TV Series Catalog
-    for (const item of entries) {
-      const fullLoc = `https://notflixtv.com${item.path}`;
-      const yearLabel = item.year ? ` (${item.year})` : '';
-      const imgTitle = escapeXml(`Watch ${item.title}${yearLabel} Online Free in HD — Notflix`);
-      const imgCaption = escapeXml(
-        item.overview
-          ? `Stream ${item.title}${yearLabel} in 1080p HD with subtitles: ${item.overview.slice(0, 140)}`
-          : `Watch ${item.title}${yearLabel} online in HD on Notflix.`
-      );
-
-      xml += `  <url>\n`;
-      xml += `    <loc>${escapeXml(fullLoc)}</loc>\n`;
-      xml += `    <lastmod>${today}</lastmod>\n`;
-      xml += `    <changefreq>daily</changefreq>\n`;
-      xml += `    <priority>0.85</priority>\n`;
-      if (item.poster && item.poster.startsWith('http')) {
-        xml += `    <image:image>\n`;
-        xml += `      <image:loc>${escapeXml(item.poster)}</image:loc>\n`;
         xml += `      <image:title>${imgTitle}</image:title>\n`;
         xml += `      <image:caption>${imgCaption}</image:caption>\n`;
         xml += `    </image:image>\n`;
@@ -8135,9 +8223,11 @@ async function startServer() {
         return rawHtml;
       }
 
-      let pageTitle = 'Notflix — Watch Movies, TV Series, Live Sports & 24/7 TV Online Free in HD';
+      let pageTitle = 'Notflix — Watch Movies, TV Series & Anime Online Free in HD (1080p & 4K)';
       let pageDesc =
-        'Stream trending movies, full TV series seasons, anime, and live football & sports channels (beIN Sports, Sky Sports, ESPN, SSC) free in 1080p & 4K HD on Notflix.';
+        'Stream trending movies, full TV series seasons, and anime online free in 1080p & 4K HD on Notflix with English, Arabic, Spanish, French & multi-language subtitles.';
+      let pageKeywords =
+        'Notflix, watch movies online free, stream tv series hd, watch full movies 1080p, watch anime english sub dub, free streaming site, 4k movies online, new movies 2026, مشاهدة افلام مترجمة, مشاهدة مسلسلات, ايجي بست, فاصل اعلاني';
       let canonicalUrl = `https://notflixtv.com${cleanPath === '/' ? '/' : cleanPath}`;
       let ogImage = 'https://image.tmdb.org/t/p/w1280/8Y43POKjjKDGI9MH89NW0NAzzp8.jpg';
       let extraJsonLd = '';
@@ -8159,38 +8249,59 @@ async function startServer() {
           pageDesc = `Watch ${item.title}${yearStr} online free in 1080p & 4K HD with English, Arabic, Spanish & multi-language subtitles on Notflix. ${
             item.overview || ''
           }`.slice(0, 158);
+          pageKeywords = `watch ${item.title} online free, ${item.title}${yearStr} full ${
+            mediaType === 'tv' ? 'series' : 'movie'
+          } hd, stream ${item.title} 1080p, ${item.title} english subtitles, ${item.title} مترجم, Notflix`;
           canonicalUrl = `https://notflixtv.com${item.path}`;
           ogImage = item.backdrop || item.poster || ogImage;
 
           const schemaObj = {
             '@context': 'https://schema.org',
-            '@type': mediaType === 'tv' ? 'TVSeries' : 'Movie',
-            name: item.title,
-            url: canonicalUrl,
-            image: [item.poster, item.backdrop].filter(Boolean),
-            description: item.overview || pageDesc,
-            datePublished: item.year || undefined,
-            inLanguage: 'en',
-            aggregateRating: {
-              '@type': 'AggregateRating',
-              ratingValue: item.rating.toFixed(1),
-              bestRating: '10',
-              worstRating: '1',
-              ratingCount: Math.max(150, Math.round(item.rating * 520)),
-            },
-            potentialAction: {
-              '@type': 'WatchAction',
-              target: {
-                '@type': 'EntryPoint',
-                urlTemplate: canonicalUrl,
-                actionPlatform: [
-                  'http://schema.org/DesktopWebPlatform',
-                  'http://schema.org/MobileWebPlatform',
-                  'http://schema.org/IOSPlatform',
-                  'http://schema.org/AndroidPlatform',
+            '@graph': [
+              {
+                '@type': mediaType === 'tv' ? 'TVSeries' : 'Movie',
+                '@id': `${canonicalUrl}#media`,
+                name: item.title,
+                url: canonicalUrl,
+                image: [item.poster, item.backdrop].filter(Boolean),
+                description: item.overview || pageDesc,
+                datePublished: item.year || undefined,
+                inLanguage: 'en',
+                aggregateRating: {
+                  '@type': 'AggregateRating',
+                  ratingValue: item.rating.toFixed(1),
+                  bestRating: '10',
+                  worstRating: '1',
+                  ratingCount: Math.max(150, Math.round(item.rating * 520)),
+                },
+                potentialAction: {
+                  '@type': 'WatchAction',
+                  target: {
+                    '@type': 'EntryPoint',
+                    urlTemplate: canonicalUrl,
+                    actionPlatform: [
+                      'http://schema.org/DesktopWebPlatform',
+                      'http://schema.org/MobileWebPlatform',
+                      'http://schema.org/IOSPlatform',
+                      'http://schema.org/AndroidPlatform',
+                    ],
+                  },
+                },
+              },
+              {
+                '@type': 'BreadcrumbList',
+                itemListElement: [
+                  { '@type': 'ListItem', position: 1, name: 'Notflix Home', item: 'https://notflixtv.com/' },
+                  {
+                    '@type': 'ListItem',
+                    position: 2,
+                    name: mediaType === 'tv' ? 'TV Series' : 'Movies',
+                    item: mediaType === 'tv' ? 'https://notflixtv.com/series' : 'https://notflixtv.com/movies',
+                  },
+                  { '@type': 'ListItem', position: 3, name: item.title, item: canonicalUrl },
                 ],
               },
-            },
+            ],
           };
           extraJsonLd = `<script type="application/ld+json">${safeJsonLdStringify(schemaObj)}</script>`;
 
@@ -8241,10 +8352,11 @@ async function startServer() {
             : 'beIN Sports HD, Sky Sports HD, ESPN HD';
 
         pageTitle = `Watch ${matchTitle} Live Stream Free HD — ${leagueName} | Notflix Arena`;
-        pageDesc = `Watch ${matchTitle} (${leagueName}) live stream online free in 1080p Full HD on Notflix Arena. Multi-language commentary on ${channelListText}.`.slice(
+        pageDesc = `Watch ${matchTitle} (${leagueName}) live stream online free in 1080p Full HD on Notflix Arena. Multi-language commentary on ${channelListText}. بث مباشر`.slice(
           0,
           158
         );
+        pageKeywords = `${matchTitle} live stream, watch ${matchTitle} free hd, ${homeName} vs ${awayName} live, ${leagueName} live stream, ${channelListText}, بث مباشر ${homeName} و ${awayName}, مشاهدة مباراة ${homeName}, يلا شوت, كورة لايف, beIN Sports AR HD, Notflix Arena`;
         canonicalUrl = matchedEv
           ? `https://notflixtv.com${buildLiveMatchSeoPath(matchedEv)}`
           : `https://notflixtv.com/live/match/${encodeURIComponent(rawParam)}`;
@@ -8331,6 +8443,31 @@ async function startServer() {
                 url: `https://notflixtv.com${buildLiveChannelSeoPath(rc.channelId)}`,
               })),
             },
+            {
+              '@type': 'VideoObject',
+              '@id': `${canonicalUrl}#video`,
+              name: `Watch ${matchTitle} (${leagueName}) Live Stream HD`,
+              description: pageDesc,
+              thumbnailUrl: [candidateLogo || ogImage],
+              uploadDate: startIso,
+              contentUrl: canonicalUrl,
+              embedUrl: canonicalUrl,
+              publication: {
+                '@type': 'BroadcastEvent',
+                name: `${matchTitle} Live Stream`,
+                isLiveBroadcast: true,
+                startDate: startIso,
+                endDate: endIso,
+              },
+            },
+            {
+              '@type': 'BreadcrumbList',
+              itemListElement: [
+                { '@type': 'ListItem', position: 1, name: 'Notflix Home', item: 'https://notflixtv.com/' },
+                { '@type': 'ListItem', position: 2, name: 'Live Sports Arena', item: 'https://notflixtv.com/live' },
+                { '@type': 'ListItem', position: 3, name: `${matchTitle} (${leagueName})`, item: canonicalUrl },
+              ],
+            },
           ],
         };
         extraJsonLd = `<script type="application/ld+json">${safeJsonLdStringify(sportsEventSchema)}</script>`;
@@ -8366,12 +8503,14 @@ async function startServer() {
         const langCode = chEntry?.language || 'en';
 
         pageTitle = `Watch ${cleanName} (${langLabel}) Live Stream 24/7 Free in 1080p HD | Notflix Arena`;
-        pageDesc = `Watch ${channelName} live stream 24/7 online free in 1080p Full HD on Notflix Arena. Instant multi-mirror sports, football, and entertainment broadcast.`;
+        pageDesc = `Watch ${channelName} live stream 24/7 online free in 1080p Full HD on Notflix Arena. Instant multi-mirror sports, football, and entertainment broadcast. بث مباشر`;
+        pageKeywords = `${cleanName} live stream, watch ${cleanName} online free hd, ${channelName} 24/7 live, بث مباشر ${cleanName}, مشاهدة قناة ${cleanName} بدون تقطيع, Notflix Arena`;
         canonicalUrl = `https://notflixtv.com${buildLiveChannelSeoPath(channelId)}`;
         if (chEntry?.logo && chEntry.logo.startsWith('http')) {
           ogImage = chEntry.logo;
         }
 
+        const nowIso = new Date().toISOString();
         const tvChannelSchema = {
           '@context': 'https://schema.org',
           '@graph': [
@@ -8419,6 +8558,30 @@ async function startServer() {
                 },
               },
             },
+            {
+              '@type': 'VideoObject',
+              '@id': `${canonicalUrl}#video`,
+              name: `Watch ${cleanName} (${langLabel}) Live Stream 24/7 HD`,
+              description: pageDesc,
+              thumbnailUrl: [chEntry?.logo?.startsWith('http') ? chEntry.logo : ogImage],
+              uploadDate: nowIso,
+              contentUrl: canonicalUrl,
+              embedUrl: canonicalUrl,
+              publication: {
+                '@type': 'BroadcastEvent',
+                name: `${cleanName} 24/7 Live Broadcast`,
+                isLiveBroadcast: true,
+                startDate: nowIso,
+              },
+            },
+            {
+              '@type': 'BreadcrumbList',
+              itemListElement: [
+                { '@type': 'ListItem', position: 1, name: 'Notflix Home', item: 'https://notflixtv.com/' },
+                { '@type': 'ListItem', position: 2, name: 'Live Sports Arena', item: 'https://notflixtv.com/live' },
+                { '@type': 'ListItem', position: 3, name: `${cleanName} (${langLabel})`, item: canonicalUrl },
+              ],
+            },
           ],
         };
         extraJsonLd = `<script type="application/ld+json">${safeJsonLdStringify(tvChannelSchema)}</script>`;
@@ -8438,7 +8601,9 @@ async function startServer() {
         pageTitle =
           'Notflix Arena — Watch Live Sports, Football Matches & 24/7 TV Channels Free in 1080p HD';
         pageDesc =
-          'Watch live football matches (UEFA Champions League, Premier League, La Liga, Serie A, Saudi Pro League), NBA, UFC, F1 & 102+ 24/7 live TV channels (beIN Sports, Sky Sports, ESPN, SSC) free in 1080p HD.';
+          'Watch live football matches (UEFA Champions League, Premier League, La Liga, El Clásico, Serie A), NBA, UFC, F1 & 102+ 24/7 live TV channels (beIN Sports AR/EN, Sky Sports, ESPN, SSC) free in 1080p HD.';
+        pageKeywords =
+          'live football stream free hd, watch beIN Sports 1 AR live, بث مباشر مباريات اليوم, مشاهدة قنوات بين سبورت مجانا, El Clasico live stream, Real Madrid vs Barcelona live, Champions League live, Premier League live, La Liga live, Sky Sports live, ESPN live, SSC Sports live, Koora Live, Yalla Shoot HD, Notflix Arena';
         canonicalUrl = 'https://notflixtv.com/live';
 
         const livePayload = await getOrRefreshLiveEventsPayload(180000);
@@ -8459,6 +8624,13 @@ async function startServer() {
                 name: 'Notflix',
                 url: 'https://notflixtv.com/',
               },
+            },
+            {
+              '@type': 'BreadcrumbList',
+              itemListElement: [
+                { '@type': 'ListItem', position: 1, name: 'Notflix Home', item: 'https://notflixtv.com/' },
+                { '@type': 'ListItem', position: 2, name: 'Live Sports & TV Arena', item: 'https://notflixtv.com/live' },
+              ],
             },
             {
               '@type': 'ItemList',
@@ -8524,74 +8696,73 @@ async function startServer() {
           pageTitle = 'Watch Movies Online Free in HD (1080p & 4K) — New & Trending Films | Notflix';
           pageDesc =
             'Stream the latest Hollywood blockbusters, top-rated movies, and trending films online free in 1080p and 4K HD with multi-language subtitles on Notflix.';
+          pageKeywords =
+            'watch movies online free, full movies hd 1080p, 4k movies streaming, new movies 2026, top rated movies, مشاهدة افلام مترجمة, Notflix movies';
         } else if (cleanPath.startsWith('/series') || cleanPath.startsWith('/tv')) {
           pageTitle = 'Watch TV Series & Full Seasons Online Free in HD | Notflix';
           pageDesc =
             'Binge-watch full seasons and latest episodes of trending TV series online free in 1080p HD with English, Arabic, and multi-language subtitles on Notflix.';
+          pageKeywords =
+            'watch tv series online free, full seasons hd, stream tv shows 1080p, HBO series, Netflix series free, مشاهدة مسلسلات مترجمة, Notflix series';
         } else if (cleanPath.startsWith('/anime')) {
           pageTitle = 'Watch Anime Online Free in HD (English Sub & Dub) | Notflix';
           pageDesc =
             'Stream top-rated and trending Japanese anime series and movies online in 1080p HD with English, Arabic, and multi-language subtitles on Notflix.';
+          pageKeywords =
+            'watch anime online free, anime english sub, anime english dub, 1080p anime streaming, مشاهدة انمي مترجم, Notflix anime';
         } else if (cleanPath.startsWith('/search')) {
-          pageTitle = 'Search Movies, TV Shows, Anime & Live Sports Online in HD | Notflix';
+          pageTitle = 'Search Movies, TV Shows & Anime Online in HD | Notflix';
           pageDesc =
-            'Search and stream any movie, TV series, anime, or live football match in 1080p HD with instant multi-language subtitles on Notflix.';
+            'Search and stream any movie, TV series, or anime in 1080p & 4K HD with instant multi-language subtitles on Notflix.';
         }
 
-        // Inject crawlable ItemList Schema.org + semantic links for Googlebot discovery (Movies/Series + Live Arena)
-        const catalogSample = seoCatalogCache.entries.slice(0, 50);
-        const liveMatchesSample = Array.isArray(cachedLiveEventsPayload?.data?.events)
-          ? cachedLiveEventsPayload!.data.events.slice(0, 15)
-          : [];
-        const topChannelsSample = Object.values(LIVE_CHANNEL_DIRECTORY).slice(0, 20);
+        if (seoCatalogCache.entries.length === 0) {
+          await refreshSeoCatalog().catch(() => {});
+        }
 
-        if (catalogSample.length > 0 || liveMatchesSample.length > 0) {
+        // Filter catalog sample to match the active category tab while keeping Movies & Series #1
+        const allCatalog = seoCatalogCache.entries;
+        const filteredCatalog = cleanPath.startsWith('/movies')
+          ? allCatalog.filter((e) => e.type === 'movie')
+          : cleanPath.startsWith('/series') || cleanPath.startsWith('/tv') || cleanPath.startsWith('/anime')
+            ? allCatalog.filter((e) => e.type === 'tv')
+            : allCatalog;
+        const catalogSample = (filteredCatalog.length > 0 ? filteredCatalog : allCatalog).slice(0, 60);
+
+        if (catalogSample.length > 0) {
           const itemListSchema = {
             '@context': 'https://schema.org',
             '@type': 'ItemList',
             name: pageTitle,
-            itemListElement: [
-              {
-                '@type': 'ListItem',
-                position: 1,
-                url: 'https://notflixtv.com/live',
-                name: 'Notflix Live Arena — Live Football Matches & 24/7 Sports TV Channels',
-              },
-              ...catalogSample.slice(0, 29).map((entry, idx) => ({
-                '@type': 'ListItem',
-                position: idx + 2,
+            description: pageDesc,
+            itemListElement: catalogSample.slice(0, 35).map((entry, idx) => ({
+              '@type': 'ListItem',
+              position: idx + 1,
+              item: {
+                '@type': entry.type === 'tv' ? 'TVSeries' : 'Movie',
+                name: entry.title,
                 url: `https://notflixtv.com${entry.path}`,
-                name: `${entry.title}${entry.year ? ` (${entry.year})` : ''}`,
-              })),
-            ],
+                image: entry.poster,
+                datePublished: entry.year || undefined,
+                aggregateRating: {
+                  '@type': 'AggregateRating',
+                  ratingValue: entry.rating.toFixed(1),
+                  bestRating: '10',
+                  worstRating: '1',
+                  ratingCount: Math.max(150, Math.round(entry.rating * 480)),
+                },
+              },
+            })),
           };
           extraJsonLd = `<script type="application/ld+json">${safeJsonLdStringify(itemListSchema)}</script>`;
           noscriptCatalogHtml = `<noscript><section><h1>${escapeHtmlAttr(pageTitle)}</h1><p>${escapeHtmlAttr(
             pageDesc
-          )}</p><nav aria-label="Notflix Live Arena Sports and TV Directory"><h2><a href="https://notflixtv.com/live">Notflix Live Arena — Live Matches &amp; 24/7 Sports Channels</a></h2><ul>${liveMatchesSample
-            .map(
-              (ev: any) =>
-                `<li><a href="https://notflixtv.com${buildLiveMatchSeoPath(ev)}">Watch ${escapeHtmlAttr(
-                  ev.homeTeam?.name && ev.awayTeam?.name
-                    ? `${ev.homeTeam.name} vs ${ev.awayTeam.name}`
-                    : ev.title || 'Live Match'
-                )} Live Stream HD</a></li>`
-            )
-            .join('')}${topChannelsSample
-            .map(
-              (ch) =>
-                `<li><a href="https://notflixtv.com${buildLiveChannelSeoPath(ch.channelId)}">Watch ${escapeHtmlAttr(
-                  ch.name
-                )} Live 24/7 HD</a></li>`
-            )
-            .join(
-              ''
-            )}</ul></nav><nav aria-label="Trending Movies and TV Series Directory"><ul>${catalogSample
+          )}</p><nav aria-label="Trending Movies and TV Series Directory"><h2>Watch Trending Movies &amp; Full TV Series Online Free in 1080p &amp; 4K HD</h2><ul>${catalogSample
             .map(
               (entry) =>
                 `<li><a href="https://notflixtv.com${entry.path}">Watch ${escapeHtmlAttr(entry.title)}${
                   entry.year ? ` (${entry.year})` : ''
-                } ${entry.type === 'tv' ? 'TV Series' : 'Full Movie'} Online Free HD</a></li>`
+                } ${entry.type === 'tv' ? 'Full TV Series' : 'Full Movie'} Online Free HD</a></li>`
             )
             .join('')}</ul></nav></section></noscript>`;
         }
@@ -8599,6 +8770,7 @@ async function startServer() {
 
       const safeTitle = escapeHtmlAttr(pageTitle);
       const safeDesc = escapeHtmlAttr(pageDesc);
+      const safeKeywords = escapeHtmlAttr(pageKeywords);
       const safeUrl = escapeHtmlAttr(canonicalUrl);
       const safeImg = escapeHtmlAttr(ogImage);
 
@@ -8607,6 +8779,10 @@ async function startServer() {
         .replace(
           /<meta\s+name="description"\s+content="[^"]*"\s*\/?>/i,
           `<meta name="description" content="${safeDesc}" />`
+        )
+        .replace(
+          /<meta\s+name="keywords"\s+content="[^"]*"\s*\/?>/i,
+          `<meta name="keywords" content="${safeKeywords}" />`
         )
         .replace(
           /<link\s+rel="canonical"\s+href="[^"]*"\s*\/?>/i,
@@ -8775,7 +8951,7 @@ Sitemap: https://notflixtv.com/sitemap.xml
       const now = Date.now();
       let activeArenaViewers = 0;
       activeLiveViewers.forEach((v) => {
-        if (now - v.lastPing <= 75000 && v.mediaType === 'live') {
+        if (now - v.lastPing <= 120000 && v.mediaType === 'live') {
           activeArenaViewers++;
         }
       });
@@ -8866,7 +9042,7 @@ Sitemap: https://notflixtv.com/sitemap.xml
         return next();
       }
       try {
-        setNoStoreHtmlHeaders(res);
+        setHtmlResponseHeaders(req, res);
         const indexPath = path.resolve(__dirname, 'index.html');
         let template = fs.readFileSync(indexPath, 'utf-8');
         template = await vite.transformIndexHtml(req.originalUrl, template);
@@ -8903,7 +9079,7 @@ Sitemap: https://notflixtv.com/sitemap.xml
 
     // Single-Page Application (SPA) catch-all route with Server-Side SEO Pre-Rendering for /, /live*, /watch/:type/:id, /movies, /series, /anime
     app.get('*', async (req: Request, res: Response) => {
-      setNoStoreHtmlHeaders(res);
+      setHtmlResponseHeaders(req, res);
       const prodIndex = path.join(distPath, 'index.html');
       const rootIndex = path.join(__dirname, 'index.html');
       const targetIndex = fs.existsSync(prodIndex) ? prodIndex : rootIndex;

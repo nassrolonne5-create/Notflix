@@ -514,7 +514,17 @@ export const VideoPlayerModal: React.FC = () => {
         setIsLoadingStreams(false);
         setStreamError(null);
         resumeSavedPlayback();
-        video.play().then(() => setIsPlaying(true)).catch(() => {});
+        video
+          .play()
+          .then(() => setIsPlaying(true))
+          .catch(() => {
+            video.muted = true;
+            setIsMuted(true);
+            video
+              .play()
+              .then(() => setIsPlaying(true))
+              .catch(() => {});
+          });
       });
 
       dashPlayer.on(dashjs.MediaPlayer.events.ERROR, (e: any) => {
@@ -592,9 +602,19 @@ export const VideoPlayerModal: React.FC = () => {
           video.currentTime = stream.intro.end;
         }
 
-        video.play().then(() => {
-          setIsPlaying(true);
-        }).catch(() => {});
+        video
+          .play()
+          .then(() => {
+            setIsPlaying(true);
+          })
+          .catch(() => {
+            video.muted = true;
+            setIsMuted(true);
+            video
+              .play()
+              .then(() => setIsPlaying(true))
+              .catch(() => {});
+          });
       });
 
       hls.on(Hls.Events.LEVEL_LOADED, (_event, data) => {
@@ -734,7 +754,17 @@ export const VideoPlayerModal: React.FC = () => {
           }
         }
 
-        video.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+        video
+          .play()
+          .then(() => setIsPlaying(true))
+          .catch(() => {
+            video.muted = true;
+            setIsMuted(true);
+            video
+              .play()
+              .then(() => setIsPlaying(true))
+              .catch(() => setIsPlaying(false));
+          });
       };
 
       video.addEventListener('loadedmetadata', onReady, { once: true });
@@ -777,11 +807,19 @@ export const VideoPlayerModal: React.FC = () => {
       setStreamError(null);
       resumeSavedPlayback();
 
-      video.play().then(() => {
-        setIsPlaying(true);
-      }).catch(() => {
-        setIsPlaying(false);
-      });
+      video
+        .play()
+        .then(() => {
+          setIsPlaying(true);
+        })
+        .catch(() => {
+          video.muted = true;
+          setIsMuted(true);
+          video
+            .play()
+            .then(() => setIsPlaying(true))
+            .catch(() => setIsPlaying(false));
+        });
     };
 
     video.addEventListener('loadeddata', onDirectReady, { once: true });
@@ -1834,17 +1872,36 @@ export const VideoPlayerModal: React.FC = () => {
   const currentStream = streams[activeStreamIndex];
 
   // Real Analytics Heartbeat & Smart Ad Watch Time Tracker
+  // Keeps active Movie/Series viewer presence registered continuously while VideoPlayerModal is open (including stream resolution, server switching, PiP, and background tabs)
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+
   useEffect(() => {
     smartAdController.setPlaybackActive(isPlaying);
-    if (!isPlaying || !activeModalItem) return;
+  }, [isPlaying]);
+
+  useEffect(() => {
+    if (!activeModalItem) return;
+
+    // Register viewer presence immediately when opening a Movie or Series
+    telemetry.trackHeartbeat(
+      activeModalItem,
+      isTV ? currentSeason : undefined,
+      isTV ? currentEpisode : undefined,
+      0,
+      `Server ${activeStreamIndex + 1}`
+    );
 
     const interval = setInterval(() => {
-      smartAdController.recordWatchTime(25);
+      const playingNow = isPlayingRef.current || Boolean(videoRef.current && !videoRef.current.paused);
+      if (playingNow) {
+        smartAdController.recordWatchTime(25);
+      }
       telemetry.trackHeartbeat(
         activeModalItem,
         isTV ? currentSeason : undefined,
         isTV ? currentEpisode : undefined,
-        25,
+        playingNow ? 25 : 0,
         `Server ${activeStreamIndex + 1}`
       );
     }, 25000);
@@ -1853,7 +1910,7 @@ export const VideoPlayerModal: React.FC = () => {
       clearInterval(interval);
       smartAdController.setPlaybackActive(false);
     };
-  }, [isPlaying, activeModalItem, currentSeason, currentEpisode, activeStreamIndex]);
+  }, [activeModalItem, isTV, currentSeason, currentEpisode, activeStreamIndex]);
 
   // Lock document.body scrolling while VideoPlayerModal is mounted
   useEffect(() => {

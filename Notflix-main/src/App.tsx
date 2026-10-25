@@ -136,12 +136,16 @@ const AppContent: React.FC = () => {
 
   // Dynamic SEO Title, Meta Description, OpenGraph, Twitter Cards & Schema.org JSON-LD update per view / movie
   useEffect(() => {
-    if (
-      typeof window !== 'undefined' &&
-      !activeModalItem &&
-      /^\/(live|arena)(\/|$)/i.test(window.location.pathname)
-    ) {
-      return;
+    if (typeof window !== 'undefined' && !activeModalItem) {
+      const currentPath = window.location.pathname;
+      // Preserve Live Arena SEO tags managed by LiveTvArena.tsx & server SSR
+      if (/^\/(live|arena)(\/|$)/i.test(currentPath)) {
+        return;
+      }
+      // Preserve server-rendered Movie/Series SEO tags while deep-linked /watch/:type/:id item is still fetching
+      if (/^\/watch\/(movie|tv)\/\d+/i.test(currentPath)) {
+        return;
+      }
     }
 
     let title = 'Notflix — Watch Movies, TV Series & Anime Online Free in HD';
@@ -240,7 +244,7 @@ const AppContent: React.FC = () => {
         default:
           title = 'Notflix — Watch Movies, TV Series & Anime Online Free in HD';
           desc =
-            'Stream trending movies, full TV series seasons, and anime online free in 1080p & 4K HD on Notflix with multi-language subtitles.';
+            'Stream trending movies, full TV series seasons, and anime online free in 1080p & 4K HD on Notflix with English, Arabic, Spanish & multi-language subtitles.';
           break;
       }
     }
@@ -406,8 +410,8 @@ const AppContent: React.FC = () => {
         <div className="font-display text-2xl tracking-wider text-white uppercase mb-1">
           Notflix<span className="text-blue-500">.</span>
         </div>
-        <p className="text-xs text-slate-500 max-w-md mx-auto">
-          Stream Trending Movies, Full TV Series &amp; Anime Online in 1080p &amp; 4K HD with Multi-Language Subtitles
+        <p className="text-xs text-slate-500 max-w-lg mx-auto">
+          Stream Trending Movies, Full TV Series, Anime &amp; Live Football Sports Channels Online Free in 1080p &amp; 4K HD
         </p>
         <nav
           aria-label="Streaming Categories and Sitemap"
@@ -481,6 +485,9 @@ const AppContent: React.FC = () => {
             href="/live"
             onClick={(e) => {
               e.preventDefault();
+              try {
+                window.history.pushState({ liveArena: true }, '', '/live');
+              } catch {}
               window.dispatchEvent(new CustomEvent('notflix:open-live-tv'));
             }}
             className="text-rose-400 hover:text-rose-300 font-semibold transition-colors cursor-pointer"
@@ -496,6 +503,38 @@ const AppContent: React.FC = () => {
           >
             Telegram Channel
           </a>
+        </nav>
+        <nav
+          aria-label="Popular 24/7 Live Sports Channels"
+          className="mt-2.5 flex items-center justify-center flex-wrap gap-2.5 text-[10px] text-slate-500"
+        >
+          {[
+            { id: 'bein-sports-1-ar', label: 'beIN Sports 1 AR Live' },
+            { id: 'bein-sports-2-ar', label: 'beIN Sports 2 AR Live' },
+            { id: 'bein-sports-1-en', label: 'beIN Sports 1 EN HD' },
+            { id: 'sky-sports-main-event', label: 'Sky Sports Main Event' },
+            { id: 'sky-sports-premier-league', label: 'Sky Sports Premier League' },
+            { id: 'espn-1', label: 'ESPN HD Live' },
+            { id: 'ssc-1', label: 'SSC Sports 1 HD' },
+          ].map((ch, idx) => (
+            <React.Fragment key={ch.id}>
+              {idx > 0 && <span className="text-slate-800">·</span>}
+              <a
+                href={`/live/channel/${ch.id}`}
+                onClick={(e) => {
+                  e.preventDefault();
+                  try {
+                    window.history.pushState({ liveArena: true }, '', `/live/channel/${ch.id}`);
+                    window.dispatchEvent(new PopStateEvent('popstate'));
+                  } catch {}
+                  window.dispatchEvent(new CustomEvent('notflix:open-live-tv'));
+                }}
+                className="hover:text-slate-300 transition-colors"
+              >
+                {ch.label}
+              </a>
+            </React.Fragment>
+          ))}
         </nav>
       </footer>
 
