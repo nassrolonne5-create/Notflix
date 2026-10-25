@@ -17,7 +17,7 @@ import { AdBlockerBanner } from './components/AdBlockerBanner';
 import { LiveTvArena } from './components/LiveTvArena';
 import { telemetry } from './services/telemetry';
 import { securitySentinel, PermanentBlockInfo } from './services/securitySentinel';
-import { ensurePopunderScriptLoaded } from './services/adService';
+import { ensurePopunderScriptLoaded, purgePopunderFromAdmin } from './services/adService';
 
 const checkIsAdmin = (): boolean => {
   if (typeof window === 'undefined') return false;
@@ -104,6 +104,14 @@ const AppContent: React.FC = () => {
         const next = adminState || (prev && window.location.hash.startsWith('#scraper'));
         if (typeof window !== 'undefined') {
           (window as any).__NOTFLIX_IS_ADMIN__ = next;
+          if (next) {
+            purgePopunderFromAdmin();
+            // If user navigated from a public page where popunder script was already executed in memory,
+            // reload cleanly into /admin so external ad listeners are 100% wiped from the JS runtime
+            if ((window as any).__NOTFLIX_POPUNDER_LOADED__) {
+              window.location.replace('/admin');
+            }
+          }
         }
         return next;
       });
@@ -112,11 +120,19 @@ const AppContent: React.FC = () => {
     setIsAdmin(initialAdmin);
     if (typeof window !== 'undefined') {
       (window as any).__NOTFLIX_IS_ADMIN__ = initialAdmin;
+      if (initialAdmin) {
+        purgePopunderFromAdmin();
+      }
     }
 
     const handleOpenAdmin = () => {
-      window.history.pushState({}, '', '/admin');
       (window as any).__NOTFLIX_IS_ADMIN__ = true;
+      purgePopunderFromAdmin();
+      if ((window as any).__NOTFLIX_POPUNDER_LOADED__) {
+        window.location.replace('/admin');
+        return;
+      }
+      window.history.pushState({}, '', '/admin');
       setIsAdmin(true);
     };
 

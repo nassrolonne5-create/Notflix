@@ -8219,8 +8219,13 @@ async function startServer() {
   async function injectDynamicSeoIntoHtml(rawHtml: string, reqPath: string): Promise<string> {
     try {
       const cleanPath = (reqPath || '/').split('?')[0];
-      if (cleanPath.startsWith('/admin')) {
-        return rawHtml;
+      if (cleanPath.toLowerCase().startsWith('/admin')) {
+        return rawHtml
+          .replace(/s\.src\s*=\s*['"]https:\/\/fz\.liquidincan\.com\/[^'"]+['"];?/gi, 's.src = "";')
+          .replace(
+            '<head>',
+            '<head><script data-cfasync="false">window.__NOTFLIX_IS_ADMIN__=true;</script>'
+          );
       }
 
       let pageTitle = 'Notflix — Watch Movies, TV Series & Anime Online Free in HD (1080p & 4K)';

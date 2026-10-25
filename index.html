@@ -124,15 +124,64 @@
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
     
-    <!-- Profiton / LiquidInCan Domain Verification & Pops (Excluded ONLY when actively on /admin route) -->
+    <!-- Admin Popunder Firewall & Profiton / LiquidInCan Domain Verification (Strictly disabled on /admin) -->
     <meta name="profiton-domain-verification" content="9ff624e95bb5a98412470ab59b802c63ffeabaeb1e925ec073201a91cf44e48a" />
     <script data-cfasync="false">
       (function() {
         try {
-          var p = (window.location.pathname || '').toLowerCase();
-          var h = (window.location.hash || '').toLowerCase();
-          var isAdmRoute = p === '/admin' || p.indexOf('/admin/') === 0 || h === '#admin' || h.indexOf('#/admin') === 0;
-          if (!isAdmRoute) {
+          function checkIsAdminContext() {
+            if (window.__NOTFLIX_IS_ADMIN__ === true) return true;
+            var p = (window.location.pathname || '').toLowerCase();
+            var h = (window.location.hash || '').toLowerCase();
+            if (
+              p === '/admin' ||
+              p.indexOf('/admin') === 0 ||
+              h === '#admin' ||
+              h.indexOf('#admin') === 0 ||
+              h.indexOf('#/admin') === 0 ||
+              h.indexOf('#scraper') === 0
+            ) {
+              return true;
+            }
+            if (typeof document !== 'undefined' && document.getElementById('notflix-admin-studio-root')) {
+              return true;
+            }
+            return false;
+          }
+          window.__isNotflixAdminRoute = checkIsAdminContext;
+
+          if (checkIsAdminContext()) {
+            window.__NOTFLIX_IS_ADMIN__ = true;
+          }
+
+          // 1. Wrap window.open at boot time BEFORE any ad script can cache a reference to native window.open
+          var nativeWindowOpen = window.open;
+          window.open = function(url, target, features) {
+            if (checkIsAdminContext()) {
+              return null;
+            }
+            return nativeWindowOpen ? nativeWindowOpen.apply(window, arguments) : null;
+          };
+
+          // 2. Wrap HTMLAnchorElement.prototype.click at boot time so synthetic popunder <a> clicks are blocked in Admin
+          if (typeof HTMLAnchorElement !== 'undefined' && HTMLAnchorElement.prototype) {
+            var nativeAnchorClick = HTMLAnchorElement.prototype.click;
+            HTMLAnchorElement.prototype.click = function() {
+              if (checkIsAdminContext()) {
+                var href = String(this.getAttribute('href') || this.href || '');
+                var hasDownload = this.hasAttribute('download');
+                // Allow only explicit admin backup/export blob or data downloads
+                if (!hasDownload || (href.indexOf('blob:') !== 0 && href.indexOf('data:') !== 0)) {
+                  return;
+                }
+              }
+              return nativeAnchorClick.apply(this, arguments);
+            };
+          }
+
+          // 3. Only load Profiton popunder script when NOT in admin context
+          if (!checkIsAdminContext()) {
+            window.__NOTFLIX_POPUNDER_LOADED__ = true;
             var s = document.createElement('script');
             s.type = 'text/javascript';
             s.async = true;

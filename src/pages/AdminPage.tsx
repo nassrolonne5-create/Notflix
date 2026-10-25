@@ -36,6 +36,7 @@ import {
   Trophy,
 } from 'lucide-react';
 import { smartAdController, SmartAdMetrics } from '../services/smartAdController';
+import { purgePopunderFromAdmin } from '../services/adService';
 
 interface AdminPageProps {
   onExit: () => void;
@@ -249,48 +250,66 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     // Flag admin as active globally so adService and any other services strictly bypass
     (window as any).__NOTFLIX_IS_ADMIN__ = true;
 
-    // Remove any monetization scripts if they exist in DOM
-    const removeAdScripts = () => {
-      const scriptIds = ['notflix-monetization-script', 'profiton-pops-script'];
-      scriptIds.forEach((id) => {
-        const el = document.getElementById(id);
-        if (el) {
-          try { el.remove(); } catch {}
-        }
-      });
+    // If the Profiton popunder script was already executed in memory during earlier public browsing in this tab,
+    // perform a clean hard navigation to /admin so the JS context starts 100% clean with zero ad listeners
+    if ((window as any).__NOTFLIX_POPUNDER_LOADED__) {
+      (window as any).__NOTFLIX_POPUNDER_LOADED__ = false;
+      window.location.replace('/admin');
+      return;
+    }
 
-      // Remove any tags matching liquidincan or debitsikatch ad network patterns
-      document.querySelectorAll('script[src*="liquidincan"], script[src*="debitsikatch"]').forEach((s) => {
-        try { s.remove(); } catch {}
-      });
-    };
+    // Purge any ad script tags, external iframes, or invisible click overlays
+    purgePopunderFromAdmin();
 
-    removeAdScripts();
+    // Watch DOM for any dynamically injected popunder scripts, iframes, or invisible overlays outside #root
+    let observer: MutationObserver | null = null;
+    try {
+      observer = new MutationObserver(() => {
+        purgePopunderFromAdmin();
+      });
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+    } catch {}
 
     // Disarm window.open inside admin dashboard
     const origWindowOpen = window.open;
-    window.open = function (...args: any[]) {
-      console.log('🛡️ Pop blocked in admin dashboard:', args[0]);
+    window.open = function () {
       return null;
     };
 
-    // Block any external click listeners from firing popups in admin dashboard
-    const handleAdminClickCapture = (e: MouseEvent) => {
+    // Block any external click / mousedown / pointerdown / touchstart listeners from firing popunders in admin dashboard
+    const handleAdminClickCapture = (e: Event) => {
       const target = e.target as HTMLElement | null;
-      if (target && target.tagName === 'A' && (target as HTMLAnchorElement).target === '_blank') {
-        const href = (target as HTMLAnchorElement).href;
-        if (href && (href.includes('liquidincan') || href.includes('debitsikatch'))) {
+      if (!target) return;
+      const anchor = target.closest ? (target.closest('a') as HTMLAnchorElement | null) : null;
+      if (anchor) {
+        const href = String(anchor.getAttribute('href') || anchor.href || '');
+        const isFirstPartyLink =
+          href.startsWith('/') ||
+          href.startsWith('#') ||
+          href.startsWith('blob:') ||
+          href.startsWith('data:') ||
+          href.includes('notflixtv.com') ||
+          href.includes(window.location.host);
+        if (!isFirstPartyLink || !document.getElementById('root')?.contains(anchor)) {
           e.preventDefault();
           e.stopPropagation();
+          e.stopImmediatePropagation();
         }
       }
     };
-    document.addEventListener('click', handleAdminClickCapture, true);
+    window.addEventListener('click', handleAdminClickCapture, true);
+    window.addEventListener('mousedown', handleAdminClickCapture, true);
+    window.addEventListener('pointerdown', handleAdminClickCapture, true);
+    window.addEventListener('touchstart', handleAdminClickCapture, true);
 
     return () => {
       (window as any).__NOTFLIX_IS_ADMIN__ = false;
       window.open = origWindowOpen;
-      document.removeEventListener('click', handleAdminClickCapture, true);
+      if (observer) observer.disconnect();
+      window.removeEventListener('click', handleAdminClickCapture, true);
+      window.removeEventListener('mousedown', handleAdminClickCapture, true);
+      window.removeEventListener('pointerdown', handleAdminClickCapture, true);
+      window.removeEventListener('touchstart', handleAdminClickCapture, true);
     };
   }, []);
 
@@ -1592,7 +1611,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
   // -------------------------------------------------------------
   if (isVerifying) {
     return (
-      <div className="min-h-screen bg-[#080c14] text-white flex items-center justify-center">
+      <div id="notflix-admin-studio-root" className="min-h-screen bg-[#080c14] text-white flex items-center justify-center">
         <div className="flex flex-col items-center gap-3">
           <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
           <p className="text-xs text-slate-400 font-mono tracking-widest uppercase">
@@ -1608,7 +1627,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
   // -------------------------------------------------------------
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-[#080c14] text-white flex flex-col justify-center items-center p-4 relative overflow-hidden selection:bg-blue-600">
+      <div id="notflix-admin-studio-root" className="min-h-screen bg-[#080c14] text-white flex flex-col justify-center items-center p-4 relative overflow-hidden selection:bg-blue-600">
         {/* Ambient background glow */}
         <div className="absolute top-1/4 -left-32 w-96 h-96 bg-blue-600/10 rounded-full blur-3xl pointer-events-none" />
         <div className="absolute bottom-1/4 -right-32 w-96 h-96 bg-rose-600/10 rounded-full blur-3xl pointer-events-none" />
@@ -1747,7 +1766,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
   const maxViews = Math.max(...timelinePoints.map((p) => Number(p?.views) || 0), 1);
 
   return (
-    <div className="min-h-screen bg-[#080c14] text-white flex flex-col font-sans selection:bg-blue-600 selection:text-white">
+    <div id="notflix-admin-studio-root" className="min-h-screen bg-[#080c14] text-white flex flex-col font-sans selection:bg-blue-600 selection:text-white">
       {/* =========================================================
           Compact Single-Row Top Studio Header
          ========================================================= */}

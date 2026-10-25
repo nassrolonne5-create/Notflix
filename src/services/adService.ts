@@ -90,17 +90,76 @@ export const POPUNDER_SCRIPT_SRC = 'https://fz.liquidincan.com/r3VQROCRTG0zM/156
 export function isAdminActive(): boolean {
   if (typeof window === 'undefined') return false;
   if ((window as any).__NOTFLIX_IS_ADMIN__ === true) return true;
+  if (typeof (window as any).__isNotflixAdminRoute === 'function' && (window as any).__isNotflixAdminRoute()) {
+    return true;
+  }
   const path = (window.location.pathname || '').toLowerCase();
   const hash = (window.location.hash || '').toLowerCase();
   if (
     path === '/admin' ||
-    path.startsWith('/admin/') ||
+    path.startsWith('/admin') ||
     hash === '#admin' ||
-    hash.startsWith('#/admin')
+    hash.startsWith('#admin') ||
+    hash === '#/admin' ||
+    hash.startsWith('#/admin') ||
+    hash.startsWith('#scraper')
   ) {
     return true;
   }
+  if (typeof document !== 'undefined' && document.getElementById('notflix-admin-studio-root')) {
+    return true;
+  }
   return false;
+}
+
+/**
+ * Removes any popunder script tags, external ad iframes, or invisible full-screen click overlays
+ * injected outside #root whenever the Admin Dashboard is active.
+ */
+export function purgePopunderFromAdmin(): void {
+  if (typeof document === 'undefined') return;
+  try {
+    const scriptIds = ['notflix-monetization-script', POPUNDER_SCRIPT_ID];
+    scriptIds.forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.remove();
+    });
+
+    document
+      .querySelectorAll(
+        'script[src*="liquidincan"], script[src*="debitsikatch"], iframe[src*="liquidincan"], iframe[src*="debitsikatch"]'
+      )
+      .forEach((el) => {
+        try {
+          el.remove();
+        } catch {}
+      });
+
+    // Remove any invisible overlay <a>, <div>, or <iframe> injected directly under <body> or <html> outside #root
+    const rootEl = document.getElementById('root');
+    if (document.body) {
+      Array.from(document.body.children).forEach((child) => {
+        if (child === rootEl || child.tagName === 'SCRIPT' || child.tagName === 'NOSCRIPT') return;
+        const tag = child.tagName;
+        if (tag === 'IFRAME' || tag === 'A') {
+          try {
+            child.remove();
+          } catch {}
+          return;
+        }
+        try {
+          const style = window.getComputedStyle(child as HTMLElement);
+          const zIndex = parseInt(style.zIndex || '0', 10);
+          if (
+            (style.position === 'fixed' || style.position === 'absolute') &&
+            (zIndex > 9999 || parseFloat(style.opacity || '1') < 0.05)
+          ) {
+            child.remove();
+          }
+        } catch {}
+      });
+    }
+  } catch {}
 }
 
 /**
@@ -109,14 +168,21 @@ export function isAdminActive(): boolean {
  */
 export function ensurePopunderScriptLoaded(): void {
   if (typeof window === 'undefined' || typeof document === 'undefined') return;
-  if (isAdminActive()) return;
+  if (isAdminActive()) {
+    purgePopunderFromAdmin();
+    return;
+  }
 
   try {
     const existing =
       document.getElementById(POPUNDER_SCRIPT_ID) ||
       document.querySelector('script[src*="liquidincan.com/r3VQROCRTG0zM/156800"]');
-    if (existing) return;
+    if (existing) {
+      (window as any).__NOTFLIX_POPUNDER_LOADED__ = true;
+      return;
+    }
 
+    (window as any).__NOTFLIX_POPUNDER_LOADED__ = true;
     const s = document.createElement('script');
     s.type = 'text/javascript';
     s.async = true;
@@ -133,8 +199,14 @@ if (typeof window !== 'undefined') {
   if (!(window as any)._notflixAdPacingState) {
     (window as any)._notflixAdPacingState = getInitialAdPacingState();
   }
-  // Ensure popunder tag is active on public pages
-  setTimeout(ensurePopunderScriptLoaded, 300);
+  // Ensure popunder tag is active ONLY on public pages
+  setTimeout(() => {
+    if (!isAdminActive()) {
+      ensurePopunderScriptLoaded();
+    } else {
+      purgePopunderFromAdmin();
+    }
+  }, 300);
 }
 
 import { smartAdController } from './smartAdController';
