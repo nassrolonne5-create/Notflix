@@ -4,6 +4,7 @@ import {
   Tv,
   Trophy,
   Play,
+  Pause,
   Volume2,
   VolumeX,
   Maximize2,
@@ -21,88 +22,21 @@ import {
 } from 'lucide-react';
 import { telemetry } from '../services/telemetry';
 
-interface BroadcastAudioGraph {
-  ctx: AudioContext;
-  source: MediaElementAudioSourceNode;
-  cleanGain: GainNode;
-  bypassGain: GainNode;
-}
-
-const videoAudioGraphMap = new WeakMap<HTMLVideoElement, BroadcastAudioGraph>();
-
+// IMPORTANT: Never call AudioContext.createMediaElementSource(video) on the live <video> element!
+// On Android Chrome and iOS Safari, createMediaElementSource detaches the <video> from the native OS
+// MediaSession hardware audio pipeline and routes it into Web Audio, which the mobile OS immediately
+// suspends whenever the user switches to another app or locks the phone screen.
 function attachOrUpdateBroadcastAudioFilter(
   video: HTMLVideoElement | null,
   enableCleanAudio: boolean
 ): void {
   if (!video || typeof window === 'undefined') return;
   try {
-    let graph = videoAudioGraphMap.get(video);
-    if (!graph) {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioCtx) return;
-      const ctx: AudioContext = new AudioCtx();
-      const source = ctx.createMediaElementSource(video);
-
-      // 1. Pre-gain headroom (-2.2 dB) to prevent over-driven satellite feed clipping
-      const preGain = ctx.createGain();
-      preGain.gain.value = 0.78;
-
-      // 2. High-Pass Filter (95 Hz) to strip 50/60Hz satellite ground-loop hum & stadium rumble
-      const highPass = ctx.createBiquadFilter();
-      highPass.type = 'highpass';
-      highPass.frequency.value = 95;
-      highPass.Q.value = 0.707;
-
-      // 3. Peaking De-Harshness Filter (3.3 kHz, -4.5 dB) to tame clipped commentator mic distortion
-      const deHarsh = ctx.createBiquadFilter();
-      deHarsh.type = 'peaking';
-      deHarsh.frequency.value = 3300;
-      deHarsh.Q.value = 1.5;
-      deHarsh.gain.value = -4.5;
-
-      // 4. Low-Pass De-Hiss Filter (9.2 kHz) to remove high-frequency AAC quantization static/hiss
-      const deHiss = ctx.createBiquadFilter();
-      deHiss.type = 'lowpass';
-      deHiss.frequency.value = 9200;
-      deHiss.Q.value = 0.707;
-
-      // 5. Broadcast Dynamics Compressor to level out sudden commentator shouts & crowd spikes
-      const compressor = ctx.createDynamicsCompressor();
-      compressor.threshold.value = -22;
-      compressor.knee.value = 20;
-      compressor.ratio.value = 5;
-      compressor.attack.value = 0.003;
-      compressor.release.value = 0.22;
-
-      const cleanGain = ctx.createGain();
-      const bypassGain = ctx.createGain();
-
-      // Clean DSP path
-      source.connect(preGain);
-      preGain.connect(highPass);
-      highPass.connect(deHarsh);
-      deHarsh.connect(deHiss);
-      deHiss.connect(compressor);
-      compressor.connect(cleanGain);
-      cleanGain.connect(ctx.destination);
-
-      // Raw Bypass path
-      source.connect(bypassGain);
-      bypassGain.connect(ctx.destination);
-
-      graph = { ctx, source, cleanGain, bypassGain };
-      videoAudioGraphMap.set(video, graph);
+    if (!video.muted) {
+      // Apply headroom leveling natively on the hardware media element (-0.7 dB clean headroom vs 0 dB raw)
+      video.volume = enableCleanAudio ? 0.92 : 1.0;
     }
-
-    if (graph.ctx.state === 'suspended') {
-      graph.ctx.resume().catch(() => {});
-    }
-
-    graph.cleanGain.gain.setTargetAtTime(enableCleanAudio ? 1 : 0, graph.ctx.currentTime, 0.02);
-    graph.bypassGain.gain.setTargetAtTime(enableCleanAudio ? 0 : 1, graph.ctx.currentTime, 0.02);
-  } catch {
-    // Fallback gracefully to native video audio if Web Audio API is restricted
-  }
+  } catch {}
 }
 
 function unlockAndUnmuteVideoAudio(
@@ -113,14 +47,7 @@ function unlockAndUnmuteVideoAudio(
   try {
     video.defaultMuted = false;
     video.muted = false;
-    if (video.volume === 0) {
-      video.volume = 1;
-    }
-    attachOrUpdateBroadcastAudioFilter(video, enableCleanAudio);
-    const graph = videoAudioGraphMap.get(video);
-    if (graph && graph.ctx.state === 'suspended') {
-      graph.ctx.resume().catch(() => {});
-    }
+    video.volume = enableCleanAudio ? 0.92 : 1.0;
   } catch {}
 }
 
@@ -503,7 +430,7 @@ export const LiveTvArena: React.FC = () => {
   const [isVideoBuffering, setIsVideoBuffering] = useState<boolean>(false);
   const [bufferingLogoFailed, setBufferingLogoFailed] = useState<boolean>(false);
   const [streamError, setStreamError] = useState<string | null>(null);
-  const [, setIsPlaying] = useState<boolean>(false);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [isAudioCleanEnabled, setIsAudioCleanEnabled] = useState<boolean>(true);
   const [isPipActive, setIsPipActive] = useState<boolean>(false);
@@ -529,8 +456,16 @@ export const LiveTvArena: React.FC = () => {
   const userPausedRef = useRef<boolean>(false);
   const userMutedRef = useRef<boolean>(false);
   const wakeLockRef = useRef<any>(null);
+  const activeChannelRef = useRef<LiveChannel | null>(null);
+  const isBackgroundPlayEnabledRef = useRef<boolean>(isBackgroundPlayEnabled);
+  const resumeTimersRef = useRef<number[]>([]);
 
   useEffect(() => {
+    activeChannelRef.current = activeChannel;
+  }, [activeChannel]);
+
+  useEffect(() => {
+    isBackgroundPlayEnabledRef.current = isBackgroundPlayEnabled;
     try {
       localStorage.setItem('notflix_live_bg_play', isBackgroundPlayEnabled ? 'true' : 'false');
     } catch {}
@@ -538,8 +473,67 @@ export const LiveTvArena: React.FC = () => {
     if (v) {
       v.autoPictureInPicture = isBackgroundPlayEnabled;
       v.disablePictureInPicture = false;
+      if (isBackgroundPlayEnabled) {
+        v.setAttribute('autopictureinpicture', 'true');
+        v.removeAttribute('disablepictureinpicture');
+      } else {
+        v.removeAttribute('autopictureinpicture');
+      }
     }
   }, [isBackgroundPlayEnabled]);
+
+  const clearResumeTimers = useCallback(() => {
+    resumeTimersRef.current.forEach((id) => window.clearTimeout(id));
+    resumeTimersRef.current = [];
+  }, []);
+
+  // Multi-stage persistent playback resumption:
+  // When Android/iOS pauses the <video> during app-switching, screen-locking (verrouillage), or leaving PiP,
+  // retry video.play() immediately and at staggered intervals (35ms..2200ms) after the OS surface transition finishes.
+  const resumePlaybackPersistently = useCallback(() => {
+    if (
+      userPausedRef.current ||
+      !activeChannelRef.current ||
+      !isBackgroundPlayEnabledRef.current
+    ) {
+      return;
+    }
+    clearResumeTimers();
+
+    const attemptPlay = () => {
+      const v = videoRef.current;
+      if (
+        !v ||
+        userPausedRef.current ||
+        !activeChannelRef.current ||
+        !isBackgroundPlayEnabledRef.current
+      ) {
+        return;
+      }
+      if (!userMutedRef.current && v.muted) {
+        v.muted = false;
+        if (v.volume === 0) v.volume = 1;
+      }
+      if (v.paused && !v.ended) {
+        v.play()
+          .then(() => {
+            setIsPlaying(true);
+          })
+          .catch(() => {});
+      }
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        try {
+          navigator.mediaSession.playbackState = 'playing';
+        } catch {}
+      }
+    };
+
+    attemptPlay();
+    for (const delayMs of [35, 110, 260, 550, 1100, 2200]) {
+      const tid = window.setTimeout(attemptPlay, delayMs);
+      resumeTimersRef.current.push(tid);
+    }
+  }, [clearResumeTimers]);
 
   useEffect(() => {
     setBufferingLogoFailed(false);
@@ -551,20 +545,19 @@ export const LiveTvArena: React.FC = () => {
     }
   }, [activeChannel?.id, activeChannel?.logo]);
 
-  // Ensure Web Audio graph is immediately resumed on any pointer/touch/key interaction if browser suspended it
+  // Ensure native video audio is immediately unmuted on any pointer/touch/key interaction if browser restricted initial autoplay
   useEffect(() => {
     if (!activeChannel || typeof window === 'undefined') return;
     const resumeAudioOnGesture = () => {
       const v = videoRef.current;
       if (!v) return;
-      const graph = videoAudioGraphMap.get(v);
-      if (graph && graph.ctx.state === 'suspended') {
-        graph.ctx.resume().catch(() => {});
-      }
       if (!userMutedRef.current && v.muted) {
         v.muted = false;
-        if (v.volume === 0) v.volume = 1;
+        if (v.volume === 0) v.volume = isAudioCleanEnabled ? 0.92 : 1.0;
         setIsMuted(false);
+      }
+      if (!userPausedRef.current && v.paused) {
+        v.play().catch(() => {});
       }
     };
     window.addEventListener('pointerdown', resumeAudioOnGesture, { passive: true });
@@ -573,7 +566,7 @@ export const LiveTvArena: React.FC = () => {
       window.removeEventListener('pointerdown', resumeAudioOnGesture);
       window.removeEventListener('keydown', resumeAudioOnGesture);
     };
-  }, [activeChannel]);
+  }, [activeChannel, isAudioCleanEnabled]);
 
   const handleVideoWaiting = useCallback(() => {
     if (bufferingTimerRef.current !== null) {
@@ -590,14 +583,13 @@ export const LiveTvArena: React.FC = () => {
       bufferingTimerRef.current = null;
     }
     userPausedRef.current = false;
+    setIsPlaying(true);
     setIsVideoBuffering(false);
     setLoadingStream(false);
-    const v = videoRef.current;
+    const v = videoRef.current as any;
     if (v) {
-      const graph = videoAudioGraphMap.get(v);
-      if (graph && graph.ctx.state === 'suspended') {
-        graph.ctx.resume().catch(() => {});
-      }
+      v.autoPictureInPicture = isBackgroundPlayEnabledRef.current;
+      v.disablePictureInPicture = false;
       if (!userMutedRef.current && v.muted) {
         v.muted = false;
         if (v.volume === 0) v.volume = 1;
@@ -618,63 +610,57 @@ export const LiveTvArena: React.FC = () => {
     setIsMuted(effectivelyMuted);
     if (!effectivelyMuted) {
       userMutedRef.current = false;
-      const graph = videoAudioGraphMap.get(v);
-      if (graph && graph.ctx.state === 'suspended') {
-        graph.ctx.resume().catch(() => {});
-      }
     }
   }, []);
 
   const handleVideoPause = useCallback(() => {
     const v = videoRef.current;
     if (!v) return;
-    // If the browser automatically paused the video because the tab was hidden or phone screen locked,
-    // immediately resume playback when Background Play is enabled!
-    if (document.hidden && isBackgroundPlayEnabled && activeChannel && !userPausedRef.current) {
-      const graph = videoAudioGraphMap.get(v);
-      if (graph && graph.ctx.state === 'suspended') {
-        graph.ctx.resume().catch(() => {});
-      }
-      v.play().catch(() => {});
+    // IMPORTANT: Never set userPausedRef.current = true inside onPause!
+    // On Android & iOS, switching to another app or locking the phone screen fires video.onpause
+    // BEFORE document.hidden becomes true. If Background Play is enabled and the user did not
+    // explicitly pause via our Play/Pause button or lock-screen controls, immediately resume playback!
+    if (
+      isBackgroundPlayEnabledRef.current &&
+      activeChannelRef.current &&
+      !userPausedRef.current &&
+      !v.ended
+    ) {
+      resumePlaybackPersistently();
       return;
     }
-    if (!document.hidden && !v.ended && !loadingStream) {
-      userPausedRef.current = true;
+    if (userPausedRef.current) {
+      setIsPlaying(false);
       if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
         try {
           navigator.mediaSession.playbackState = 'paused';
         } catch {}
       }
     }
-  }, [isBackgroundPlayEnabled, activeChannel, loadingStream]);
+  }, [resumePlaybackPersistently]);
 
-  // Mount the single persistent <video> element into whichever container slot is currently active (Full Arena, Mini-Player, or Hidden Background Parking)
-  // so minimizing, expanding, entering PiP, or locking the screen NEVER unmounts the video or restarts the HLS stream
+  // Mount the single persistent <video> element into whichever container slot is currently active (Full Arena, Mini-Player, or In-Viewport Background Parking)
+  // Do NOT move the <video> inside a cleanup function on activeChannel metadata updates, as DOM reparenting pauses playback and exits PiP!
+  const hasActiveChannel = Boolean(activeChannel);
   useEffect(() => {
     const video = videoRef.current;
     const parking = bgVideoParkingRef.current;
     if (!video || !parking) return;
 
     const targetHost =
-      isArenaOpen && activeChannel && arenaVideoSlotRef.current
+      isArenaOpen && hasActiveChannel && arenaVideoSlotRef.current
         ? arenaVideoSlotRef.current
-        : !isArenaOpen && isMiniPlayerMode && activeChannel && miniVideoSlotRef.current
+        : !isArenaOpen && isMiniPlayerMode && hasActiveChannel && miniVideoSlotRef.current
         ? miniVideoSlotRef.current
         : parking;
 
     if (video.parentElement !== targetHost) {
       targetHost.appendChild(video);
-      if (activeChannel && video.paused && !userPausedRef.current) {
+      if (hasActiveChannel && video.paused && !userPausedRef.current) {
         video.play().catch(() => {});
       }
     }
-
-    return () => {
-      if (parking && video.parentElement !== parking) {
-        parking.appendChild(video);
-      }
-    };
-  }, [isArenaOpen, isMiniPlayerMode, activeChannel]);
+  }, [isArenaOpen, isMiniPlayerMode, hasActiveChannel]);
 
   const activeChannelLogo = useMemo(() => {
     if (!activeChannel) return '';
@@ -1294,16 +1280,24 @@ export const LiveTvArena: React.FC = () => {
       }
     }, 22000);
 
-    if (Hls.isSupported()) {
+    const isIosDevice =
+      typeof navigator !== 'undefined' &&
+      (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
+        (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+    const canPlayNativeHls = Boolean(video.canPlayType('application/vnd.apple.mpegurl'));
+
+    const startHlsJsPlayback = () => {
+      if (!Hls.isSupported()) return false;
       const hls = new Hls({
-        enableWorker: true,
-        lowLatencyMode: false, // Keep false for 1080p stability on mobile 4G
-        backBufferLength: 60,
+        // Keep enableWorker: false so HLS demuxing runs on the active media-exempt main thread
+        // and is never throttled or suspended by Android/iOS when the screen is locked or app is backgrounded
+        enableWorker: false,
+        lowLatencyMode: false,
+        backBufferLength: 30,
         maxBufferLength: 45,
         maxMaxBufferLength: 90,
         liveSyncDurationCount: 3,
         liveMaxLatencyDurationCount: 10,
-        // Built-in automatic retries before firing a fatal error
         manifestLoadingTimeOut: 15000,
         manifestLoadingMaxRetry: 6,
         manifestLoadingRetryDelay: 1000,
@@ -1339,11 +1333,9 @@ export const LiveTvArena: React.FC = () => {
             attachOrUpdateBroadcastAudioFilter(video, isAudioCleanEnabled);
           })
           .catch((err: any) => {
-            // Ignore AbortError caused by source switching or initial segment buffering
             if (err?.name === 'AbortError') {
               return;
             }
-            // Only fall back to muted playback if the browser strictly rejected unmuted autoplay (NotAllowedError)
             if (err?.name === 'NotAllowedError') {
               video.muted = true;
               setIsMuted(true);
@@ -1353,7 +1345,6 @@ export const LiveTvArena: React.FC = () => {
       });
 
       hls.on(Hls.Events.FRAG_LOADED, () => {
-        // Reset error counter whenever a video segment loads successfully
         recoveryAttempts = 0;
         if (!playbackStarted) {
           playbackStarted = true;
@@ -1378,12 +1369,11 @@ export const LiveTvArena: React.FC = () => {
       });
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (!data.fatal) return; // Ignore non-fatal warnings!
+        if (!data.fatal) return;
 
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
           if (recoveryAttempts < 5) {
             recoveryAttempts++;
-            console.log(`Auto-recovering stream network hiccup (${recoveryAttempts}/5)...`);
             if (recoveryTimeoutId !== null) {
               window.clearTimeout(recoveryTimeoutId);
             }
@@ -1392,7 +1382,7 @@ export const LiveTvArena: React.FC = () => {
                 hls.startLoad();
               }
             }, 1000);
-            return; // Do NOT show the "Signal interrupted / Retry" screen yet
+            return;
           }
         } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
           if (recoveryAttempts < 3) {
@@ -1402,10 +1392,14 @@ export const LiveTvArena: React.FC = () => {
           }
         }
 
-        // Only show the "Retry Signal" UI if 5 consecutive auto-recoveries failed
         showSignalInterruptedOverlay();
       });
-    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      return true;
+    };
+
+    // On iOS/iPadOS, prefer native AVPlayer HLS over ManagedMediaSource so lock-screen audio
+    // and automatic OS Picture-in-Picture work natively when switching apps or locking the phone
+    if ((isIosDevice && canPlayNativeHls) || (!Hls.isSupported() && canPlayNativeHls)) {
       video.src = playUrl;
       video.addEventListener(
         'loadedmetadata',
@@ -1437,10 +1431,15 @@ export const LiveTvArena: React.FC = () => {
       video.addEventListener(
         'error',
         () => {
+          if (!playbackStarted && startHlsJsPlayback()) {
+            return;
+          }
           showSignalInterruptedOverlay();
         },
         { once: true }
       );
+    } else {
+      startHlsJsPlayback();
     }
 
     return () => {
@@ -1456,13 +1455,14 @@ export const LiveTvArena: React.FC = () => {
   }, [sources, activeSourceIndex, usingFallbackProxy, Boolean(activeChannel)]);
 
   useEffect(() => {
-    if (videoRef.current && (activeChannel || videoAudioGraphMap.has(videoRef.current))) {
+    if (videoRef.current && activeChannel) {
       attachOrUpdateBroadcastAudioFilter(videoRef.current, isAudioCleanEnabled);
     }
   }, [isAudioCleanEnabled, activeChannel]);
 
   const stopLiveStream = useCallback(() => {
     userPausedRef.current = true;
+    clearResumeTimers();
     if (typeof document !== 'undefined' && document.pictureInPictureElement) {
       document.exitPictureInPicture().catch(() => {});
     }
@@ -1487,7 +1487,37 @@ export const LiveTvArena: React.FC = () => {
     setSources([]);
     setIsPlaying(false);
     setIsMiniPlayerMode(false);
-  }, []);
+  }, [clearResumeTimers]);
+
+  const togglePlayPause = useCallback(() => {
+    const v = videoRef.current;
+    if (!v || !activeChannelRef.current) return;
+    if (v.paused || userPausedRef.current) {
+      userPausedRef.current = false;
+      if (!userMutedRef.current && v.muted) {
+        v.muted = false;
+        setIsMuted(false);
+      }
+      v.play()
+        .then(() => setIsPlaying(true))
+        .catch(() => {});
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        try {
+          navigator.mediaSession.playbackState = 'playing';
+        } catch {}
+      }
+    } else {
+      userPausedRef.current = true;
+      clearResumeTimers();
+      v.pause();
+      setIsPlaying(false);
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        try {
+          navigator.mediaSession.playbackState = 'paused';
+        } catch {}
+      }
+    }
+  }, [clearResumeTimers]);
 
   const togglePictureInPicture = useCallback(async () => {
     const video = videoRef.current as any;
@@ -1511,15 +1541,20 @@ export const LiveTvArena: React.FC = () => {
         document.pictureInPictureEnabled &&
         typeof video.requestPictureInPicture === 'function'
       ) {
+        // Call requestPictureInPicture synchronously BEFORE any await so transient user activation is never lost
+        const pipPromise = video.requestPictureInPicture();
         if (video.paused && !userPausedRef.current) {
-          await video.play().catch(() => {});
+          video.play().catch(() => {});
         }
-        await video.requestPictureInPicture();
+        await pipPromise;
         setIsPipActive(true);
         return;
       }
       if (typeof video.webkitSetPresentationMode === 'function') {
         video.webkitSetPresentationMode('picture-in-picture');
+        if (video.paused && !userPausedRef.current) {
+          video.play().catch(() => {});
+        }
         setIsPipActive(true);
         return;
       }
@@ -1539,18 +1574,25 @@ export const LiveTvArena: React.FC = () => {
     const video = videoRef.current as any;
     if (!video) return;
 
-    const onEnterPip = () => setIsPipActive(true);
+    const onEnterPip = () => {
+      setIsPipActive(true);
+      if (activeChannelRef.current && !userPausedRef.current && video.paused) {
+        video.play().catch(() => {});
+      }
+    };
     const onLeavePip = () => {
       setIsPipActive(false);
-      if (activeChannel && !userPausedRef.current && video.paused) {
-        video.play().catch(() => {});
+      // When the user locks their phone while in PiP, Android exits PiP and pauses the video.
+      // Immediately trigger persistent resumption so audio keeps playing on the lock screen!
+      if (activeChannelRef.current && !userPausedRef.current) {
+        resumePlaybackPersistently();
       }
     };
     const onWebkitModeChange = () => {
       const inPip = video.webkitPresentationMode === 'picture-in-picture';
       setIsPipActive(inPip);
-      if (!inPip && activeChannel && !userPausedRef.current && video.paused) {
-        video.play().catch(() => {});
+      if (!inPip && activeChannelRef.current && !userPausedRef.current) {
+        resumePlaybackPersistently();
       }
     };
 
@@ -1563,7 +1605,7 @@ export const LiveTvArena: React.FC = () => {
       video.removeEventListener('leavepictureinpicture', onLeavePip);
       video.removeEventListener('webkitpresentationmodechanged', onWebkitModeChange);
     };
-  }, [activeChannel]);
+  }, [resumePlaybackPersistently]);
 
   // Background Play, MediaSession Lock-Screen Controls & Screen Wake Lock
   useEffect(() => {
@@ -1603,18 +1645,22 @@ export const LiveTvArena: React.FC = () => {
           userPausedRef.current = false;
           const v = videoRef.current;
           if (v) {
-            const graph = videoAudioGraphMap.get(v);
-            if (graph && graph.ctx.state === 'suspended') {
-              graph.ctx.resume().catch(() => {});
+            if (!userMutedRef.current && v.muted) {
+              v.muted = false;
+              setIsMuted(false);
             }
-            v.play().catch(() => {});
+            v.play()
+              .then(() => setIsPlaying(true))
+              .catch(() => {});
           }
           navigator.mediaSession.playbackState = 'playing';
         });
 
         navigator.mediaSession.setActionHandler('pause', () => {
           userPausedRef.current = true;
+          clearResumeTimers();
           videoRef.current?.pause();
+          setIsPlaying(false);
           navigator.mediaSession.playbackState = 'paused';
         });
 
@@ -1651,30 +1697,48 @@ export const LiveTvArena: React.FC = () => {
 
         try {
           (navigator.mediaSession as any).setActionHandler('enterpictureinpicture', () => {
-            togglePictureInPicture();
+            const v = videoRef.current as any;
+            if (!v) return;
+            if (typeof v.requestPictureInPicture === 'function') {
+              v.requestPictureInPicture()
+                .then(() => setIsPipActive(true))
+                .catch(() => {});
+            } else if (typeof v.webkitSetPresentationMode === 'function') {
+              try {
+                v.webkitSetPresentationMode('picture-in-picture');
+                setIsPipActive(true);
+              } catch {}
+            }
           });
         } catch {}
       } catch {}
     }
 
-    // 2. Keep stream alive across tab switches & mobile screen lock when Background Play is enabled
-    const handleVisibilityChange = () => {
-      const v = videoRef.current;
-      if (!v || !activeChannel) return;
+    // 2. Keep stream alive across app switches, window blur & mobile screen lock (verrouillage)
+    const handleVisibilityOrBlur = () => {
+      const v = videoRef.current as any;
+      if (!v || !activeChannelRef.current) return;
       if (document.hidden) {
-        if (isBackgroundPlayEnabled && !userPausedRef.current) {
-          const graph = videoAudioGraphMap.get(v);
-          if (graph && graph.ctx.state === 'suspended') {
-            graph.ctx.resume().catch(() => {});
+        if (isBackgroundPlayEnabledRef.current && !userPausedRef.current) {
+          // Try entering Picture-in-Picture if supported during app switch, and persistently resume audio playback
+          if (
+            typeof document !== 'undefined' &&
+            !document.pictureInPictureElement &&
+            document.pictureInPictureEnabled &&
+            typeof v.requestPictureInPicture === 'function'
+          ) {
+            v.requestPictureInPicture()
+              .then(() => setIsPipActive(true))
+              .catch(() => {});
           }
-          if (v.paused) {
-            v.play().catch(() => {});
-          }
+          resumePlaybackPersistently();
         }
       } else {
-        // Tab returned to foreground: resume playback & re-acquire screen wake lock
+        // Returned to foreground: resume playback & re-acquire screen wake lock
         if (!userPausedRef.current && v.paused) {
-          v.play().catch(() => {});
+          v.play()
+            .then(() => setIsPlaying(true))
+            .catch(() => {});
         }
         if ('wakeLock' in navigator && !wakeLockRef.current) {
           (navigator as any).wakeLock
@@ -1687,7 +1751,40 @@ export const LiveTvArena: React.FC = () => {
       }
     };
 
-    document.addEventListener('visibilitychange', handleVisibilityChange);
+    const handleWindowBlur = () => {
+      if (isBackgroundPlayEnabledRef.current && !userPausedRef.current && activeChannelRef.current) {
+        resumePlaybackPersistently();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityOrBlur);
+    window.addEventListener('pagehide', handleWindowBlur);
+    window.addEventListener('blur', handleWindowBlur);
+
+    // Continuous 1s background watchdog while stream is active so OS sleep/lock transitions never leave audio paused
+    const bgWatchdog = window.setInterval(() => {
+      const v = videoRef.current;
+      if (
+        !v ||
+        userPausedRef.current ||
+        !activeChannelRef.current ||
+        !isBackgroundPlayEnabledRef.current
+      ) {
+        return;
+      }
+      if (v.paused && !v.ended && !loadingStream) {
+        v.play()
+          .then(() => setIsPlaying(true))
+          .catch(() => {});
+      }
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        try {
+          if (navigator.mediaSession.playbackState !== 'playing') {
+            navigator.mediaSession.playbackState = 'playing';
+          }
+        } catch {}
+      }
+    }, 1000);
 
     // 3. Acquire Screen Wake Lock while watching live sports
     if ('wakeLock' in navigator && !document.hidden) {
@@ -1700,7 +1797,10 @@ export const LiveTvArena: React.FC = () => {
     }
 
     return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      document.removeEventListener('visibilitychange', handleVisibilityOrBlur);
+      window.removeEventListener('pagehide', handleWindowBlur);
+      window.removeEventListener('blur', handleWindowBlur);
+      window.clearInterval(bgWatchdog);
       if (wakeLockRef.current) {
         try {
           wakeLockRef.current.release();
@@ -1709,15 +1809,17 @@ export const LiveTvArena: React.FC = () => {
       }
     };
   }, [
-    activeChannel,
-    activeMatch,
+    activeChannel?.id,
+    activeMatch?.id,
     cleanActiveChannelName,
     activeChannelLogo,
     isBackgroundPlayEnabled,
     sources.length,
+    loadingStream,
+    clearResumeTimers,
+    resumePlaybackPersistently,
     stopLiveStream,
     tuneChannel,
-    togglePictureInPicture,
   ]);
 
   const handleOrbPointerDown = (e: React.PointerEvent<HTMLElement>) => {
@@ -1946,22 +2048,34 @@ export const LiveTvArena: React.FC = () => {
   };
 
   const toggleFullscreen = () => {
-    const container = playerContainerRef.current || videoRef.current;
-    if (!container) return;
+    const container = playerContainerRef.current as any;
+    const video = videoRef.current as any;
+    if (!container && !video) return;
     if (document.fullscreenElement) {
       document.exitFullscreen().catch(() => {});
-    } else if (container.requestFullscreen) {
-      container.requestFullscreen().catch(() => {});
+    } else if (container?.requestFullscreen) {
+      container.requestFullscreen().catch(() => {
+        if (typeof video?.webkitEnterFullscreen === 'function') {
+          try {
+            video.webkitEnterFullscreen();
+          } catch {}
+        }
+      });
+    } else if (typeof video?.webkitEnterFullscreen === 'function') {
+      try {
+        video.webkitEnterFullscreen();
+      } catch {}
     }
   };
 
   return (
     <>
-      {/* Persistent Parking Host for the Single Shared Live TV <video> Element
-          Ensures zero re-buffering or interruption when switching between Full Arena, Mini-Player, Picture-in-Picture, and Background Play */}
+      {/* Persistent In-Viewport Parking Host for the Single Shared Live TV <video> Element
+          Kept inside the viewport at 2x2px with 1% opacity so Chromium's IntersectionObserver
+          always treats the video as in-viewport for autoPictureInPicture and background MediaSession! */}
       <div
         ref={bgVideoParkingRef}
-        className="fixed -left-[9999px] -top-[9999px] w-px h-px overflow-hidden opacity-0 pointer-events-none"
+        className="fixed bottom-0 right-0 w-[2px] h-[2px] overflow-hidden opacity-[0.01] pointer-events-none z-0"
         aria-hidden="true"
       >
         <video
@@ -1969,13 +2083,14 @@ export const LiveTvArena: React.FC = () => {
           playsInline
           autoPlay
           muted={isMuted}
-          controls={!loadingStream && !isVideoBuffering && !streamError && isArenaOpen}
+          onClick={togglePlayPause}
+          onDoubleClick={toggleFullscreen}
           onWaiting={handleVideoWaiting}
           onPlaying={handleVideoPlaying}
           onCanPlay={handleVideoPlaying}
           onPause={handleVideoPause}
           onVolumeChange={handleVideoVolumeChange}
-          className="w-full h-full object-contain"
+          className="w-full h-full object-contain cursor-pointer"
         />
       </div>
 
@@ -2023,6 +2138,14 @@ export const LiveTvArena: React.FC = () => {
                   </span>
                 </div>
                 <div className="flex items-center gap-1 shrink-0" data-no-drag="true">
+                  <button
+                    type="button"
+                    onClick={togglePlayPause}
+                    title={isPlaying ? 'Pause' : 'Play'}
+                    className="p-1.5 rounded-lg hover:bg-white/10 text-slate-300 hover:text-white transition-colors cursor-pointer"
+                  >
+                    {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 text-emerald-400" />}
+                  </button>
                   <button
                     type="button"
                     onClick={toggleMute}
@@ -2633,6 +2756,20 @@ export const LiveTvArena: React.FC = () => {
                           S{idx + 1}
                         </button>
                       ))}
+
+                    <button
+                      type="button"
+                      onClick={togglePlayPause}
+                      title={isPlaying ? 'Pause Stream' : 'Play Stream'}
+                      className="px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 bg-white/[0.07] hover:bg-white/[0.14] text-slate-200 transition-colors cursor-pointer"
+                    >
+                      {isPlaying ? (
+                        <Pause className="w-3.5 h-3.5 text-amber-400" />
+                      ) : (
+                        <Play className="w-3.5 h-3.5 text-emerald-400" />
+                      )}
+                      <span>{isPlaying ? 'Pause' : 'Play'}</span>
+                    </button>
 
                     <button
                       type="button"
