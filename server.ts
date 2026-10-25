@@ -3871,21 +3871,60 @@ function getMatchBroadcastPrestige(ev: any): number {
   const home = String(ev?.homeTeam?.name || '').toLowerCase();
   const away = String(ev?.awayTeam?.name || '').toLowerCase();
   const teams = `${home} ${away}`;
-  const leagueSlug = String(ev?.leagueSlug || ev?.league || '').toLowerCase();
+  const leagueSlug = String(ev?.leagueSlug || ev?.competitionCode || '').toLowerCase();
+  const leagueName = String(ev?.league || '').toLowerCase();
+  const combinedLeague = `${leagueSlug} ${leagueName}`;
 
   let score = 0;
+  const isSecondDivision =
+    leagueSlug === 'eng.2' ||
+    leagueSlug === 'esp.2' ||
+    combinedLeague.includes('laliga 2') ||
+    combinedLeague.includes('hypermotion') ||
+    combinedLeague.includes('championship') ||
+    combinedLeague.includes('segunda') ||
+    combinedLeague.includes('ligue 2') ||
+    combinedLeague.includes('serie b');
+
   // League tier priority so top-division matches always claim primary flagship channels before second-tier simultaneous matches
-  if (leagueSlug.includes('uefa.champions')) score += 85;
-  else if (leagueSlug === 'eng.1' || leagueSlug.includes('premier league')) score += 75;
-  else if (leagueSlug === 'esp.1' || leagueSlug === 'ita.1' || leagueSlug === 'ger.1' || leagueSlug === 'fra.1') score += 60;
-  else if (leagueSlug.includes('ksa.1') || leagueSlug.includes('afc.champions')) score += 58;
-  else if (leagueSlug.includes('uefa.europa') && !leagueSlug.includes('conf')) score += 45;
-  else if (leagueSlug.includes('ufc') || leagueSlug.includes('f1') || leagueSlug.includes('nba') || leagueSlug.includes('nfl')) score += 50;
-  else if (leagueSlug === 'eng.2') score += 10;
+  if (isSecondDivision) {
+    score += 8;
+  } else if (combinedLeague.includes('uefa.champions') || combinedLeague.includes('uefa champions')) {
+    score += 95;
+  } else if (leagueSlug === 'eng.1' || combinedLeague.includes('premier league')) {
+    score += 80;
+  } else if (
+    leagueSlug === 'esp.1' ||
+    combinedLeague.includes('spanish laliga') ||
+    combinedLeague.includes('laliga') ||
+    leagueSlug === 'ita.1' ||
+    combinedLeague.includes('serie a') ||
+    leagueSlug === 'ger.1' ||
+    combinedLeague.includes('bundesliga') ||
+    leagueSlug === 'fra.1' ||
+    combinedLeague.includes('ligue 1')
+  ) {
+    score += 72;
+  } else if (combinedLeague.includes('ksa.1') || combinedLeague.includes('saudi') || combinedLeague.includes('afc')) {
+    score += 62;
+  } else if (combinedLeague.includes('uefa.europa') && !combinedLeague.includes('conf')) {
+    score += 50;
+  } else if (combinedLeague.includes('ufc') || combinedLeague.includes('f1') || combinedLeague.includes('nba') || combinedLeague.includes('nfl')) {
+    score += 50;
+  } else if (combinedLeague.includes('caf')) {
+    score += 22;
+  }
+
+  const giantClubs = /\b(real madrid|barcelona|ac milan|milan|arsenal|liverpool|manchester city|manchester united|bayern|paris saint-germain|psg|inter milan|juventus|chelsea)\b/gi;
+  const giantMatches = teams.match(giantClubs);
+  if (giantMatches && giantMatches.length >= 2) {
+    // Super-derby / El Clásico / European summit bonus
+    score += 150;
+  }
 
   const clubWeights: Array<[RegExp, number]> = [
     [/\b(real madrid|barcelona|ac milan|milan|arsenal|liverpool|manchester city|manchester united|bayern|paris saint-germain|psg|inter milan|juventus|chelsea)\b/i, 120],
-    [/\b(crystal palace|besiktas|beşiktaş|tottenham|aston villa|newcastle|atletico madrid|borussia dortmund|napoli|roma|al hilal|al nassr)\b/i, 75],
+    [/\b(crystal palace|besiktas|beşiktaş|tottenham|aston villa|newcastle|atletico madrid|borussia dortmund|napoli|roma|al hilal|al nassr|al ahly)\b/i, 75],
     [/\b(as monaco|monaco|lyon|olympique lyonnais|bournemouth|afc bournemouth|marseille|lille|bayer leverkusen|al ittihad|al ahli)\b/i, 70],
     [/\b(atalanta|ajax|ajax amsterdam|sc freiburg|freiburg|tsg hoffenheim|hoffenheim|celtic|celta vigo|rangers|fenerbahce|galatasaray)\b/i, 56],
     [/\b(benfica|real sociedad|porto|sporting|villarreal|athletic club|real betis|fiorentina|lazio|bologna|stuttgart|eintracht frankfurt|rb leipzig|brighton|sunderland|nottingham forest|west ham|fulham|brentford|everton|wolves)\b/i, 35],
@@ -4042,12 +4081,12 @@ function assignSmartChannelsForEvent(
     const isUefaCompetition =
       leagueSlug.includes('uefa') ||
       league.includes('uefa') ||
-      league.includes('champions league') ||
+      (league.includes('champions league') && !league.includes('afc') && !league.includes('caf')) ||
       league.includes('europa league') ||
       league.includes('conference league');
 
     // 8A. UEFA Champions League, UEFA Europa League, UEFA Conference League
-    if (isUefaCompetition && !leagueSlug.includes('afc') && !league.includes('afc')) {
+    if (isUefaCompetition && !leagueSlug.includes('afc') && !league.includes('afc') && !league.includes('caf')) {
       const hasBritishClub =
         /\b(arsenal|aston villa|bournemouth|brentford|brighton|chelsea|crystal palace|everton|fulham|ipswich|leicester|liverpool|manchester city|manchester united|newcastle|nottingham forest|southampton|sunderland|tottenham|west ham|wolves|wolverhampton|celtic|rangers|heart of midlothian|hearts|aberdeen|hibernian)\b/i.test(
           teamsText
@@ -4093,7 +4132,6 @@ function assignSmartChannelsForEvent(
         addFallbackPool(['bein-sports-en-1', 'bein-sports-en-2', 'bein-sports-en-3']);
       }
 
-      const totalFrenchInSlot = slotContext?.totalFrenchInSlot ?? 0;
       if (hasFrenchClub) {
         const frRank = slotContext?.frenchRank ?? 0;
         if (frRank === 0) {
@@ -4137,7 +4175,7 @@ function assignSmartChannelsForEvent(
       league.includes('premier league') ||
       league.includes('fa cup')
     ) {
-      addFallbackPool(['bein-sports-1-ar', 'bein-sports-2-ar', 'bein-sports-5-ar', 'bein-sports-6-ar']);
+      addFallbackPool(['bein-sports-1-ar', 'bein-sports-2-ar', 'bein-sports-5-ar', 'bein-sports-6-ar', 'bein-sports-3-ar', 'bein-sports-4-ar']);
       if (broadcastsText.includes('tnt') || leagueSlug === 'eng.fa' || league.includes('fa cup')) {
         addFallbackPool(['tnt-sports-1', 'tnt-sports-2', 'sky-sports-premier-league', 'sky-sports-main-event']);
       } else {
@@ -4156,16 +4194,34 @@ function assignSmartChannelsForEvent(
       league.includes('efl') ||
       league.includes('carabao')
     ) {
+      addFallbackPool(['bein-sports-5-ar', 'bein-sports-8-ar']);
       addFallbackPool(['sky-sports-football', 'sky-sports-plus', 'sky-sports-action', 'sky-sports-main-event', 'sky-sports-mix']);
       addFallbackPool(['cbs-sports-golazo', 'bein-sports-en-3']);
       addFallbackPool(['supersport-football', 'supersport-variety-1']);
-      addFallbackPool(['bein-sports-5-ar']);
     }
-    // 8D. Spanish LaLiga / Copa del Rey
-    // MENA: beIN Sports 3 HD (AR) dedicated LaLiga channel; France: beIN Sports 1/2 FR; Spain: DAZN LaLiga / M+ LaLiga
+    // 8D-1. Spanish LaLiga 2 Hypermotion / Segunda División (Never steals beIN Sports 1/3 HD AR from LaLiga 1st Division)
+    else if (
+      leagueSlug === 'esp.2' ||
+      league.includes('laliga 2') ||
+      league.includes('hypermotion') ||
+      league.includes('segunda')
+    ) {
+      addFallbackPool(['bein-sports-5-ar', 'bein-sports-8-ar']);
+      addFallbackPool(['dazn-laliga-es', 'premier-sports-2']);
+      addFallbackPool(['bein-sports-max-4-fr', 'bein-sports-max-5-fr']);
+    }
+    // 8D-2. Spanish LaLiga (First Division) / Copa del Rey
+    // MENA: beIN Sports 1 HD & 3 HD (AR) for El Clásico / Real Madrid / Barcelona, and beIN Sports 3/1/5/6 HD (AR) for all LaLiga matches
     else if (leagueSlug.includes('esp') || league.includes('laliga') || league.includes('copa del rey')) {
       const hasRealMadrid = /\b(real madrid)\b/i.test(teamsText);
-      addFallbackPool(['bein-sports-3-ar', 'bein-sports-5-ar', 'bein-sports-6-ar']);
+      const hasBarcelona = /\b(barcelona)\b/i.test(teamsText);
+      const isElClasicoOrGiant = (hasRealMadrid && hasBarcelona) || hasRealMadrid || hasBarcelona;
+      if (isElClasicoOrGiant) {
+        addFallbackPool(['bein-sports-1-ar', 'bein-sports-3-ar', 'bein-sports-2-ar', 'bein-sports-5-ar']);
+        addFallbackPool(['bein-sports-en-1', 'bein-sports-en-2']);
+      } else {
+        addFallbackPool(['bein-sports-3-ar', 'bein-sports-1-ar', 'bein-sports-5-ar', 'bein-sports-6-ar', 'bein-sports-4-ar']);
+      }
       addFallbackPool(['premier-sports-1', 'premier-sports-2']);
       addFallbackPool(['bein-sports-fr-1', 'bein-sports-fr-2', 'bein-sports-max-4-fr']);
       addFallbackPool(['dazn-laliga-es', ...(hasRealMadrid ? ['real-madrid-tv'] : [])]);
@@ -4203,7 +4259,7 @@ function assignSmartChannelsForEvent(
     // 8G. French Ligue 1
     // MENA: beIN Sports 4 HD (AR) & beIN Sports 2/3 EN; France: DAZN Ligue 1 & beIN Sports 1 FR
     else if (leagueSlug.includes('fra') || league.includes('ligue 1')) {
-      addFallbackPool(['bein-sports-4-ar', 'bein-sports-5-ar', 'bein-sports-6-ar']);
+      addFallbackPool(['bein-sports-4-ar', 'bein-sports-5-ar', 'bein-sports-6-ar', 'bein-sports-2-ar']);
       addFallbackPool(['bein-sports-en-2', 'bein-sports-en-3']);
       addFallbackPool(['dazn-ligue1-fr', 'bein-sports-fr-1']);
     }
@@ -4211,12 +4267,16 @@ function assignSmartChannelsForEvent(
     else if (leagueSlug.includes('tur') || league.includes('türkiye') || league.includes('super lig')) {
       addFallbackPool(['bein-sports-1-tr', 'bein-sports-2-tr', 'bein-sports-3-tr', 'bein-sports-4-tr', 'bein-sports-5-tr']);
     }
-    // 8I. Moroccan Botola / CAF
+    // 8I. CAF Champions League / CAF Confederation Cup / Moroccan Botola
     else if (
+      leagueSlug.includes('caf') ||
+      league.includes('caf') ||
       leagueSlug.includes('mar') ||
-      /\b(wydad|raja|far rabat|berkane|morocco|fath union|hassania|maghreb)\b/i.test(teamsText)
+      /\b(wydad|raja|far rabat|as far|berkane|morocco|fath union|hassania|maghreb|al ahly|zamalek|esperance|tp mazembe|mamelodi|simba|club africain|usm alger)\b/i.test(teamsText)
     ) {
-      addFallbackPool(['arryadia-ar', 'bein-sports-6-ar']);
+      addFallbackPool(['bein-sports-6-ar', 'bein-sports-5-ar', 'bein-sports-8-ar', 'arryadia-ar', 'ontime-sports-1-ar']);
+      addFallbackPool(['bein-sports-fr-2', 'bein-sports-max-4-fr', 'canal-plus-foot-fr']);
+      addFallbackPool(['supersport-football', 'bein-sports-en-3']);
     }
     // 8J-1. CONMEBOL Libertadores / Sudamericana (South America — broadcast on beIN Sports XTRA ES/EN & ESPN/FOX)
     else if (
@@ -4238,15 +4298,27 @@ function assignSmartChannelsForEvent(
     }
     // 8K. Default International Football
     else {
-      addFallbackPool(['bein-sports-1-ar', 'bein-sports-2-ar', 'bein-sports-3-ar', 'bein-sports-4-ar']);
+      addFallbackPool(['bein-sports-1-ar', 'bein-sports-2-ar', 'bein-sports-3-ar', 'bein-sports-4-ar', 'bein-sports-5-ar']);
       addFallbackPool(['bein-sports-en-1', 'bein-sports-en-2', 'tnt-sports-1', 'premier-sports-1']);
       addFallbackPool(['bein-sports-fr-1', 'bein-sports-fr-2']);
     }
   }
 
-  // STEP 2: 1-TO-1 SCRAPER SYNC PRIORITY
-  // If the upstream scraper already assigned competition-eligible channels to this event, honor those exact channels first!
-  const scraperDirectIds = scraperRecIds
+  // STEP 2: AUTHORITATIVE COMPETITION & PRESTIGE POOL ASSIGNMENT FIRST
+  // Events in each time slot are sorted by broadcast prestige (e.g., El Clásico / Premier League / Champions League first),
+  // so running orderedFallbackPools first guarantees flagship matches always claim their rightful beIN Sports AR & UK/EU channels!
+  for (const pool of orderedFallbackPools) {
+    for (const id of pool) {
+      if (claimChannel(id, true)) break;
+    }
+  }
+
+  // STEP 3: SUPPLEMENT WITH ANY UNCLAIMED SCRAPER / EPG HINTS FOR REMAINING NETWORK FAMILIES
+  const extraHintIds = [
+    ...scraperRecIds,
+    ...(isLive ? epgLiveIds : []),
+    ...epgUpcomingIds,
+  ]
     .map((rawId) =>
       rawId.startsWith('bein-sports-premium-')
         ? rawId.replace('bein-sports-premium-', 'bein-sports-')
@@ -4254,36 +4326,27 @@ function assignSmartChannelsForEvent(
     )
     .filter((chId) => competitionEligibleSet.has(chId));
 
-  for (const chId of scraperDirectIds) {
-    const fam = getChannelNetworkFamily(chId);
-    if (claimedFamiliesForThisEvent.has(fam)) continue;
-    assignedIds.push(chId);
-    claimedInSlot.add(chId);
-    claimedFamiliesForThisEvent.add(fam);
+  for (const chId of extraHintIds) {
+    claimChannel(chId, true);
   }
 
-  // Also check any additional EPG channel IDs if scraperDirectIds was empty
-  if (assignedIds.length === 0) {
-    const epgCandidates = Array.from(new Set([...(isLive ? epgLiveIds : []), ...epgUpcomingIds]));
-    for (const rawId of epgCandidates) {
-      const chId = rawId.startsWith('bein-sports-premium-')
-        ? rawId.replace('bein-sports-premium-', 'bein-sports-')
-        : rawId;
-      if (!competitionEligibleSet.has(chId)) continue;
-      claimChannel(chId, true);
-    }
-  }
-
-  // STEP 3: Only run fallback pool assignment if the scraper did not provide channels for this event (e.g., FINISHED matches or overflow fixtures)
-  if (assignedIds.length === 0) {
-    for (const pool of orderedFallbackPools) {
-      for (const id of pool) {
-        if (claimChannel(id, true)) break;
+  // STEP 4: Ensure major European / MENA football matches ALWAYS include their primary Arabic beIN Sports channel badge on the event card
+  // even when multiple matches share the same hour window
+  const hasArabicAssigned = assignedIds.some((id) => id.endsWith('-ar'));
+  if (!hasArabicAssigned && orderedFallbackPools.length > 0) {
+    const arPool = orderedFallbackPools.find((p) => p.some((id) => id.endsWith('-ar')));
+    if (arPool && arPool.length > 0) {
+      const arCandidates = arPool.filter((id) => id.endsWith('-ar') && LIVE_CHANNEL_DIRECTORY[id]);
+      const unclaimedAr = arCandidates.find((id) => !claimedInSlot.has(id));
+      const pickedAr = unclaimedAr || arCandidates[slotIndex % arCandidates.length];
+      if (pickedAr && !assignedIds.includes(pickedAr)) {
+        assignedIds.unshift(pickedAr);
+        claimedInSlot.add(pickedAr);
       }
     }
   }
 
-  // STEP 4: Competition-restricted last-resort fallback if simultaneous fixtures of the SAME competition exhausted all primary family slots
+  // STEP 5: Competition-restricted last-resort fallback if simultaneous fixtures of the SAME competition exhausted all primary family slots
   if (assignedIds.length === 0 && competitionEligibleSet.size > 0) {
     const eligibleList = Array.from(competitionEligibleSet);
     const unclaimedEligible = eligibleList.find((id) => !claimedInSlot.has(id));
@@ -4700,11 +4763,16 @@ async function getOrRefreshLiveEventsPayload(maxAgeMs = 12000): Promise<{
 
       const tA = Date.parse(a.startTime || '') || 0;
       const tB = Date.parse(b.startTime || '') || 0;
-      const timeDiff = aFin ? tB - tA : tA - tB;
-      if (Math.abs(timeDiff) > 45 * 60 * 1000) {
-        return timeDiff;
+      const bucketA = Math.floor(tA / (60 * 60 * 1000));
+      const bucketB = Math.floor(tB / (60 * 60 * 1000));
+      if (bucketA !== bucketB) {
+        return aFin ? bucketB - bucketA : bucketA - bucketB;
       }
-      return getMatchBroadcastPrestige(b) - getMatchBroadcastPrestige(a);
+      const prestigeDiff = getMatchBroadcastPrestige(b) - getMatchBroadcastPrestige(a);
+      if (prestigeDiff !== 0) {
+        return prestigeDiff;
+      }
+      return aFin ? tB - tA : tA - tB;
     });
 
     // 4. Assign accurate per-match broadcast channels with a GLOBAL per-time-window claim registry

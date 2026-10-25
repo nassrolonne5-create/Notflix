@@ -447,9 +447,31 @@ function formatCompactChannelBadge(channelId?: string, rawName?: string): string
 
   return String(rawName || id || 'Live HD')
     .replace(/\s*\([^)]*\)/g, '')
+    .replace(/\s*\[[^\]]*\]/g, '')
+    .split(/\s+\/\s+/)[0]
     .replace(/\b(UK|USA|HD|FHD|4K)\b/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function formatShortChannelName(rawName?: string): string {
+  if (!rawName) return 'Live HD';
+  return rawName
+    .replace(/\s*\([^)]*\)/g, '')
+    .replace(/\s*\[[^\]]*\]/g, '')
+    .split(/\s+\/\s+/)[0]
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function formatCleanEpgTitle(rawTitle?: string): string {
+  if (!rawTitle) return '';
+  const cleaned = rawTitle
+    .replace(/\s*\([^)]*\)/g, '')
+    .replace(/\s*\[[^\]]*\]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || rawTitle.trim();
 }
 
 export const LiveTvArena: React.FC = () => {
@@ -665,10 +687,7 @@ export const LiveTvArena: React.FC = () => {
   }, [activeChannel, channels, activeMatch]);
 
   const cleanActiveChannelName = useMemo(() => {
-    if (!activeChannel?.name) return 'Live HD';
-    return activeChannel.name
-      .replace(/\s*\((Arabic|English|French|Spanish|Turkish|German|Portuguese|Italian)\)/gi, '')
-      .trim();
+    return formatShortChannelName(activeChannel?.name);
   }, [activeChannel?.name]);
 
   // Draggable Floating Icon / Mini-Player Position State
@@ -2000,7 +2019,7 @@ export const LiveTvArena: React.FC = () => {
                   <span className="text-[11px] font-bold text-white truncate">
                     {activeMatch
                       ? `${activeMatch.homeTeam?.shortName || activeMatch.homeTeam?.name} vs ${activeMatch.awayTeam?.shortName || activeMatch.awayTeam?.name}`
-                      : activeChannel.name}
+                      : cleanActiveChannelName}
                   </span>
                 </div>
                 <div className="flex items-center gap-1 shrink-0" data-no-drag="true">
@@ -2475,12 +2494,12 @@ export const LiveTvArena: React.FC = () => {
                   <div ref={arenaVideoSlotRef} className="w-full h-full flex items-center justify-center" />
 
                   {(loadingStream || isVideoBuffering) && !streamError && (
-                    <div className="absolute inset-0 bg-[#070b14]/92 backdrop-blur-md flex flex-col items-center justify-center z-10 select-none pointer-events-none">
+                    <div className="absolute inset-0 bg-[#070b14]/90 backdrop-blur-md flex flex-col items-center justify-center z-10 select-none pointer-events-none">
                       <div className="relative flex items-center justify-center">
-                        <div className="w-28 h-28 rounded-full bg-rose-600/15 blur-2xl animate-pulse absolute" />
-                        <span className="w-20 h-20 sm:w-24 sm:h-24 rounded-full border border-rose-500/25 animate-ping opacity-30 absolute" />
-                        <span className="w-20 h-20 sm:w-24 sm:h-24 rounded-full border-2 border-white/[0.08] border-t-rose-500 border-r-rose-400/70 animate-spin" />
-                        <div className="absolute w-14 h-14 sm:w-16 sm:h-16 rounded-2xl bg-white/95 p-2 shadow-[0_8px_28px_rgba(225,29,72,0.38)] flex items-center justify-center overflow-hidden">
+                        <div className="w-24 h-24 rounded-full bg-rose-600/15 blur-2xl animate-pulse absolute" />
+                        <span className="w-20 h-20 rounded-full border border-rose-500/25 animate-ping opacity-30 absolute" />
+                        <span className="w-20 h-20 rounded-full border-2 border-white/[0.08] border-t-rose-500 border-r-rose-400/70 animate-spin" />
+                        <div className="absolute w-14 h-14 rounded-2xl bg-white/95 p-2 shadow-[0_8px_28px_rgba(225,29,72,0.38)] flex items-center justify-center overflow-hidden">
                           {activeChannelLogo && !bufferingLogoFailed ? (
                             <img
                               src={activeChannelLogo}
@@ -2489,15 +2508,17 @@ export const LiveTvArena: React.FC = () => {
                               className="w-full h-full object-contain"
                             />
                           ) : (
-                            <Tv className="w-7 h-7 text-rose-600" />
+                            <Tv className="w-6 h-6 text-rose-600" />
                           )}
                         </div>
                       </div>
 
-                      <div className="mt-3.5 flex flex-col items-center gap-1.5 px-4 text-center">
-                        <span className="text-sm sm:text-base font-extrabold tracking-tight text-white">
-                          {cleanActiveChannelName}
-                        </span>
+                      <div className="mt-3 flex flex-col items-center gap-1.5 px-4 text-center">
+                        {(!activeChannelLogo || bufferingLogoFailed) && (
+                          <span className="text-xs font-extrabold tracking-tight text-white truncate max-w-[180px]">
+                            {cleanActiveChannelName}
+                          </span>
+                        )}
                         <div className="flex items-end gap-1 h-2.5" aria-hidden="true">
                           <span className="w-1 h-1.5 rounded-full bg-rose-500 animate-pulse" />
                           <span
@@ -2548,23 +2569,18 @@ export const LiveTvArena: React.FC = () => {
                   )}
                 </div>
 
-                {/* Stream Bar: Title + Commentary Languages + Mirrors */}
-                <div className="p-2.5 sm:px-4 bg-[#101829] border-t border-white/[0.08] flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                {/* Stream Bar: Compact Title + Mirrors + Controls */}
+                <div className="p-2 sm:px-3.5 bg-[#101829] border-t border-white/[0.08] flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
                     <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping shrink-0" />
-                    <span className="text-xs font-bold text-white truncate">
+                    <span className="text-xs font-bold text-white truncate max-w-[200px] sm:max-w-[260px]">
                       {activeMatch
-                        ? `${activeMatch.homeTeam?.name} vs ${activeMatch.awayTeam?.name}`
-                        : activeChannel.name}
+                        ? `${activeMatch.homeTeam?.shortName || activeMatch.homeTeam?.name} vs ${activeMatch.awayTeam?.shortName || activeMatch.awayTeam?.name}`
+                        : cleanActiveChannelName}
                     </span>
-                    {activeMatch && !isEventLive(activeMatch.status) && !isEventFinished(activeMatch.status) && (
-                      <span className="px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/35 text-[10px] font-semibold text-amber-300">
-                        Kickoff {formatKickoffTime(activeMatch.startTime).relative} ({formatKickoffTime(activeMatch.startTime).time}) · Previewing {formatCompactChannelBadge(activeChannel.id, activeChannel.name)}
-                      </span>
-                    )}
-                    {!activeMatch && (activeChannel.epg?.nowPlaying || activeChannel.epg?.currentProgram) && (
-                      <span className="px-2 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/35 text-[10px] font-semibold text-rose-300 truncate max-w-[260px]">
-                        Now Playing: {(activeChannel.epg?.nowPlaying || activeChannel.epg?.currentProgram)?.title}
+                    {!loadingStream && !isVideoBuffering && !activeMatch && (activeChannel.epg?.nowPlaying || activeChannel.epg?.currentProgram) && (
+                      <span className="hidden sm:inline-block px-2 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/35 text-[10px] font-semibold text-rose-300 truncate max-w-[220px]">
+                        {formatCleanEpgTitle((activeChannel.epg?.nowPlaying || activeChannel.epg?.currentProgram)?.title)}
                       </span>
                     )}
                   </div>
@@ -2590,7 +2606,7 @@ export const LiveTvArena: React.FC = () => {
                             }`}
                           >
                             <Tv className="w-2.5 h-2.5 shrink-0 opacity-80" />
-                            <span className="truncate max-w-[135px]">{cleanName}</span>
+                            <span className="truncate max-w-[110px]">{cleanName}</span>
                             <span className="opacity-75 text-[9px]">({langTag})</span>
                           </button>
                         );
@@ -2614,7 +2630,7 @@ export const LiveTvArena: React.FC = () => {
                               : 'bg-white/[0.07] hover:bg-white/[0.14] text-slate-300'
                           }`}
                         >
-                          Server {idx + 1}
+                          S{idx + 1}
                         </button>
                       ))}
 
@@ -2622,56 +2638,56 @@ export const LiveTvArena: React.FC = () => {
                       type="button"
                       onClick={toggleMute}
                       title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
-                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 transition-colors cursor-pointer ${
+                      className={`px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 transition-colors cursor-pointer ${
                         isMuted
                           ? 'bg-rose-500/25 border border-rose-500/50 text-rose-300'
                           : 'bg-white/[0.07] hover:bg-white/[0.14] text-slate-200'
                       }`}
                     >
                       {isMuted ? <VolumeX className="w-3.5 h-3.5 text-rose-400" /> : <Volume2 className="w-3.5 h-3.5 text-emerald-400" />}
-                      <span>{isMuted ? 'Unmute' : 'Sound ON'}</span>
+                      <span>{isMuted ? 'Muted' : 'Sound'}</span>
                     </button>
 
                     <button
                       type="button"
                       onClick={() => setIsAudioCleanEnabled((prev) => !prev)}
-                      title="Broadcast Noise Reduction & Anti-Clipping Filter (Cuts satellite hiss, 50/60Hz hum & mic distortion)"
-                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 transition-colors cursor-pointer ${
+                      title="Broadcast Noise Reduction & Anti-Clipping Filter"
+                      className={`px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 transition-colors cursor-pointer ${
                         isAudioCleanEnabled
                           ? 'bg-cyan-500/20 border border-cyan-500/40 text-cyan-300'
                           : 'bg-white/[0.07] hover:bg-white/[0.14] text-slate-400'
                       }`}
                     >
                       <Sparkles className="w-3 h-3" />
-                      <span>{isAudioCleanEnabled ? 'Clean Audio ON' : 'Clean Audio OFF'}</span>
+                      <span>Clean</span>
                     </button>
 
                     <button
                       type="button"
                       onClick={() => setIsBackgroundPlayEnabled((prev) => !prev)}
-                      title="Background Play & Lock-Screen Audio (Keeps Live TV playing when switching tabs or locking phone screen)"
-                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 transition-colors cursor-pointer ${
+                      title="Background Play & Lock-Screen Audio"
+                      className={`px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 transition-colors cursor-pointer ${
                         isBackgroundPlayEnabled
                           ? 'bg-emerald-500/20 border border-emerald-500/40 text-emerald-300'
                           : 'bg-white/[0.07] hover:bg-white/[0.14] text-slate-400'
                       }`}
                     >
                       <Headphones className="w-3 h-3" />
-                      <span>{isBackgroundPlayEnabled ? 'BG Play ON' : 'BG Play OFF'}</span>
+                      <span>BG</span>
                     </button>
 
                     <button
                       type="button"
                       onClick={togglePictureInPicture}
                       title={isPipActive ? 'Exit Picture-in-Picture' : 'Picture-in-Picture (PiP)'}
-                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 transition-colors cursor-pointer ${
+                      className={`px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 transition-colors cursor-pointer ${
                         isPipActive
                           ? 'bg-indigo-600 text-white shadow-[0_2px_10px_rgba(79,70,229,0.45)]'
                           : 'bg-white/[0.07] hover:bg-white/[0.14] text-slate-200 hover:text-white'
                       }`}
                     >
                       <PictureInPicture2 className="w-3.5 h-3.5" />
-                      <span>{isPipActive ? 'PiP Active' : 'PiP'}</span>
+                      <span>PiP</span>
                     </button>
 
                     <button
@@ -3114,7 +3130,7 @@ export const LiveTvArena: React.FC = () => {
 
                         <div className="min-w-0 flex-1">
                           <h3 className="text-xs sm:text-sm font-bold text-white truncate group-hover:text-rose-400 transition-colors">
-                            {ch.name.replace(/\s*\((Arabic|English|French|Spanish|Turkish|German|Portuguese)\)/gi, '')}
+                            {formatShortChannelName(ch.name)}
                           </h3>
                           <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-0.5">
                             <span>{ch.languageLabel || 'English'}</span>
@@ -3135,7 +3151,7 @@ export const LiveTvArena: React.FC = () => {
                                   isLiveMatchProgram ? 'bg-rose-500 animate-ping' : 'bg-emerald-400'
                                 }`}
                               />
-                              <span className="truncate">{nowProg.title}</span>
+                              <span className="truncate">{formatCleanEpgTitle(nowProg.title)}</span>
                             </div>
                           ) : null}
                           {nextProg ? (
@@ -3143,7 +3159,7 @@ export const LiveTvArena: React.FC = () => {
                               title={`UP NEXT (${formatKickoffTime(nextProg.startTime).time}): ${nextProg.title}`}
                               className="mt-0.5 text-[9.5px] font-medium text-cyan-400/85 truncate"
                             >
-                              Next {formatKickoffTime(nextProg.startTime).time}: {nextProg.title}
+                              Next {formatKickoffTime(nextProg.startTime).time}: {formatCleanEpgTitle(nextProg.title)}
                             </div>
                           ) : null}
                         </div>
