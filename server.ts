@@ -1418,10 +1418,82 @@ const ADULT_BLOCKLIST = [
   'stepmom', 'stepmommy', 'stepdad', 'stepsister', 'stepbrother', 'incest', 'taboo sex', 'fetish',
   'bdsm', 'bondage', 'gay', 'lesbian', 'homosexual', 'queer', 'lgbt', 'bisexual', 'transgender',
   'orgasm', 'menage a trois', 'threesome', 'infidelity', 'passionate affair', '365 days', '365 dni',
-  'voyeur', 'erotic thriller', 'hentai', 'ecchi'
+  'voyeur', 'erotic thriller', 'hentai', 'ecchi', 'nymphomaniac', 'vivamax', 'jav', 'onlyfans',
+  'camgirl', 'stripper', 'prostitute', 'prostitution', 'brothel', 'courtesan', 'call girl',
+  'escort girl', 'sugar baby', 'sugar daddy', 'friends with benefits', 'one night stand',
+  'sex life', 'sex/life', 'sex education', 'masters of sex', 'high school dxd', 'redo of healer',
+  'interspecies reviewers', 'worlds end harem', "world's end harem", 'prison school',
+  'testament of sister new devil', 'to love-ru', 'to love ru', 'monster musume', 'valkyrie drive',
+  'queen blade', "queen's blade", 'seikon no qwaser', 'kiss x sis', 'yosuga no sora',
+  'boku no pico', 'overflow', 'euphoria', 'californication', 'the idol', 'tell me lies',
+  'fellow travelers', 'queer as folk', 'the l word', 'heartstopper', 'young royals',
+  'red white & royal blue', 'red, white & royal blue', 'call me by your name', 'brokeback mountain',
+  'blue is the warmest colour', 'blue is the warmest color', '9 songs', 'emmanuelle',
+  'caligula', 'last tango in paris', 'showgirls', 'basic instinct', 'eyes wide shut',
+  'unfaithful', 'after we collided', 'after we fell', 'after ever happy', 'after everything',
+  'poor things', 'anora', 'babygirl', 'saltburn'
 ];
+
+const BLOCKED_EXACT_TITLES = new Set([
+  'elite',
+  'élite',
+  'euphoria',
+  'sex/life',
+  'sex education',
+  'shameless',
+  'californication',
+  'bridgerton',
+  'normal people',
+  'the idol',
+  'tell me lies',
+  'heartstopper',
+  'young royals',
+  '365 days',
+  '365 dni',
+  '365 days: this day',
+  'the next 365 days',
+  'fifty shades of grey',
+  'fifty shades darker',
+  'fifty shades freed',
+  'nymphomaniac: vol. i',
+  'nymphomaniac: vol. ii',
+  'nymphomaniac',
+  'showgirls',
+  'basic instinct',
+  'basic instinct 2',
+  'eyes wide shut',
+  'blue is the warmest colour',
+  'blue is the warmest color',
+  '9 songs',
+  'the dreamers',
+  'unfaithful',
+  'original sin',
+  'wild things',
+  'secretary',
+  'poor things',
+  'anora',
+  'babygirl',
+  'saltburn',
+  'challengers',
+  'call me by your name',
+  'brokeback mountain',
+  'portrait of a lady on fire',
+  'carol',
+  'moonlight',
+  'high school dxd',
+  'redo of healer',
+  'interspecies reviewers',
+  'overflow',
+  'boku no pico',
+  'yosuga no sora',
+  'kiss x sis',
+  'domestic girlfriend',
+  "scum's wish",
+  'citrus'
+]);
+
 const safePattern = new RegExp(
-  `\\b(${ADULT_BLOCKLIST.join('|')})\\b|\\bsex(?!\\s*(trafficking|crime|worker|trade|slave))\\b`,
+  `\\b(${ADULT_BLOCKLIST.map((w) => w.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b|\\bsex(?!\\s*(trafficking|crime|worker|trade|slave|offender|predator|abuse|assault))\\b`,
   'i'
 );
 
@@ -1431,7 +1503,10 @@ const ADULT_KEYWORDS = [
   'fetish', 'kama sutra', 'masturbation', 'orgasm', 'hentai', 'ecchi', 'nude', 'nudity',
   'penetration', 'seduction', 'menage a trois', 'threesome', 'infidelity',
   'gay', 'lesbian', 'lgbt', 'gay theme', 'sexuality', 'sensuality', 'lust', 'sexy',
-  'striptease', 'voyeur', 'adultery', 'erotic drama', 'erotic comedy'
+  'striptease', 'voyeur', 'adultery', 'erotic drama', 'erotic comedy', 'female nudity',
+  'male nudity', 'full frontal nudity', 'sex scene', 'sexual awakening', 'sexual obsession',
+  'sex addiction', 'nymphomania', 'prostitution', 'stripper', 'brothel', 'swingers',
+  'forbidden love', 'steamy', 'polyamory', 'yaoi', 'yuri', 'boys love', 'girls love'
 ];
 const kwPattern = new RegExp(`\\b(${ADULT_KEYWORDS.join('|')})\\b`, 'i');
 
@@ -1439,7 +1514,7 @@ const EXPLICIT_ADULT_KEYWORDS = [
   'erotic', 'erotica', 'pornography', 'porn', 'softcore', 'hardcore porn',
   'explicit sex', 'unsimulated sex', 'sexual content', 'bdsm', 'fetish',
   'kama sutra', 'masturbation', 'orgasm', 'hentai', 'ecchi', 'nude', 'nudity',
-  'penetration', 'menage a trois', 'threesome'
+  'penetration', 'menage a trois', 'threesome', 'yaoi', 'yuri', 'futanari'
 ];
 const explicitKwPattern = new RegExp(`\\b(${EXPLICIT_ADULT_KEYWORDS.join('|')})\\b`, 'i');
 
@@ -1458,25 +1533,46 @@ function isSafe(item: any): boolean {
     if (item.genres && Array.isArray(item.genres) && item.genres.some((g: any) => g.id === 10749 || (g.name && g.name.toLowerCase() === 'romance'))) return false;
   }
 
-  const title = (item.title || item.name || '').toLowerCase();
+  const title = (item.title || item.name || '').toLowerCase().trim();
+  const origTitle = (item.original_title || item.original_name || '').toLowerCase().trim();
   const desc = (item.overview || item.desc || '').toLowerCase();
 
   // Allow "The Passion of the Christ"
-  if (title.includes('passion of the christ')) return true;
+  if (title.includes('passion of the christ') || origTitle.includes('passion of the christ')) return true;
 
-  // Explicitly block Spanish teen sex series "Élite"
-  if ((title === 'elite' || title === 'élite') && (item.origin_country?.includes('ES') || item.original_name === 'Élite')) {
+  if (BLOCKED_EXACT_TITLES.has(title) || (origTitle && BLOCKED_EXACT_TITLES.has(origTitle))) {
     return false;
   }
 
-  if (safePattern.test(title) || safePattern.test(desc)) return false;
+  if (safePattern.test(title) || (origTitle && safePattern.test(origTitle)) || safePattern.test(desc)) return false;
 
   let kwds: any[] = [];
   if (item.keywords) {
     kwds = item.keywords.results || item.keywords.keywords || [];
   }
   const kwTester = isAnimation ? explicitKwPattern : kwPattern;
-  if (kwds.some((k: any) => kwTester.test(k.name))) return false;
+  if (kwds.some((k: any) => k?.name && kwTester.test(k.name))) return false;
+
+  // Check certifications if appended (NC-17, XXX, R18+, R18, X)
+  const certs: string[] = [];
+  if (item.release_dates?.results && Array.isArray(item.release_dates.results)) {
+    item.release_dates.results.forEach((r: any) => {
+      if (Array.isArray(r.release_dates)) {
+        r.release_dates.forEach((rd: any) => {
+          if (rd?.certification) certs.push(rd.certification);
+        });
+      }
+    });
+  }
+  if (item.content_ratings?.results && Array.isArray(item.content_ratings.results)) {
+    item.content_ratings.results.forEach((r: any) => {
+      if (r?.rating) certs.push(r.rating);
+    });
+  }
+  const badCerts = ['NC-17', 'XXX', 'R18+', 'R18', 'X'];
+  if (certs.some((c) => typeof c === 'string' && badCerts.includes(c.trim().toUpperCase()))) {
+    return false;
+  }
 
   return true;
 }

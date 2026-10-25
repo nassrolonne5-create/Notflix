@@ -12,12 +12,84 @@ const ADULT_BLOCKLIST = [
   'stepmom', 'stepmommy', 'stepdad', 'stepsister', 'stepbrother', 'incest', 'taboo sex', 'fetish',
   'bdsm', 'bondage', 'gay', 'lesbian', 'homosexual', 'queer', 'lgbt', 'bisexual', 'transgender',
   'orgasm', 'menage a trois', 'threesome', 'infidelity', 'passionate affair', '365 days', '365 dni',
-  'voyeur', 'erotic thriller', 'hentai', 'ecchi'
+  'voyeur', 'erotic thriller', 'hentai', 'ecchi', 'nymphomaniac', 'vivamax', 'jav', 'onlyfans',
+  'camgirl', 'stripper', 'prostitute', 'prostitution', 'brothel', 'courtesan', 'call girl',
+  'escort girl', 'sugar baby', 'sugar daddy', 'friends with benefits', 'one night stand',
+  'sex life', 'sex/life', 'sex education', 'masters of sex', 'high school dxd', 'redo of healer',
+  'interspecies reviewers', 'worlds end harem', "world's end harem", 'prison school',
+  'testament of sister new devil', 'to love-ru', 'to love ru', 'monster musume', 'valkyrie drive',
+  'queen blade', "queen's blade", 'seikon no qwaser', 'kiss x sis', 'yosuga no sora',
+  'boku no pico', 'overflow', ' euphoria', 'californication', 'the idol', 'tell me lies',
+  'fellow travelers', 'queer as folk', 'the l word', 'heartstopper', 'young royals',
+  'red white & royal blue', 'red, white & royal blue', 'call me by your name', 'brokeback mountain',
+  'blue is the warmest colour', 'blue is the warmest color', '9 songs', 'emmanuelle',
+  'caligula', 'last tango in paris', 'showgirls', 'basic instinct', 'eyes wide shut',
+  'unfaithful', 'after we collided', 'after we fell', 'after ever happy', 'after everything',
+  'poor things', 'anora', 'babygirl', 'saltburn'
 ];
+
+// Exact lowercase titles of notorious 18+ / explicit series & movies that have short single-word names
+const BLOCKED_EXACT_TITLES = new Set([
+  'elite',
+  'élite',
+  'euphoria',
+  'sex/life',
+  'sex education',
+  'shameless',
+  'californication',
+  'bridgerton',
+  'normal people',
+  'the idol',
+  'tell me lies',
+  'heartstopper',
+  'young royals',
+  '365 days',
+  '365 dni',
+  '365 days: this day',
+  'the next 365 days',
+  'fifty shades of grey',
+  'fifty shades darker',
+  'fifty shades freed',
+  'nymphomaniac: vol. i',
+  'nymphomaniac: vol. ii',
+  'nymphomaniac',
+  'showgirls',
+  'basic instinct',
+  'basic instinct 2',
+  'eyes wide shut',
+  'blue is the warmest colour',
+  'blue is the warmest color',
+  '9 songs',
+  'the dreamers',
+  'unfaithful',
+  'original sin',
+  'wild things',
+  'secretary',
+  'poor things',
+  'anora',
+  'babygirl',
+  'saltburn',
+  'challengers',
+  'call me by your name',
+  'brokeback mountain',
+  'portrait of a lady on fire',
+  'carol',
+  'moonlight',
+  'high school dxd',
+  'redo of healer',
+  'interspecies reviewers',
+  'overflow',
+  'boku no pico',
+  'yosuga no sora',
+  'kiss x sis',
+  'domestic girlfriend',
+  "scum's wish",
+  'citrus'
+]);
 
 // Regex matching adult/pornographic terms or sexual terms (excluding violent crime phrases like 'sex trafficking')
 const pattern = new RegExp(
-  `\\b(${ADULT_BLOCKLIST.join('|')})\\b|\\bsex(?!\\s*(trafficking|crime|worker|trade|slave))\\b`,
+  `\\b(${ADULT_BLOCKLIST.map((w) => w.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b|\\bsex(?!\\s*(trafficking|crime|worker|trade|slave|offender|predator|abuse|assault))\\b`,
   'i'
 );
 
@@ -28,7 +100,10 @@ const ADULT_KEYWORDS = [
   'fetish', 'kama sutra', 'masturbation', 'orgasm', 'hentai', 'ecchi', 'nude', 'nudity',
   'penetration', 'seduction', 'menage a trois', 'threesome', 'infidelity',
   'gay', 'lesbian', 'lgbt', 'gay theme', 'sexuality', 'sensuality', 'lust', 'sexy',
-  'striptease', 'voyeur', 'adultery', 'erotic drama', 'erotic comedy'
+  'striptease', 'voyeur', 'adultery', 'erotic drama', 'erotic comedy', 'female nudity',
+  'male nudity', 'full frontal nudity', 'sex scene', 'sexual awakening', 'sexual obsession',
+  'sex addiction', 'nymphomania', 'prostitution', 'stripper', 'brothel', 'swingers',
+  'forbidden love', 'steamy', 'polyamory', 'yaoi', 'yuri', 'boys love', 'girls love'
 ];
 
 const ADULT_KW_PATTERN = new RegExp(`\\b(${ADULT_KEYWORDS.join('|')})\\b`, 'i');
@@ -38,14 +113,14 @@ const EXPLICIT_ADULT_KEYWORDS = [
   'erotic', 'erotica', 'pornography', 'porn', 'softcore', 'hardcore porn',
   'explicit sex', 'unsimulated sex', 'sexual content', 'bdsm', 'fetish',
   'kama sutra', 'masturbation', 'orgasm', 'hentai', 'ecchi', 'nude', 'nudity',
-  'penetration', 'menage a trois', 'threesome'
+  'penetration', 'menage a trois', 'threesome', 'yaoi', 'yuri', 'futanari'
 ];
 
 const EXPLICIT_ADULT_KW_PATTERN = new RegExp(`\\b(${EXPLICIT_ADULT_KEYWORDS.join('|')})\\b`, 'i');
 
 export function isSafe(item: any): boolean {
   if (!item) return false;
-  if (item.error) return false;
+  if (item.error || item.blockedBySafeFilter) return false;
   if (item.adult === true || item.adult === 'true') return false;
 
   const isAnimation =
@@ -58,19 +133,20 @@ export function isSafe(item: any): boolean {
     if (item.genres && Array.isArray(item.genres) && item.genres.some((g: any) => g.id === 10749 || (g.name && g.name.toLowerCase() === 'romance'))) return false;
   }
 
-  const title = (item.title || item.name || '').toLowerCase();
+  const title = (item.title || item.name || '').toLowerCase().trim();
+  const origTitle = (item.original_title || item.original_name || '').toLowerCase().trim();
   const desc = (item.overview || item.desc || '').toLowerCase();
 
   // Allow "The Passion of the Christ"
-  if (title.includes('passion of the christ')) return true;
+  if (title.includes('passion of the christ') || origTitle.includes('passion of the christ')) return true;
 
-  // Explicitly block Spanish teen sex series "Élite"
-  if ((title === 'elite' || title === 'élite') && (item.origin_country?.includes('ES') || item.original_name === 'Élite')) {
+  // Check exact notorious 18+ title blocklist
+  if (BLOCKED_EXACT_TITLES.has(title) || (origTitle && BLOCKED_EXACT_TITLES.has(origTitle))) {
     return false;
   }
 
-  // Check title and description
-  if (pattern.test(title) || pattern.test(desc)) return false;
+  // Check title, original_title, and description against adult regex
+  if (pattern.test(title) || (origTitle && pattern.test(origTitle)) || pattern.test(desc)) return false;
 
   // If keywords are available on item, check them
   let kwds: any[] = [];
@@ -78,7 +154,7 @@ export function isSafe(item: any): boolean {
     kwds = item.keywords.results || item.keywords.keywords || [];
   }
   const kwTester = isAnimation ? EXPLICIT_ADULT_KW_PATTERN : ADULT_KW_PATTERN;
-  if (kwds.some((k: any) => kwTester.test(k.name))) return false;
+  if (kwds.some((k: any) => k?.name && kwTester.test(k.name))) return false;
 
   return true;
 }
@@ -88,7 +164,7 @@ export async function checkDeepSafety(type: 'movie' | 'tv', id: number): Promise
     const fullData = await tmdbFetch(`/${type}/${id}`, {
       append_to_response: 'release_dates,content_ratings,keywords',
     });
-    if (!fullData || fullData.error || !fullData.id || fullData.adult) return false;
+    if (!fullData || fullData.error || fullData.blockedBySafeFilter || !fullData.id || fullData.adult) return false;
 
     const isAnimation =
       (fullData.genre_ids && Array.isArray(fullData.genre_ids) && (fullData.genre_ids.includes(16) || fullData.genre_ids.includes(10751))) ||
@@ -108,11 +184,11 @@ export async function checkDeepSafety(type: 'movie' | 'tv', id: number): Promise
 
     // For animation/family, check against explicit pornographic/hentai terms
     const kwTester = isAnimation ? EXPLICIT_ADULT_KW_PATTERN : ADULT_KW_PATTERN;
-    if (kwds.some((k: any) => kwTester.test(k.name))) {
+    if (kwds.some((k: any) => k?.name && kwTester.test(k.name))) {
       return false;
     }
 
-    // Check certifications (specifically NC-17, XXX explicit adult ratings)
+    // Check certifications (specifically NC-17, XXX, R18+, X explicit adult ratings)
     let certs: string[] = [];
     if (type === 'movie' && fullData.release_dates && fullData.release_dates.results) {
       fullData.release_dates.results.forEach((r: any) => {
@@ -122,8 +198,8 @@ export async function checkDeepSafety(type: 'movie' | 'tv', id: number): Promise
       fullData.content_ratings.results.forEach((r: any) => certs.push(r.rating));
     }
 
-    const badCerts = ['NC-17', 'XXX'];
-    if (certs.some((c: any) => typeof c === 'string' && badCerts.includes(c.toUpperCase()))) {
+    const badCerts = ['NC-17', 'XXX', 'R18+', 'R18', 'X'];
+    if (certs.some((c: any) => typeof c === 'string' && badCerts.includes(c.trim().toUpperCase()))) {
       return false;
     }
 
@@ -147,6 +223,13 @@ export function formatMediaItem(raw: any, defaultType: 'movie' | 'tv' = 'movie')
     ? `${TMDB_IMG}w1280${raw.backdrop_path}`
     : raw.backdrop || '';
 
+  const genreIds =
+    Array.isArray(raw.genre_ids) && raw.genre_ids.length > 0
+      ? raw.genre_ids
+      : Array.isArray(raw.genres)
+      ? raw.genres.map((g: any) => g.id).filter(Boolean)
+      : [];
+
   return {
     id: raw.id,
     title,
@@ -161,7 +244,7 @@ export function formatMediaItem(raw: any, defaultType: 'movie' | 'tv' = 'movie')
     backdrop,
     backdrop_path: raw.backdrop_path,
     overview: raw.overview || raw.desc || '',
-    genre_ids: raw.genre_ids || [],
+    genre_ids: genreIds,
     adult: raw.adult,
   };
 }
@@ -175,7 +258,7 @@ export const SCRAPER_TMDB_EMBED = ((import.meta.env.VITE_SCRAPER_TMDB_EMBED_URL 
 export async function tmdbFetch(endpoint: string, params: Record<string, string> = {}): Promise<any> {
   const cleanEndpoint = endpoint.startsWith('/') ? endpoint.slice(1) : endpoint;
   const searchParams = new URLSearchParams(params);
-  if (!searchParams.has('include_adult')) searchParams.set('include_adult', 'false');
+  searchParams.set('include_adult', 'false');
 
   const isAnimationOrTitleQuery =
     searchParams.get('with_genres')?.includes('16') ||
@@ -195,11 +278,15 @@ export async function tmdbFetch(endpoint: string, params: Record<string, string>
     const res = await fetch(url);
     if (res.status === 403) {
       securitySentinel.inspectResponse(res, url);
+      // NEVER fall through to direct TMDB if the server blocked this title via SafeFilter!
+      return { error: 'This title is restricted by safety filters.', blockedBySafeFilter: true, results: [] };
     }
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data.results)) {
         data.results = data.results.filter(isSafe);
+      } else if (data && data.id && !isSafe(data)) {
+        return { error: 'This title is restricted by safety filters.', blockedBySafeFilter: true };
       }
       return data;
     }
@@ -218,6 +305,8 @@ export async function tmdbFetch(endpoint: string, params: Record<string, string>
   const data = await directRes.json();
   if (Array.isArray(data.results)) {
     data.results = data.results.filter(isSafe);
+  } else if (data && data.id && !isSafe(data)) {
+    return { error: 'This title is restricted by safety filters.', blockedBySafeFilter: true };
   }
   return data;
 }
@@ -328,13 +417,19 @@ export async function fetchAnimeCatalog(genreId: number, sortBy = 'popularity.de
   };
 }
 
+export function isProhibitedQuery(query: string): boolean {
+  const q = (query || '').toLowerCase().trim();
+  if (!q) return false;
+  if (q.includes('passion of the christ')) return false;
+  if (BLOCKED_EXACT_TITLES.has(q)) return true;
+  return pattern.test(q);
+}
+
 // Search
 export async function searchMedia(query: string, typeFilter = 'all', decadeFilter = 'all') {
   if (!query.trim()) return [];
 
-  const normalizedQuery = query.toLowerCase();
-  const prohibitedWords = ['erotic', 'porn', 'xxx', 'erotica', 'fifty shades', 'hentai', 'brazzers', 'bangbros', 'playboy', 'kama sutra', '365 days', '365 dni', 'softcore porn', 'hardcore porn'];
-  if (prohibitedWords.some((word) => normalizedQuery.includes(word))) {
+  if (isProhibitedQuery(query)) {
     return [];
   }
 
@@ -343,8 +438,12 @@ export async function searchMedia(query: string, typeFilter = 'all', decadeFilte
     tmdbFetch('/search/tv', { query }),
   ]);
 
-  const movies = (movieRes.results || []).map((i: any) => formatMediaItem({ ...i, media_type: 'movie' }, 'movie'));
-  const tvs = (tvRes.results || []).map((i: any) => formatMediaItem({ ...i, media_type: 'tv' }, 'tv'));
+  const movies = (movieRes.results || [])
+    .filter(isSafe)
+    .map((i: any) => formatMediaItem({ ...i, media_type: 'movie' }, 'movie'));
+  const tvs = (tvRes.results || [])
+    .filter(isSafe)
+    .map((i: any) => formatMediaItem({ ...i, media_type: 'tv' }, 'tv'));
 
   let combined = [...movies, ...tvs].filter(isSafe);
 

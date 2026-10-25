@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Search, X, Sparkles, Film, Tv, LayoutGrid, Calendar, ShieldCheck } from 'lucide-react';
-import { searchMedia, tmdbFetch, formatMediaItem, isSafe } from '../services/api';
+import { searchMedia, tmdbFetch, formatMediaItem, isSafe, isProhibitedQuery } from '../services/api';
 import { triggerAd } from '../services/adService';
 import { telemetry } from '../services/telemetry';
 import { MediaItem } from '../types';
@@ -16,12 +16,7 @@ export const SearchPage: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(false);
 
   // Prohibited safety words check
-  const isSafetyFilteredQuery = () => {
-    const q = searchQuery.toLowerCase().trim();
-    if (!q) return false;
-    const prohibitedWords = ['erotic', 'porn', 'xxx', 'erotica', 'fifty shades', 'hentai', 'brazzers', 'bangbros', 'playboy', 'kama sutra', '365 days', '365 dni', 'softcore porn', 'hardcore porn'];
-    return prohibitedWords.some((word) => q.includes(word));
-  };
+  const isSafetyFilteredQuery = () => isProhibitedQuery(searchQuery);
 
   // Load default featured recommendations if query is blank
   useEffect(() => {

@@ -59,6 +59,7 @@ export const VideoPlayerModal: React.FC = () => {
     openPlayer,
     userData,
     updatePlaybackPosition,
+    removeHistory,
     showToast,
   } = useApp();
 
@@ -202,12 +203,14 @@ export const VideoPlayerModal: React.FC = () => {
   useEffect(() => {
     if (!activeModalItem) return;
     if (!isSafe(activeModalItem)) {
+      removeHistory(activeModalItem.id);
       showToast('This content is blocked by SafeFilter.', '🛡️');
       closePlayer();
       return;
     }
     checkDeepSafety(activeModalItem.type, activeModalItem.id).then((safe) => {
       if (!safe) {
+        removeHistory(activeModalItem.id);
         showToast('This content is blocked by SafeFilter.', '🛡️');
         closePlayer();
       }

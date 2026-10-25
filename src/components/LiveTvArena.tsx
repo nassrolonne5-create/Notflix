@@ -105,6 +105,25 @@ function attachOrUpdateBroadcastAudioFilter(
   }
 }
 
+function unlockAndUnmuteVideoAudio(
+  video: HTMLVideoElement | null,
+  enableCleanAudio: boolean
+): void {
+  if (!video) return;
+  try {
+    video.defaultMuted = false;
+    video.muted = false;
+    if (video.volume === 0) {
+      video.volume = 1;
+    }
+    attachOrUpdateBroadcastAudioFilter(video, enableCleanAudio);
+    const graph = videoAudioGraphMap.get(video);
+    if (graph && graph.ctx.state === 'suspended') {
+      graph.ctx.resume().catch(() => {});
+    }
+  } catch {}
+}
+
 export interface RecommendedChannel {
   channelId: string;
   name: string;
@@ -486,6 +505,7 @@ export const LiveTvArena: React.FC = () => {
   const arenaScrollRef = useRef<HTMLDivElement | null>(null);
   const bufferingTimerRef = useRef<number | null>(null);
   const userPausedRef = useRef<boolean>(false);
+  const userMutedRef = useRef<boolean>(false);
   const wakeLockRef = useRef<any>(null);
 
   useEffect(() => {
@@ -509,6 +529,30 @@ export const LiveTvArena: React.FC = () => {
     }
   }, [activeChannel?.id, activeChannel?.logo]);
 
+  // Ensure Web Audio graph is immediately resumed on any pointer/touch/key interaction if browser suspended it
+  useEffect(() => {
+    if (!activeChannel || typeof window === 'undefined') return;
+    const resumeAudioOnGesture = () => {
+      const v = videoRef.current;
+      if (!v) return;
+      const graph = videoAudioGraphMap.get(v);
+      if (graph && graph.ctx.state === 'suspended') {
+        graph.ctx.resume().catch(() => {});
+      }
+      if (!userMutedRef.current && v.muted) {
+        v.muted = false;
+        if (v.volume === 0) v.volume = 1;
+        setIsMuted(false);
+      }
+    };
+    window.addEventListener('pointerdown', resumeAudioOnGesture, { passive: true });
+    window.addEventListener('keydown', resumeAudioOnGesture, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', resumeAudioOnGesture);
+      window.removeEventListener('keydown', resumeAudioOnGesture);
+    };
+  }, [activeChannel]);
+
   const handleVideoWaiting = useCallback(() => {
     if (bufferingTimerRef.current !== null) {
       window.clearTimeout(bufferingTimerRef.current);
@@ -526,10 +570,36 @@ export const LiveTvArena: React.FC = () => {
     userPausedRef.current = false;
     setIsVideoBuffering(false);
     setLoadingStream(false);
+    const v = videoRef.current;
+    if (v) {
+      const graph = videoAudioGraphMap.get(v);
+      if (graph && graph.ctx.state === 'suspended') {
+        graph.ctx.resume().catch(() => {});
+      }
+      if (!userMutedRef.current && v.muted) {
+        v.muted = false;
+        if (v.volume === 0) v.volume = 1;
+        setIsMuted(false);
+      }
+    }
     if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
       try {
         navigator.mediaSession.playbackState = 'playing';
       } catch {}
+    }
+  }, []);
+
+  const handleVideoVolumeChange = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const effectivelyMuted = v.muted || v.volume === 0;
+    setIsMuted(effectivelyMuted);
+    if (!effectivelyMuted) {
+      userMutedRef.current = false;
+      const graph = videoAudioGraphMap.get(v);
+      if (graph && graph.ctx.state === 'suspended') {
+        graph.ctx.resume().catch(() => {});
+      }
     }
   }, []);
 
@@ -831,6 +901,12 @@ export const LiveTvArena: React.FC = () => {
       if (matchContext !== undefined) {
         setActiveMatch(matchContext);
       }
+      // Synchronously unmute & unlock Web Audio graph while inside the user's click/tap gesture
+      userMutedRef.current = false;
+      userPausedRef.current = false;
+      setIsMuted(false);
+      unlockAndUnmuteVideoAudio(videoRef.current, isAudioCleanEnabled);
+
       setLoadingStream(true);
       setStreamError(null);
       setUsingFallbackProxy(false);
@@ -923,7 +999,7 @@ export const LiveTvArena: React.FC = () => {
         setStreamError('Unable to reach live stream gateway. Please retry or select another channel.');
       }
     },
-    [channels, scrollToPlayer]
+    [channels, scrollToPlayer, isAudioCleanEnabled]
   );
 
   const playEventDirectly = useCallback(
@@ -1224,18 +1300,36 @@ export const LiveTvArena: React.FC = () => {
       hls.attachMedia(video);
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        video.muted = isMuted;
+        const shouldMute = userMutedRef.current;
+        video.defaultMuted = shouldMute;
+        video.muted = shouldMute;
+        if (!shouldMute && video.volume === 0) {
+          video.volume = 1;
+        }
+        setIsMuted(shouldMute);
         attachOrUpdateBroadcastAudioFilter(video, isAudioCleanEnabled);
+
         video
           .play()
           .then(() => {
             setIsPlaying(true);
+            if (!userMutedRef.current) {
+              video.muted = false;
+              setIsMuted(false);
+            }
             attachOrUpdateBroadcastAudioFilter(video, isAudioCleanEnabled);
           })
-          .catch(() => {
-            video.muted = true;
-            setIsMuted(true);
-            video.play().then(() => setIsPlaying(true)).catch(() => {});
+          .catch((err: any) => {
+            // Ignore AbortError caused by source switching or initial segment buffering
+            if (err?.name === 'AbortError') {
+              return;
+            }
+            // Only fall back to muted playback if the browser strictly rejected unmuted autoplay (NotAllowedError)
+            if (err?.name === 'NotAllowedError') {
+              video.muted = true;
+              setIsMuted(true);
+              video.play().then(() => setIsPlaying(true)).catch(() => {});
+            }
           });
       });
 
@@ -1254,6 +1348,13 @@ export const LiveTvArena: React.FC = () => {
           playbackStarted = true;
           window.clearTimeout(watchdogTimer);
           setLoadingStream(false);
+        }
+        if (!userPausedRef.current && video.paused) {
+          if (!userMutedRef.current) {
+            video.muted = false;
+            setIsMuted(false);
+          }
+          video.play().then(() => setIsPlaying(true)).catch(() => {});
         }
       });
 
@@ -1293,7 +1394,24 @@ export const LiveTvArena: React.FC = () => {
           playbackStarted = true;
           window.clearTimeout(watchdogTimer);
           setLoadingStream(false);
-          video.play().then(() => setIsPlaying(true)).catch(() => {});
+          const shouldMute = userMutedRef.current;
+          video.defaultMuted = shouldMute;
+          video.muted = shouldMute;
+          if (!shouldMute && video.volume === 0) {
+            video.volume = 1;
+          }
+          setIsMuted(shouldMute);
+          attachOrUpdateBroadcastAudioFilter(video, isAudioCleanEnabled);
+          video
+            .play()
+            .then(() => setIsPlaying(true))
+            .catch((err: any) => {
+              if (err?.name === 'NotAllowedError') {
+                video.muted = true;
+                setIsMuted(true);
+                video.play().then(() => setIsPlaying(true)).catch(() => {});
+              }
+            });
         },
         { once: true }
       );
@@ -1319,10 +1437,10 @@ export const LiveTvArena: React.FC = () => {
   }, [sources, activeSourceIndex, usingFallbackProxy, Boolean(activeChannel)]);
 
   useEffect(() => {
-    if (videoRef.current) {
+    if (videoRef.current && (activeChannel || videoAudioGraphMap.has(videoRef.current))) {
       attachOrUpdateBroadcastAudioFilter(videoRef.current, isAudioCleanEnabled);
     }
-  }, [isAudioCleanEnabled]);
+  }, [isAudioCleanEnabled, activeChannel]);
 
   const stopLiveStream = useCallback(() => {
     userPausedRef.current = true;
@@ -1797,8 +1915,15 @@ export const LiveTvArena: React.FC = () => {
   const toggleMute = () => {
     const v = videoRef.current;
     if (!v) return;
-    v.muted = !v.muted;
-    setIsMuted(v.muted);
+    const nextMuted = !v.muted;
+    userMutedRef.current = nextMuted;
+    v.defaultMuted = nextMuted;
+    v.muted = nextMuted;
+    if (!nextMuted) {
+      if (v.volume === 0) v.volume = 1;
+      unlockAndUnmuteVideoAudio(v, isAudioCleanEnabled);
+    }
+    setIsMuted(nextMuted);
   };
 
   const toggleFullscreen = () => {
@@ -1830,6 +1955,7 @@ export const LiveTvArena: React.FC = () => {
           onPlaying={handleVideoPlaying}
           onCanPlay={handleVideoPlaying}
           onPause={handleVideoPause}
+          onVolumeChange={handleVideoVolumeChange}
           className="w-full h-full object-contain"
         />
       </div>
@@ -2476,6 +2602,9 @@ export const LiveTvArena: React.FC = () => {
                           key={src.id || idx}
                           type="button"
                           onClick={() => {
+                            userMutedRef.current = false;
+                            setIsMuted(false);
+                            unlockAndUnmuteVideoAudio(videoRef.current, isAudioCleanEnabled);
                             setUsingFallbackProxy(false);
                             setActiveSourceIndex(idx);
                           }}
@@ -2488,6 +2617,20 @@ export const LiveTvArena: React.FC = () => {
                           Server {idx + 1}
                         </button>
                       ))}
+
+                    <button
+                      type="button"
+                      onClick={toggleMute}
+                      title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
+                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 transition-colors cursor-pointer ${
+                        isMuted
+                          ? 'bg-rose-500/25 border border-rose-500/50 text-rose-300'
+                          : 'bg-white/[0.07] hover:bg-white/[0.14] text-slate-200'
+                      }`}
+                    >
+                      {isMuted ? <VolumeX className="w-3.5 h-3.5 text-rose-400" /> : <Volume2 className="w-3.5 h-3.5 text-emerald-400" />}
+                      <span>{isMuted ? 'Unmute' : 'Sound ON'}</span>
+                    </button>
 
                     <button
                       type="button"
