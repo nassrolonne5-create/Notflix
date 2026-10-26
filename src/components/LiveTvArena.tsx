@@ -621,13 +621,23 @@ export const LiveTvArena: React.FC = () => {
     }
   }, []);
 
+  const lastVideoGestureMsRef = useRef<number>(0);
+
   const handleVideoPause = useCallback(() => {
     const v = videoRef.current;
     if (!v) return;
-    // IMPORTANT: Never set userPausedRef.current = true inside onPause!
-    // On Android & iOS, switching to another app or locking the phone screen fires video.onpause
-    // BEFORE document.hidden becomes true. If Background Play is enabled and the user did not
-    // explicitly pause via our Play/Pause button or lock-screen controls, immediately resume playback!
+    // Distinguish a direct tap on the native <video controls> Pause button (gesture within last 600ms while visible)
+    // from an OS-initiated pause when switching apps, exiting PiP, or locking the phone screen (verrouillage).
+    const msSinceVideoGesture = Date.now() - lastVideoGestureMsRef.current;
+    if (
+      !document.hidden &&
+      document.hasFocus?.() !== false &&
+      msSinceVideoGesture >= 0 &&
+      msSinceVideoGesture < 600
+    ) {
+      userPausedRef.current = true;
+    }
+
     if (
       isBackgroundPlayEnabledRef.current &&
       activeChannelRef.current &&
@@ -685,24 +695,17 @@ export const LiveTvArena: React.FC = () => {
   }, [activeChannel?.name]);
 
   // Draggable Floating Icon / Mini-Player Position State
+  // Always starts in the upper-right area below the top navbar when opening the website, while remaining freely movable anywhere.
   const floatingOrbElRef = useRef<HTMLDivElement | null>(null);
+  const hasUserMovedOrbRef = useRef<boolean>(false);
   const [orbPos, setOrbPos] = useState<{ x: number; y: number }>(() => {
-    if (typeof window === 'undefined') return { x: 20, y: 120 };
+    if (typeof window === 'undefined') return { x: 20, y: 82 };
     try {
-      const saved = localStorage.getItem('notflix_live_orb_pos_v1');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
-          return {
-            x: Math.min(Math.max(8, parsed.x), Math.max(8, window.innerWidth - 172)),
-            y: Math.min(Math.max(8, parsed.y), Math.max(8, window.innerHeight - 80)),
-          };
-        }
-      }
+      localStorage.removeItem('notflix_live_orb_pos_v1');
     } catch {}
     return {
-      x: Math.max(12, window.innerWidth - 176),
-      y: Math.max(76, window.innerHeight - 168),
+      x: Math.max(12, window.innerWidth - 204),
+      y: 82,
     };
   });
   const orbPosRef = useRef<{ x: number; y: number }>(orbPos);
@@ -713,6 +716,19 @@ export const LiveTvArena: React.FC = () => {
       floatingOrbElRef.current.style.transform = `translate3d(${orbPos.x}px, ${orbPos.y}px, 0)`;
     }
   }, [orbPos]);
+
+  // Align precisely with the upper-right hero area once the floating pill's exact DOM width is measured on mount
+  useEffect(() => {
+    if (typeof window === 'undefined' || hasUserMovedOrbRef.current) return;
+    const el = floatingOrbElRef.current;
+    const pillWidth = el?.offsetWidth || 186;
+    const initialAligned = {
+      x: Math.max(12, window.innerWidth - pillWidth - 18),
+      y: 82,
+    };
+    orbPosRef.current = initialAligned;
+    setOrbPos(initialAligned);
+  }, []);
 
   // Transparency state when user scrolls/navigates up and down for movies or series
   const [isNavigatingPage, setIsNavigatingPage] = useState<boolean>(false);
@@ -747,8 +763,16 @@ export const LiveTvArena: React.FC = () => {
     const handleResize = () => {
       setOrbPos((prev) => {
         const el = floatingOrbElRef.current;
-        const maxWidth = el?.offsetWidth || (isMiniPlayerMode ? 290 : 172);
+        const maxWidth = el?.offsetWidth || (isMiniPlayerMode ? 290 : 186);
         const maxHeight = el?.offsetHeight || (isMiniPlayerMode ? 200 : 56);
+        if (!hasUserMovedOrbRef.current && !isMiniPlayerMode) {
+          const defaultPos = {
+            x: Math.max(12, window.innerWidth - maxWidth - 18),
+            y: 82,
+          };
+          orbPosRef.current = defaultPos;
+          return defaultPos;
+        }
         const clamped = {
           x: Math.min(Math.max(8, prev.x), Math.max(8, window.innerWidth - maxWidth - 8)),
           y: Math.min(Math.max(8, prev.y), Math.max(8, window.innerHeight - maxHeight - 8)),
@@ -914,7 +938,7 @@ export const LiveTvArena: React.FC = () => {
   const tuneAbortRef = useRef<AbortController | null>(null);
 
   const tuneChannel = useCallback(
-    async (channelId: string, matchContext?: LiveSportEvent | null) => {
+    async (channelId: string, matchContext?: LiveSportEvent | null, skipUrlUpdate = false) => {
       if (!channelId) return;
       const reqId = ++tuneRequestIdRef.current;
       if (tuneAbortRef.current) {
@@ -926,7 +950,7 @@ export const LiveTvArena: React.FC = () => {
       if (matchContext !== undefined) {
         setActiveMatch(matchContext);
       }
-      if (typeof window !== 'undefined' && isArenaOpen) {
+      if (typeof window !== 'undefined' && isArenaOpen && !skipUrlUpdate) {
         try {
           const nextSeoPath = matchContext
             ? buildMatchSeoPath(matchContext)
@@ -1034,17 +1058,17 @@ export const LiveTvArena: React.FC = () => {
         setStreamError('Unable to reach live stream gateway. Please retry or select another channel.');
       }
     },
-    [channels, scrollToPlayer, isAudioCleanEnabled]
+    [channels, scrollToPlayer, isAudioCleanEnabled, isArenaOpen]
   );
 
   const playEventDirectly = useCallback(
-    (ev: LiveSportEvent, preferredChannelId?: string) => {
+    (ev: LiveSportEvent, preferredChannelId?: string, skipUrlUpdate = false) => {
       if (preferredChannelId) {
-        tuneChannel(preferredChannelId, ev);
+        tuneChannel(preferredChannelId, ev, skipUrlUpdate);
         return;
       }
       if (Array.isArray(ev.recommendedChannels) && ev.recommendedChannels.length > 0) {
-        tuneChannel(ev.recommendedChannels[0].channelId, ev);
+        tuneChannel(ev.recommendedChannels[0].channelId, ev, skipUrlUpdate);
         return;
       }
       const s = (ev.sport || '').toLowerCase();
@@ -1067,9 +1091,9 @@ export const LiveTvArena: React.FC = () => {
         }) || channels[0];
 
       if (fallbackCh) {
-        tuneChannel(fallbackCh.id, ev);
+        tuneChannel(fallbackCh.id, ev, skipUrlUpdate);
       } else {
-        tuneChannel('bein-sports-1-ar', ev);
+        tuneChannel('bein-sports-1-ar', ev, skipUrlUpdate);
       }
     },
     [channels, tuneChannel]
@@ -1093,7 +1117,7 @@ export const LiveTvArena: React.FC = () => {
       const targetChannelId = decodeURIComponent(channelMatch[1]).trim().toLowerCase();
       if (targetChannelId) {
         setActiveView('channels');
-        tuneChannel(targetChannelId, null);
+        tuneChannel(targetChannelId, null, true);
       }
       return;
     }
@@ -1109,7 +1133,7 @@ export const LiveTvArena: React.FC = () => {
         events.find((e) => buildMatchSeoPath(e).toLowerCase().endsWith(rawParam.toLowerCase()));
       if (matchedEv) {
         setActiveView('events');
-        playEventDirectly(matchedEv);
+        playEventDirectly(matchedEv, undefined, true);
       }
       return;
     }
@@ -1132,14 +1156,14 @@ export const LiveTvArena: React.FC = () => {
       return;
     }
 
-    const origin = window.location.origin || 'https://notflixtv.com';
+    const origin = 'https://notflixtv.com';
     let title =
-      'Notflix Arena — Watch Live Football, Sports & 130+ 24/7 TV Channels Free in 1080p HD';
+      'Notflix Arena — Watch Live Sports, Football Matches & 24/7 TV Channels Free in 1080p HD';
     let desc =
-      'Watch live football matches today (Champions League, Premier League, LaLiga, Serie A, Saudi Pro League), NBA, UFC, F1 & 130+ 24/7 sports TV channels (beIN Sports AR, Sky Sports, ESPN, SSC) free in 1080p HD.';
+      'Watch live football matches (UEFA Champions League, Premier League, La Liga, El Clásico, Serie A), NBA, UFC, F1 & 102+ 24/7 live TV channels (beIN Sports AR/EN, Sky Sports, ESPN, SSC) free in 1080p HD.';
     let keywords =
       'Notflix Arena, live football stream free, watch football online hd, bein sports 1 live arabic, بث مباشر مباريات اليوم, مشاهدة بي ان سبورت, sky sports live stream, champions league live, premier league live, laliga live, el clasico live stream';
-    let canonicalPath = '/live';
+    let canonicalPath = currentPath.length > 1 ? currentPath.replace(/\/+$/, '') : '/live';
     let ogImage = 'https://image.tmdb.org/t/p/w1280/8Y43POKjjKDGI9MH89NW0NAzzp8.jpg';
     let jsonLdPayload: Record<string, any> | null = null;
 
@@ -1164,7 +1188,9 @@ export const LiveTvArena: React.FC = () => {
         160
       );
       keywords = `${matchTitle} live stream, watch ${homeName} vs ${awayName} free hd, ${homeName} live, ${awayName} live, ${leagueName} live stream, ${chNames}, بث مباشر ${homeName} و ${awayName}, مشاهدة مباراة ${homeName}`;
-      canonicalPath = buildMatchSeoPath(activeMatch);
+      canonicalPath = /^\/live\/match\//i.test(currentPath)
+        ? currentPath.replace(/\/+$/, '')
+        : buildMatchSeoPath(activeMatch);
       const logoCandidate = [
         activeMatch.homeTeam?.logo,
         activeMatch.awayTeam?.logo,
@@ -1241,7 +1267,9 @@ export const LiveTvArena: React.FC = () => {
       title = `Watch ${cleanName} (${langLabel}) Live Stream 24/7 Free in 1080p HD | Notflix Arena`;
       desc = `Watch ${activeChannel.name} live stream 24/7 online free in 1080p Full HD on Notflix Arena. Instant multi-mirror sports, football, and entertainment broadcast.`;
       keywords = `${cleanName} live stream, watch ${cleanName} online free hd, ${activeChannel.name} 24/7 live, ${cleanName} ${langLabel}, بث مباشر ${cleanName}, Notflix Arena`;
-      canonicalPath = buildChannelSeoPath(activeChannel.id);
+      canonicalPath = /^\/live\/channel\//i.test(currentPath)
+        ? currentPath.replace(/\/+$/, '')
+        : buildChannelSeoPath(activeChannel.id);
       if (activeChannel.logo && activeChannel.logo.startsWith('http')) {
         ogImage = activeChannel.logo;
       }
@@ -2001,11 +2029,9 @@ export const LiveTvArena: React.FC = () => {
     } catch {}
 
     if (wasDrag) {
+      hasUserMovedOrbRef.current = true;
       const finalPos = { ...orbPosRef.current };
       setOrbPos(finalPos);
-      try {
-        localStorage.setItem('notflix_live_orb_pos_v1', JSON.stringify(finalPos));
-      } catch {}
     } else if (!isCancel && !isMiniPlayerMode) {
       openArenaWithSeoUrl('/live');
       fetchLiveEvents();
@@ -2149,23 +2175,60 @@ export const LiveTvArena: React.FC = () => {
   };
 
   const toggleFullscreen = () => {
-    const container = playerContainerRef.current as any;
     const video = videoRef.current as any;
-    if (!container && !video) return;
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
-    } else if (container?.requestFullscreen) {
-      container.requestFullscreen().catch(() => {
-        if (typeof video?.webkitEnterFullscreen === 'function') {
-          try {
-            video.webkitEnterFullscreen();
-          } catch {}
-        }
-      });
+    const container = playerContainerRef.current as any;
+    if (!video && !container) return;
+
+    const doc = document as any;
+    if (doc.fullscreenElement || doc.webkitFullscreenElement || video?.webkitDisplayingFullscreen) {
+      if (typeof doc.exitFullscreen === 'function' && doc.fullscreenElement) {
+        doc.exitFullscreen().catch(() => {});
+      } else if (typeof doc.webkitExitFullscreen === 'function') {
+        try {
+          doc.webkitExitFullscreen();
+        } catch {}
+      } else if (typeof video?.webkitExitFullscreen === 'function') {
+        try {
+          video.webkitExitFullscreen();
+        } catch {}
+      }
+      try {
+        (window.screen?.orientation as any)?.unlock?.();
+      } catch {}
+      return;
+    }
+
+    const lockLandscapeIfSupported = () => {
+      try {
+        (window.screen?.orientation as any)?.lock?.('landscape')?.catch?.(() => {});
+      } catch {}
+    };
+
+    // Always prioritize native <video> element fullscreen first (gives true edge-to-edge hardware video player on mobile & desktop)
+    if (typeof video?.requestFullscreen === 'function') {
+      video
+        .requestFullscreen()
+        .then(lockLandscapeIfSupported)
+        .catch(() => {
+          if (typeof video?.webkitEnterFullscreen === 'function') {
+            try {
+              video.webkitEnterFullscreen();
+            } catch {}
+          } else if (typeof container?.requestFullscreen === 'function') {
+            container.requestFullscreen().then(lockLandscapeIfSupported).catch(() => {});
+          }
+        });
     } else if (typeof video?.webkitEnterFullscreen === 'function') {
       try {
         video.webkitEnterFullscreen();
       } catch {}
+    } else if (typeof video?.webkitRequestFullscreen === 'function') {
+      try {
+        video.webkitRequestFullscreen();
+        lockLandscapeIfSupported();
+      } catch {}
+    } else if (typeof container?.requestFullscreen === 'function') {
+      container.requestFullscreen().then(lockLandscapeIfSupported).catch(() => {});
     }
   };
 
@@ -2181,17 +2244,23 @@ export const LiveTvArena: React.FC = () => {
       >
         <video
           ref={videoRef}
+          controls={isArenaOpen && !isMiniPlayerMode}
           playsInline
           autoPlay
           muted={isMuted}
-          onClick={togglePlayPause}
+          onPointerDown={() => {
+            lastVideoGestureMsRef.current = Date.now();
+          }}
+          onTouchStart={() => {
+            lastVideoGestureMsRef.current = Date.now();
+          }}
           onDoubleClick={toggleFullscreen}
           onWaiting={handleVideoWaiting}
           onPlaying={handleVideoPlaying}
           onCanPlay={handleVideoPlaying}
           onPause={handleVideoPause}
           onVolumeChange={handleVideoVolumeChange}
-          className="w-full h-full object-contain cursor-pointer"
+          className="w-full h-full object-contain cursor-pointer bg-black"
         />
       </div>
 

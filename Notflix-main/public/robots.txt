@@ -1,6 +1,16 @@
 User-agent: *
 Allow: /
-Disallow: /admin
-Disallow: /api/admin/
+
+User-agent: Googlebot
+Allow: /
+
+User-agent: Googlebot-Image
+Allow: /
+
+User-agent: Googlebot-Video
+Allow: /
+
+User-agent: Bingbot
+Allow: /
 
 Sitemap: https://notflixtv.com/sitemap.xml

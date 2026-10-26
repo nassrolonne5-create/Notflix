@@ -5,6 +5,14 @@ import './index.css';
 // Global Deployment Transition Monitor (prevents open Chrome tabs from ever getting stuck on a cached 404 after updates)
 (function initDeploymentMonitor() {
   if (typeof window === 'undefined') return;
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent || '' : '';
+  if (
+    /googlebot|inspectiontool|googleother|storebot|bingbot|slurp|duckduckbot|baiduspider|yandex|applebot|twitterbot|facebookexternalhit|linkedinbot|telegrambot|whatsapp|discordbot/i.test(
+      ua
+    )
+  ) {
+    return;
+  }
 
   let activeVersion: string | null = null;
   let isChecking = false;
@@ -24,10 +32,9 @@ import './index.css';
     } catch {}
 
     try {
-      // Force Chrome to overwrite its HTTP disk cache for / and current path with fresh server HTML
+      // Force Chrome to overwrite its HTTP disk cache for / and current path with fresh server HTML (never prefetch /admin)
       await Promise.allSettled([
         fetch('/', { cache: 'reload', headers: { Accept: 'text/html' } }),
-        fetch('/admin', { cache: 'reload', headers: { Accept: 'text/html' } }),
         fetch(window.location.pathname, { cache: 'reload', headers: { Accept: 'text/html' } }),
       ]);
     } catch {}
@@ -37,7 +44,7 @@ import './index.css';
     if (isChecking || document.visibilityState === 'hidden') return;
     isChecking = true;
     try {
-      const res = await fetch(`/api/version?_cb=${Date.now()}`, {
+      const res = await fetch('/api/version', {
         cache: 'no-store',
         headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
       });
@@ -47,7 +54,7 @@ import './index.css';
         for (let i = 0; i < 15; i++) {
           await new Promise((r) => setTimeout(r, 1500));
           try {
-            const h = await fetch(`/api/health?_cb=${Date.now()}`, { cache: 'no-store' });
+            const h = await fetch('/api/health', { cache: 'no-store' });
             if (h.ok) {
               await evictBrowserHtmlCacheAndCookies();
               break;
@@ -63,12 +70,10 @@ import './index.css';
         if (activeVersion && activeVersion !== serverVer) {
           activeVersion = serverVer;
           await evictBrowserHtmlCacheAndCookies();
-          // If no video player is actively open, seamlessly refresh to load new assets
+          // If no video player is actively open, seamlessly refresh to load new assets without adding ?_cb= query parameters
           const isPlayingVideo = Boolean(document.querySelector('video'));
           if (!isPlayingVideo) {
-            const url = new URL(window.location.href);
-            url.searchParams.set('_cb', String(Date.now()));
-            window.location.replace(url.toString());
+            window.location.reload();
           }
         } else {
           activeVersion = serverVer;

@@ -14,6 +14,21 @@
     <!-- Deployment Recovery, Sticky-Cookie Cleaner & Stale Cache Guard -->
     <script data-cfasync="false">
       (function() {
+        var ua = (typeof navigator !== 'undefined' && navigator.userAgent) ? navigator.userAgent : '';
+        var isBot = /googlebot|inspectiontool|googleother|storebot|bingbot|slurp|duckduckbot|baiduspider|yandex|applebot|twitterbot|facebookexternalhit|linkedinbot|telegrambot|whatsapp|discordbot|pinterest|ahrefsbot|semrushbot/i.test(ua);
+
+        // Immediately strip any legacy ?_cb= query parameter in-place without triggering a navigation redirect
+        try {
+          if (window.location.search.indexOf('_cb=') !== -1 && window.history && window.history.replaceState) {
+            var cleanUrl = new URL(window.location.href);
+            cleanUrl.searchParams.delete('_cb');
+            window.history.replaceState({}, document.title, cleanUrl.pathname + cleanUrl.search + cleanUrl.hash);
+          }
+        } catch (e) {}
+
+        // Never run cookie-wiping or reload redirects inside search engine crawlers (prevents "Page with redirect" & "Alternate canonical" in GSC)
+        if (isBot) return;
+
         // 1. Wipe any proxy sticky-session cookies that could pin Chrome to an old container after update
         function clearAllDomainCookies() {
           try {
@@ -49,16 +64,7 @@
           }
         } catch (e) {}
 
-        // 3. Clean up any temporary cache-bust query param (_cb) from address bar once loaded cleanly
-        try {
-          if (window.location.search.indexOf('_cb=') !== -1 && window.history && window.history.replaceState) {
-            var cleanUrl = new URL(window.location.href);
-            cleanUrl.searchParams.delete('_cb');
-            window.history.replaceState({}, document.title, cleanUrl.pathname + cleanUrl.search + cleanUrl.hash);
-          }
-        } catch (e) {}
-
-        // 4. Auto-recover if Chrome tries to load a superseded JS/CSS chunk during/after deployment
+        // 3. Auto-recover if Chrome tries to load a superseded JS/CSS chunk during/after deployment (without polluting URL with ?_cb=)
         var isRecovering = false;
         function recoverAfterDeployment() {
           if (isRecovering) return;
@@ -71,15 +77,17 @@
           var attempts = 0;
           function checkServerReady() {
             attempts++;
-            fetch('/api/health?_cb=' + Date.now(), {
+            fetch('/api/health', {
               cache: 'no-store',
               headers: { 'Pragma': 'no-cache', 'Cache-Control': 'no-cache' }
             })
               .then(function(res) {
                 if (res.ok) {
-                  var target = new URL(window.location.href);
-                  target.searchParams.set('_cb', String(Date.now()));
-                  window.location.replace(target.toString());
+                  fetch(window.location.pathname, { cache: 'reload', headers: { 'Accept': 'text/html' } })
+                    .catch(function() {})
+                    .finally(function() {
+                      window.location.reload();
+                    });
                 } else if (attempts < 15) {
                   setTimeout(checkServerReady, 1500);
                 } else {

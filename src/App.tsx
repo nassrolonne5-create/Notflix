@@ -164,22 +164,21 @@ const AppContent: React.FC = () => {
       }
     }
 
-    let title = 'Notflix — Watch Movies, TV Series & Anime Online Free in HD';
+    let title = 'Notflix — Watch Movies, TV Series & Anime Online Free in HD (1080p & 4K)';
     let desc =
-      'Stream trending movies, full TV series seasons, and anime online free in 1080p & 4K HD on Notflix with English, Arabic, Spanish & multi-language subtitles.';
+      'Stream trending movies, full TV series seasons, and anime online free in 1080p & 4K HD on Notflix with English, Arabic, Spanish, French & multi-language subtitles.';
     let ogImage = 'https://image.tmdb.org/t/p/w1280/8Y43POKjjKDGI9MH89NW0NAzzp8.jpg';
-    const canonicalUrl =
-      typeof window !== 'undefined'
-        ? `${window.location.origin}${window.location.pathname}`
-        : 'https://notflixtv.com/';
+    const rawPathname = typeof window !== 'undefined' ? window.location.pathname || '/' : '/';
+    const cleanPathname = rawPathname.length > 1 ? rawPathname.replace(/\/+$/, '') : '/';
+    const canonicalUrl = `https://notflixtv.com${cleanPathname}`;
 
     if (activeModalItem) {
       const name = activeModalItem.title || activeModalItem.name || 'Movie';
       const year = activeModalItem.year ? ` (${activeModalItem.year})` : '';
       const isTv = activeModalItem.type === 'tv';
-      title = `Watch ${name}${year} ${isTv ? 'Full Series' : 'Full Movie'} Online Free HD — Notflix`;
+      title = `Watch ${name}${year} ${isTv ? 'Full TV Series & Episodes' : 'Full Movie'} Online Free HD — Notflix`;
       const plot = activeModalItem.overview ? ` ${activeModalItem.overview}` : '';
-      desc = `Stream ${name}${year} online in 1080p HD with multi-language subtitles on Notflix.${plot}`.slice(0, 158);
+      desc = `Watch ${name}${year} online free in 1080p & 4K HD with English, Arabic, Spanish & multi-language subtitles on Notflix.${plot}`.slice(0, 158);
       if (activeModalItem.backdrop || activeModalItem.poster) {
         ogImage = activeModalItem.backdrop || activeModalItem.poster;
       }
@@ -233,24 +232,24 @@ const AppContent: React.FC = () => {
 
       switch (activeTab) {
         case 'movies':
-          title = 'Watch Movies Online Free in HD (1080p & 4K) | Notflix';
+          title = 'Watch Movies Online Free in HD (1080p & 4K) — New & Trending Films | Notflix';
           desc =
-            'Browse and stream newly released blockbusters, top-rated movies, and trending films in 1080p and 4K HD with multi-language subtitles on Notflix.';
+            'Stream the latest Hollywood blockbusters, top-rated movies, and trending films online free in 1080p and 4K HD with multi-language subtitles on Notflix.';
           break;
         case 'tv':
           title = 'Watch TV Series & Full Seasons Online Free in HD | Notflix';
           desc =
-            'Binge-watch full seasons and latest episodes of popular TV shows in HD on Notflix with multi-server playback and instant subtitles.';
+            'Binge-watch full seasons and latest episodes of trending TV series online free in 1080p HD with English, Arabic, and multi-language subtitles on Notflix.';
           break;
         case 'anime':
           title = 'Watch Anime Online Free in HD (English Sub & Dub) | Notflix';
           desc =
-            'Stream top-rated and trending Japanese anime series and movies in 1080p HD with English, Arabic, and multi-language subtitles on Notflix.';
+            'Stream top-rated and trending Japanese anime series and movies online in 1080p HD with English, Arabic, and multi-language subtitles on Notflix.';
           break;
         case 'search':
-          title = 'Search Movies, TV Shows & Anime Online | Notflix';
+          title = 'Search Movies, TV Shows & Anime Online in HD | Notflix';
           desc =
-            'Search and stream any movie, TV series, or anime across our high-speed HD catalog with multi-language subtitles on Notflix.';
+            'Search and stream any movie, TV series, or anime in 1080p & 4K HD with instant multi-language subtitles on Notflix.';
           break;
         case 'library':
           title = 'My Library, Watchlist & Continue Watching | Notflix';
@@ -258,9 +257,9 @@ const AppContent: React.FC = () => {
             'Access your saved watchlist, favorite movies, and automatic episode resume history on Notflix.';
           break;
         default:
-          title = 'Notflix — Watch Movies, TV Series & Anime Online Free in HD';
+          title = 'Notflix — Watch Movies, TV Series & Anime Online Free in HD (1080p & 4K)';
           desc =
-            'Stream trending movies, full TV series seasons, and anime online free in 1080p & 4K HD on Notflix with English, Arabic, Spanish & multi-language subtitles.';
+            'Stream trending movies, full TV series seasons, and anime online free in 1080p & 4K HD on Notflix with English, Arabic, Spanish, French & multi-language subtitles.';
           break;
       }
     }
