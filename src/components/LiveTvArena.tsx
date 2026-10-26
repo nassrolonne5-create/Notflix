@@ -442,6 +442,7 @@ export const LiveTvArena: React.FC = () => {
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [isAudioCleanEnabled, setIsAudioCleanEnabled] = useState<boolean>(true);
   const [isPipActive, setIsPipActive] = useState<boolean>(false);
+  const [pipToastMessage, setPipToastMessage] = useState<string | null>(null);
   const [isBackgroundPlayEnabled, setIsBackgroundPlayEnabled] = useState<boolean>(() => {
     if (typeof window === 'undefined') return true;
     try {
@@ -452,8 +453,10 @@ export const LiveTvArena: React.FC = () => {
   });
   const [liveArenaViewersCount, setLiveArenaViewersCount] = useState<number>(0);
 
-  // Video & HLS refs
+  // Video, Companion Pure-Audio (<audio>) & HLS refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const bgAudioRef = useRef<HTMLAudioElement | null>(null);
+  const bgAudioActiveRef = useRef<boolean>(false);
   const bgVideoParkingRef = useRef<HTMLDivElement | null>(null);
   const arenaVideoSlotRef = useRef<HTMLDivElement | null>(null);
   const miniVideoSlotRef = useRef<HTMLDivElement | null>(null);
@@ -461,8 +464,10 @@ export const LiveTvArena: React.FC = () => {
   const hlsRef = useRef<Hls | null>(null);
   const arenaScrollRef = useRef<HTMLDivElement | null>(null);
   const bufferingTimerRef = useRef<number | null>(null);
+  const pipToastTimerRef = useRef<number | null>(null);
   const userPausedRef = useRef<boolean>(false);
   const userMutedRef = useRef<boolean>(false);
+  const isAudioCleanEnabledRef = useRef<boolean>(isAudioCleanEnabled);
   const wakeLockRef = useRef<any>(null);
   const activeChannelRef = useRef<LiveChannel | null>(null);
   const isBackgroundPlayEnabledRef = useRef<boolean>(isBackgroundPlayEnabled);
@@ -471,6 +476,142 @@ export const LiveTvArena: React.FC = () => {
   useEffect(() => {
     activeChannelRef.current = activeChannel;
   }, [activeChannel]);
+
+  useEffect(() => {
+    isAudioCleanEnabledRef.current = isAudioCleanEnabled;
+  }, [isAudioCleanEnabled]);
+
+  const showPipHelperToast = useCallback((msg: string, durationMs = 5000) => {
+    setPipToastMessage(msg);
+    if (pipToastTimerRef.current !== null) {
+      window.clearTimeout(pipToastTimerRef.current);
+    }
+    pipToastTimerRef.current = window.setTimeout(() => {
+      setPipToastMessage(null);
+      pipToastTimerRef.current = null;
+    }, durationMs);
+  }, []);
+
+  const showFullscreenVideoCue = useCallback(
+    (video: HTMLVideoElement | null, message: string, durationSec = 5) => {
+      if (!video || typeof window === 'undefined') return;
+      try {
+        let track: TextTrack | null = null;
+        for (let i = 0; i < video.textTracks.length; i++) {
+          if (video.textTracks[i].label === 'notflix-pip-hint') {
+            track = video.textTracks[i];
+            break;
+          }
+        }
+        if (!track && typeof video.addTextTrack === 'function') {
+          track = video.addTextTrack('subtitles', 'notflix-pip-hint', 'en');
+        }
+        if (!track) return;
+        track.mode = 'showing';
+        if (track.cues) {
+          while (track.cues.length > 0) {
+            track.removeCue(track.cues[0]);
+          }
+        }
+        const CueCtor = (window as any).VTTCue || (window as any).TextTrackCue;
+        if (typeof CueCtor === 'function') {
+          const start = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+          const cue = new CueCtor(start, start + durationSec, message);
+          track.addCue(cue);
+          window.setTimeout(() => {
+            try {
+              if (track) track.mode = 'disabled';
+            } catch {}
+          }, durationSec * 1000);
+        }
+      } catch {}
+    },
+    []
+  );
+
+  // Route audio output seamlessly between <video> (foreground / PiP) and the pure-audio <audio> element
+  // (Chrome background / lock screen). In Chromium on Android, <video> (HasVideo() == true) is paused by
+  // WebMediaPlayerImpl::OnFrameHidden() when backgrounded without PiP, whereas a pure-audio <audio> element
+  // (HasVideo() == false) is NEVER paused by Chrome in the background or on the lock screen!
+  const syncAudioOutputRouting = useCallback(() => {
+    const v = videoRef.current as any;
+    const a = bgAudioRef.current;
+    if (!v) return;
+
+    const isFirefox =
+      typeof navigator !== 'undefined' && /Firefox|FxiOS/i.test(navigator.userAgent);
+    const targetVol = isAudioCleanEnabledRef.current ? 0.92 : 1.0;
+
+    if (isFirefox || !a) {
+      bgAudioActiveRef.current = false;
+      v.muted = userMutedRef.current;
+      if (!userMutedRef.current) {
+        v.volume = targetVol;
+      }
+      return;
+    }
+
+    const inPip =
+      (typeof document !== 'undefined' && Boolean(document.pictureInPictureElement)) ||
+      v.webkitPresentationMode === 'picture-in-picture' ||
+      Boolean(v.webkitDisplayingFullscreen);
+
+    const shouldUseBgAudio =
+      typeof document !== 'undefined' &&
+      document.hidden &&
+      !inPip &&
+      isBackgroundPlayEnabledRef.current &&
+      Boolean(activeChannelRef.current) &&
+      !userPausedRef.current;
+
+    // Also toggle Chromium's native videoTracks selection on background transition as secondary optimization
+    try {
+      const vTracks = v.videoTracks;
+      if (vTracks && vTracks.length > 0) {
+        for (let i = 0; i < vTracks.length; i++) {
+          vTracks[i].selected = !shouldUseBgAudio;
+        }
+      }
+    } catch {}
+
+    if (shouldUseBgAudio && a.readyState >= 1) {
+      bgAudioActiveRef.current = true;
+      a.muted = userMutedRef.current;
+      a.volume = userMutedRef.current ? 0 : targetVol;
+      v.volume = 0.0001;
+      if (a.paused && !userPausedRef.current) {
+        a.play()
+          .then(() => setIsPlaying(true))
+          .catch(() => {});
+      }
+    } else {
+      bgAudioActiveRef.current = false;
+      v.muted = userMutedRef.current;
+      if (!userMutedRef.current) {
+        v.volume = targetVol;
+      }
+      if (
+        isBackgroundPlayEnabledRef.current &&
+        !userPausedRef.current &&
+        activeChannelRef.current &&
+        a.readyState >= 2
+      ) {
+        // Keep pure-audio <audio> warm & playing at imperceptible volume (0.0005) while in foreground
+        // so Android Chrome already registers an active HTMLAudioElement before screen lock occurs!
+        a.muted = false;
+        a.volume = 0.0005;
+        if (a.paused) {
+          a.play().catch(() => {});
+        }
+      } else {
+        a.muted = true;
+        a.volume = 0;
+        if (!a.paused) {
+          a.pause();
+        }
+      }
+    }
+  }, []);
 
   useEffect(() => {
     isBackgroundPlayEnabledRef.current = isBackgroundPlayEnabled;
@@ -488,7 +629,8 @@ export const LiveTvArena: React.FC = () => {
         v.removeAttribute('autopictureinpicture');
       }
     }
-  }, [isBackgroundPlayEnabled]);
+    syncAudioOutputRouting();
+  }, [isBackgroundPlayEnabled, syncAudioOutputRouting]);
 
   const clearResumeTimers = useCallback(() => {
     resumeTimersRef.current.forEach((id) => window.clearTimeout(id));
@@ -497,7 +639,7 @@ export const LiveTvArena: React.FC = () => {
 
   // Multi-stage persistent playback resumption:
   // When Android/iOS pauses the <video> during app-switching, screen-locking (verrouillage), or leaving PiP,
-  // retry video.play() immediately and at staggered intervals (35ms..2200ms) after the OS surface transition finishes.
+  // immediately route audio to the pure-audio <audio> companion in Chrome and retry playback at staggered intervals.
   const resumePlaybackPersistently = useCallback(() => {
     if (
       userPausedRef.current ||
@@ -510,6 +652,7 @@ export const LiveTvArena: React.FC = () => {
 
     const attemptPlay = () => {
       const v = videoRef.current;
+      const a = bgAudioRef.current;
       if (
         !v ||
         userPausedRef.current ||
@@ -518,16 +661,28 @@ export const LiveTvArena: React.FC = () => {
       ) {
         return;
       }
-      if (!userMutedRef.current && v.muted) {
-        v.muted = false;
-        if (v.volume === 0) v.volume = 1;
-      }
-      if (v.paused && !v.ended) {
-        v.play()
-          .then(() => {
-            setIsPlaying(true);
-          })
-          .catch(() => {});
+      syncAudioOutputRouting();
+
+      if (bgAudioActiveRef.current && a) {
+        if (a.paused && !a.ended) {
+          a.play()
+            .then(() => {
+              setIsPlaying(true);
+            })
+            .catch(() => {});
+        }
+      } else {
+        if (!userMutedRef.current && v.muted) {
+          v.muted = false;
+          if (v.volume === 0) v.volume = isAudioCleanEnabledRef.current ? 0.92 : 1.0;
+        }
+        if (v.paused && !v.ended) {
+          v.play()
+            .then(() => {
+              setIsPlaying(true);
+            })
+            .catch(() => {});
+        }
       }
       if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
         try {
@@ -541,7 +696,7 @@ export const LiveTvArena: React.FC = () => {
       const tid = window.setTimeout(attemptPlay, delayMs);
       resumeTimersRef.current.push(tid);
     }
-  }, [clearResumeTimers]);
+  }, [clearResumeTimers, syncAudioOutputRouting]);
 
   useEffect(() => {
     setBufferingLogoFailed(false);
@@ -553,19 +708,31 @@ export const LiveTvArena: React.FC = () => {
     }
   }, [activeChannel?.id, activeChannel?.logo]);
 
-  // Ensure native video audio is immediately unmuted on any pointer/touch/key interaction if browser restricted initial autoplay
+  // Ensure native video & companion background audio are unlocked on any user gesture
   useEffect(() => {
     if (!activeChannel || typeof window === 'undefined') return;
     const resumeAudioOnGesture = () => {
       const v = videoRef.current;
+      const a = bgAudioRef.current;
       if (!v) return;
-      if (!userMutedRef.current && v.muted) {
+      if (!userMutedRef.current && v.muted && !bgAudioActiveRef.current) {
         v.muted = false;
         if (v.volume === 0) v.volume = isAudioCleanEnabled ? 0.92 : 1.0;
         setIsMuted(false);
       }
-      if (!userPausedRef.current && v.paused) {
+      if (!userPausedRef.current && v.paused && !document.hidden) {
         v.play().catch(() => {});
+      }
+      if (
+        a &&
+        !userPausedRef.current &&
+        isBackgroundPlayEnabledRef.current &&
+        a.paused &&
+        a.readyState >= 2
+      ) {
+        a.muted = false;
+        a.volume = bgAudioActiveRef.current ? (isAudioCleanEnabled ? 0.92 : 1.0) : 0.0005;
+        a.play().catch(() => {});
       }
     };
     window.addEventListener('pointerdown', resumeAudioOnGesture, { passive: true });
@@ -598,22 +765,63 @@ export const LiveTvArena: React.FC = () => {
     if (v) {
       v.autoPictureInPicture = isBackgroundPlayEnabledRef.current;
       v.disablePictureInPicture = false;
-      if (!userMutedRef.current && v.muted) {
+      if (!userMutedRef.current && v.muted && !bgAudioActiveRef.current) {
         v.muted = false;
-        if (v.volume === 0) v.volume = 1;
+        if (v.volume === 0) v.volume = isAudioCleanEnabledRef.current ? 0.92 : 1.0;
         setIsMuted(false);
       }
     }
+    syncAudioOutputRouting();
     if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
       try {
         navigator.mediaSession.playbackState = 'playing';
       } catch {}
     }
+  }, [syncAudioOutputRouting]);
+
+  const handleVideoTimeUpdate = useCallback(() => {
+    const v = videoRef.current;
+    const a = bgAudioRef.current;
+    if (!v || !a || userPausedRef.current || !activeChannelRef.current) return;
+    if (!bgAudioActiveRef.current && a.readyState >= 2) {
+      if (Number.isFinite(v.currentTime) && Math.abs(a.currentTime - v.currentTime) > 0.75) {
+        try {
+          a.currentTime = v.currentTime;
+        } catch {}
+      }
+      if (isBackgroundPlayEnabledRef.current && a.paused) {
+        a.muted = false;
+        a.volume = 0.0005;
+        a.play().catch(() => {});
+      }
+    }
+  }, []);
+
+  const handleBgAudioTimeUpdate = useCallback(() => {
+    const v = videoRef.current;
+    const a = bgAudioRef.current;
+    if (!v || !a || userPausedRef.current || !activeChannelRef.current) return;
+    if (bgAudioActiveRef.current && isBackgroundPlayEnabledRef.current) {
+      // Advance <video>.currentTime every ~1.5s while in background so Hls.js StreamController
+      // sees the playhead progressing, flushes old back-buffer segments, and keeps fetching new live .ts segments!
+      if (Number.isFinite(a.currentTime) && Math.abs(a.currentTime - v.currentTime) >= 1.5) {
+        try {
+          v.currentTime = a.currentTime;
+        } catch {}
+      }
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        try {
+          if (navigator.mediaSession.playbackState !== 'playing') {
+            navigator.mediaSession.playbackState = 'playing';
+          }
+        } catch {}
+      }
+    }
   }, []);
 
   const handleVideoVolumeChange = useCallback(() => {
     const v = videoRef.current;
-    if (!v) return;
+    if (!v || bgAudioActiveRef.current) return;
     const effectivelyMuted = v.muted || v.volume === 0;
     setIsMuted(effectivelyMuted);
     if (!effectivelyMuted) {
@@ -636,6 +844,7 @@ export const LiveTvArena: React.FC = () => {
       msSinceVideoGesture < 600
     ) {
       userPausedRef.current = true;
+      bgAudioRef.current?.pause();
     }
 
     if (
@@ -1369,6 +1578,7 @@ export const LiveTvArena: React.FC = () => {
 
   useEffect(() => {
     const video = videoRef.current;
+    const bgAudio = bgAudioRef.current;
     const currentSource = sources[activeSourceIndex];
     if (!video || !currentSource || !activeChannel) {
       return;
@@ -1389,6 +1599,136 @@ export const LiveTvArena: React.FC = () => {
     let failoverTriggered = false;
     let recoveryAttempts = 0;
     let recoveryTimeoutId: number | null = null;
+    let isEffectDisposed = false;
+
+    // Companion pure-audio MediaSource state for Chromium background / lock-screen playback
+    const isFirefoxBrowser =
+      typeof navigator !== 'undefined' && /Firefox|FxiOS/i.test(navigator.userAgent);
+    let bgMs: MediaSource | null = null;
+    let bgMsUrl: string | null = null;
+    let bgSb: SourceBuffer | null = null;
+    let bgCodecMime: string | null = null;
+    const bgAudioQueue: Array<{ data: Uint8Array; timestampOffset?: number }> = [];
+
+    const cleanupBgAudioMediaSource = () => {
+      bgAudioQueue.length = 0;
+      if (bgSb && bgMs && bgMs.readyState === 'open') {
+        try {
+          bgSb.abort();
+        } catch {}
+      }
+      bgSb = null;
+      bgCodecMime = null;
+      if (bgAudio) {
+        try {
+          bgAudio.pause();
+          bgAudio.removeAttribute('src');
+          bgAudio.load();
+        } catch {}
+      }
+      if (bgMsUrl) {
+        try {
+          URL.revokeObjectURL(bgMsUrl);
+        } catch {}
+        bgMsUrl = null;
+      }
+      bgMs = null;
+    };
+
+    const pumpBgAudioQueue = () => {
+      if (isEffectDisposed || !bgSb || bgSb.updating || !bgMs || bgMs.readyState !== 'open') {
+        return;
+      }
+      // Evict old back-buffer (>28s behind playhead) so companion audio SourceBuffer never hits quota limits
+      if (bgAudio && bgSb.buffered.length > 0) {
+        try {
+          const start = bgSb.buffered.start(0);
+          const end = bgSb.buffered.end(bgSb.buffered.length - 1);
+          const playhead = bgAudio.currentTime || end;
+          if (playhead - start > 28 && end - start > 34) {
+            bgSb.remove(start, Math.max(start + 4, playhead - 12));
+            return;
+          }
+        } catch {}
+      }
+      const nextChunk = bgAudioQueue.shift();
+      if (!nextChunk) return;
+      try {
+        if (
+          nextChunk.timestampOffset !== undefined &&
+          Number.isFinite(nextChunk.timestampOffset) &&
+          Math.abs((bgSb.timestampOffset || 0) - nextChunk.timestampOffset) > 0.05
+        ) {
+          bgSb.timestampOffset = nextChunk.timestampOffset;
+        }
+        bgSb.appendBuffer(nextChunk.data as unknown as BufferSource);
+      } catch (err: any) {
+        if (err?.name === 'QuotaExceededError' && bgSb.buffered.length > 0) {
+          bgAudioQueue.unshift(nextChunk);
+          try {
+            const start = bgSb.buffered.start(0);
+            const end = bgSb.buffered.end(bgSb.buffered.length - 1);
+            bgSb.remove(start, start + Math.max(4, (end - start) * 0.4));
+          } catch {}
+        }
+      }
+    };
+
+    const tryInitBgAudioSourceBuffer = () => {
+      if (isEffectDisposed || bgSb || !bgCodecMime || !bgMs || bgMs.readyState !== 'open') {
+        return;
+      }
+      try {
+        let candidateMime = bgCodecMime;
+        if (!MediaSource.isTypeSupported(candidateMime)) {
+          if (MediaSource.isTypeSupported('audio/mp4;codecs="mp4a.40.2"')) {
+            candidateMime = 'audio/mp4;codecs="mp4a.40.2"';
+          } else if (MediaSource.isTypeSupported('audio/mpeg')) {
+            candidateMime = 'audio/mpeg';
+          } else {
+            return;
+          }
+        }
+        bgSb = bgMs.addSourceBuffer(candidateMime);
+        bgSb.addEventListener('updateend', () => {
+          if (isEffectDisposed || !bgSb) return;
+          pumpBgAudioQueue();
+          if (
+            bgAudio &&
+            bgSb.buffered.length > 0 &&
+            !userPausedRef.current &&
+            isBackgroundPlayEnabledRef.current
+          ) {
+            try {
+              const bufStart = bgSb.buffered.start(0);
+              const bufEnd = bgSb.buffered.end(bgSb.buffered.length - 1);
+              if (bgAudio.currentTime < bufStart || bgAudio.currentTime > bufEnd + 2) {
+                bgAudio.currentTime =
+                  video.currentTime >= bufStart && video.currentTime <= bufEnd
+                    ? video.currentTime
+                    : Math.max(bufStart, bufEnd - 2.5);
+              }
+            } catch {}
+            syncAudioOutputRouting();
+            if (bgAudio.paused) {
+              bgAudio.play().catch(() => {});
+            }
+          }
+        });
+        pumpBgAudioQueue();
+      } catch {}
+    };
+
+    const setupCompanionBgAudioPipeline = () => {
+      if (isFirefoxBrowser || !bgAudio || typeof MediaSource === 'undefined') return;
+      cleanupBgAudioMediaSource();
+      try {
+        bgMs = new MediaSource();
+        bgMsUrl = URL.createObjectURL(bgMs);
+        bgMs.addEventListener('sourceopen', tryInitBgAudioSourceBuffer, { once: true });
+        bgAudio.src = bgMsUrl;
+      } catch {}
+    };
 
     const showSignalInterruptedOverlay = () => {
       if (failoverTriggered) return;
@@ -1417,6 +1757,8 @@ export const LiveTvArena: React.FC = () => {
 
     const startHlsJsPlayback = () => {
       if (!Hls.isSupported()) return false;
+      setupCompanionBgAudioPipeline();
+
       const hls = new Hls({
         // Keep enableWorker: false so HLS demuxing runs on the active media-exempt main thread
         // and is never throttled or suspended by Android/iOS when the screen is locked or app is backgrounded
@@ -1441,6 +1783,47 @@ export const LiveTvArena: React.FC = () => {
       hls.loadSource(playUrl);
       hls.attachMedia(video);
 
+      // Mirror pure audio track into companion <audio> MediaSource for uninterrupted Chrome background / lock-screen audio
+      hls.on(Hls.Events.BUFFER_CODECS, (_event, data: any) => {
+        if (isFirefoxBrowser || !bgAudio) return;
+        const audioTrack = data?.audio;
+        if (audioTrack && !bgCodecMime) {
+          const container = audioTrack.container || 'audio/mp4';
+          const codec = audioTrack.levelCodec || audioTrack.codec || 'mp4a.40.2';
+          bgCodecMime = `${container};codecs=${codec}`;
+          tryInitBgAudioSourceBuffer();
+        }
+      });
+
+      hls.on(Hls.Events.BUFFER_APPENDING, (_event, eventData: any) => {
+        if (isFirefoxBrowser || !bgAudio) return;
+        if (eventData?.type === 'audio' && eventData?.data) {
+          if (!bgCodecMime) {
+            const mainAudioTrack = (hls as any).bufferController?.tracks?.audio;
+            const container = mainAudioTrack?.container || 'audio/mp4';
+            const codec = mainAudioTrack?.codec || mainAudioTrack?.levelCodec || 'mp4a.40.2';
+            bgCodecMime = `${container};codecs=${codec}`;
+            tryInitBgAudioSourceBuffer();
+          }
+          const srcBytes: Uint8Array = eventData.data;
+          const copy = new Uint8Array(srcBytes.byteLength);
+          copy.set(new Uint8Array(srcBytes.buffer, srcBytes.byteOffset, srcBytes.byteLength));
+          const mainAudioSb = (hls as any).bufferController?.tracks?.audio?.buffer;
+          const tsOffset =
+            typeof eventData.offset === 'number' && Number.isFinite(eventData.offset)
+              ? eventData.offset
+              : typeof mainAudioSb?.timestampOffset === 'number' &&
+                Number.isFinite(mainAudioSb.timestampOffset)
+              ? mainAudioSb.timestampOffset
+              : undefined;
+          bgAudioQueue.push({
+            data: copy,
+            timestampOffset: tsOffset,
+          });
+          pumpBgAudioQueue();
+        }
+      });
+
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         const shouldMute = userMutedRef.current;
         video.defaultMuted = shouldMute;
@@ -1460,6 +1843,7 @@ export const LiveTvArena: React.FC = () => {
               setIsMuted(false);
             }
             attachOrUpdateBroadcastAudioFilter(video, isAudioCleanEnabled);
+            syncAudioOutputRouting();
           })
           .catch((err: any) => {
             if (err?.name === 'AbortError') {
@@ -1488,12 +1872,16 @@ export const LiveTvArena: React.FC = () => {
           window.clearTimeout(watchdogTimer);
           setLoadingStream(false);
         }
-        if (!userPausedRef.current && video.paused) {
-          if (!userMutedRef.current) {
-            video.muted = false;
-            setIsMuted(false);
+        if (!userPausedRef.current) {
+          if (bgAudioActiveRef.current && bgAudio && bgAudio.paused) {
+            bgAudio.play().then(() => setIsPlaying(true)).catch(() => {});
+          } else if (!bgAudioActiveRef.current && video.paused) {
+            if (!userMutedRef.current) {
+              video.muted = false;
+              setIsMuted(false);
+            }
+            video.play().then(() => setIsPlaying(true)).catch(() => {});
           }
-          video.play().then(() => setIsPlaying(true)).catch(() => {});
         }
       });
 
@@ -1572,6 +1960,7 @@ export const LiveTvArena: React.FC = () => {
     }
 
     return () => {
+      isEffectDisposed = true;
       window.clearTimeout(watchdogTimer);
       if (recoveryTimeoutId !== null) {
         window.clearTimeout(recoveryTimeoutId);
@@ -1580,17 +1969,20 @@ export const LiveTvArena: React.FC = () => {
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
+      cleanupBgAudioMediaSource();
     };
-  }, [sources, activeSourceIndex, usingFallbackProxy, Boolean(activeChannel)]);
+  }, [sources, activeSourceIndex, usingFallbackProxy, Boolean(activeChannel), syncAudioOutputRouting]);
 
   useEffect(() => {
     if (videoRef.current && activeChannel) {
       attachOrUpdateBroadcastAudioFilter(videoRef.current, isAudioCleanEnabled);
+      syncAudioOutputRouting();
     }
-  }, [isAudioCleanEnabled, activeChannel]);
+  }, [isAudioCleanEnabled, activeChannel, syncAudioOutputRouting]);
 
   const stopLiveStream = useCallback(() => {
     userPausedRef.current = true;
+    bgAudioActiveRef.current = false;
     clearResumeTimers();
     if (typeof document !== 'undefined' && document.pictureInPictureElement) {
       document.exitPictureInPicture().catch(() => {});
@@ -1604,6 +1996,13 @@ export const LiveTvArena: React.FC = () => {
       videoRef.current.pause();
       videoRef.current.removeAttribute('src');
       videoRef.current.load();
+    }
+    if (bgAudioRef.current) {
+      try {
+        bgAudioRef.current.pause();
+        bgAudioRef.current.removeAttribute('src');
+        bgAudioRef.current.load();
+      } catch {}
     }
     if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
       try {
@@ -1620,16 +2019,23 @@ export const LiveTvArena: React.FC = () => {
 
   const togglePlayPause = useCallback(() => {
     const v = videoRef.current;
+    const a = bgAudioRef.current;
     if (!v || !activeChannelRef.current) return;
-    if (v.paused || userPausedRef.current) {
+    if (v.paused && (!bgAudioActiveRef.current || !a || a.paused) || userPausedRef.current) {
       userPausedRef.current = false;
-      if (!userMutedRef.current && v.muted) {
+      syncAudioOutputRouting();
+      if (!userMutedRef.current && v.muted && !bgAudioActiveRef.current) {
         v.muted = false;
         setIsMuted(false);
       }
       v.play()
         .then(() => setIsPlaying(true))
         .catch(() => {});
+      if (a && isBackgroundPlayEnabledRef.current && a.readyState >= 2) {
+        a.play()
+          .then(() => setIsPlaying(true))
+          .catch(() => {});
+      }
       if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
         try {
           navigator.mediaSession.playbackState = 'playing';
@@ -1639,6 +2045,7 @@ export const LiveTvArena: React.FC = () => {
       userPausedRef.current = true;
       clearResumeTimers();
       v.pause();
+      a?.pause();
       setIsPlaying(false);
       if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
         try {
@@ -1646,17 +2053,21 @@ export const LiveTvArena: React.FC = () => {
         } catch {}
       }
     }
-  }, [clearResumeTimers]);
+  }, [clearResumeTimers, syncAudioOutputRouting]);
 
   const togglePictureInPicture = useCallback(async () => {
     const video = videoRef.current as any;
     if (!video) return;
+    const doc = document as any;
+
     try {
+      // 1. If already in W3C Picture-in-Picture (Chrome / Edge / Brave / Samsung Internet), exit PiP
       if (typeof document !== 'undefined' && document.pictureInPictureElement) {
         await document.exitPictureInPicture();
         setIsPipActive(false);
         return;
       }
+      // 2. If already in Safari / iOS Picture-in-Picture, exit PiP
       if (
         typeof video.webkitSetPresentationMode === 'function' &&
         video.webkitPresentationMode === 'picture-in-picture'
@@ -1665,6 +2076,7 @@ export const LiveTvArena: React.FC = () => {
         setIsPipActive(false);
         return;
       }
+      // 3. Standard W3C Picture-in-Picture API (Chrome Desktop & Android, Edge, Brave, Opera)
       if (
         typeof document !== 'undefined' &&
         document.pictureInPictureEnabled &&
@@ -1679,6 +2091,7 @@ export const LiveTvArena: React.FC = () => {
         setIsPipActive(true);
         return;
       }
+      // 4. Apple WebKit Picture-in-Picture API (Safari iOS / iPadOS / macOS)
       if (typeof video.webkitSetPresentationMode === 'function') {
         video.webkitSetPresentationMode('picture-in-picture');
         if (video.paused && !userPausedRef.current) {
@@ -1687,7 +2100,72 @@ export const LiveTvArena: React.FC = () => {
         setIsPipActive(true);
         return;
       }
-      // Fallback if OS PiP is unavailable: undock into floating Mini-Player
+
+      // 5. Mozilla Firefox (Android & Desktop):
+      // Firefox does not expose video.requestPictureInPicture().
+      // On Firefox for Android (Fenix / GeckoView), native Android OS Picture-in-Picture is triggered
+      // by GeckoView's PictureInPictureFeature when the <video> element is in Fullscreen mode
+      // (document.fullscreenElement === video) with MediaSession playing and the user presses/swipes the Home button!
+      const isCurrentlyFullscreen =
+        doc.fullscreenElement === video ||
+        doc.mozFullScreenElement === video ||
+        Boolean(doc.fullscreenElement);
+
+      if (isCurrentlyFullscreen) {
+        if (typeof doc.exitFullscreen === 'function') {
+          await doc.exitFullscreen().catch(() => {});
+        } else if (typeof doc.mozCancelFullScreen === 'function') {
+          try {
+            doc.mozCancelFullScreen();
+          } catch {}
+        }
+        try {
+          (window.screen?.orientation as any)?.unlock?.();
+        } catch {}
+        setIsPipActive(false);
+        return;
+      }
+
+      // Ensure video is actively playing and MediaSession is marked 'playing' for Firefox's PiP detector
+      video.controls = true;
+      if (video.paused && !userPausedRef.current) {
+        video.play().catch(() => {});
+      }
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        try {
+          navigator.mediaSession.playbackState = 'playing';
+        } catch {}
+      }
+
+      const isMobileFirefox =
+        typeof navigator !== 'undefined' &&
+        /Android|Mobile|Tablet/i.test(navigator.userAgent);
+      const hintText = isMobileFirefox
+        ? 'Firefox PiP Ready: Swipe or press your Home button now for floating Picture-in-Picture!'
+        : 'Firefox PiP: Click the Picture-in-Picture icon on the right edge of the video (or press Ctrl+Shift+])';
+
+      showPipHelperToast(hintText, 5500);
+      showFullscreenVideoCue(video, hintText, 5.5);
+
+      const lockLandscape = () => {
+        try {
+          (window.screen?.orientation as any)?.lock?.('landscape')?.catch?.(() => {});
+        } catch {}
+      };
+
+      if (typeof video.requestFullscreen === 'function') {
+        await video.requestFullscreen();
+        lockLandscape();
+        setIsPipActive(true);
+        return;
+      }
+      if (typeof video.mozRequestFullScreen === 'function') {
+        video.mozRequestFullScreen();
+        lockLandscape();
+        setIsPipActive(true);
+        return;
+      }
+
       if (isArenaOpen) {
         closeArenaRestoreSeoUrl(true);
       }
@@ -1696,23 +2174,25 @@ export const LiveTvArena: React.FC = () => {
         closeArenaRestoreSeoUrl(true);
       }
     }
-  }, [isArenaOpen, closeArenaRestoreSeoUrl]);
+  }, [isArenaOpen, closeArenaRestoreSeoUrl, showPipHelperToast, showFullscreenVideoCue]);
 
-  // Picture-in-Picture event listeners (Standard Web API + iOS Safari webkitpresentationmodechanged)
+  // Picture-in-Picture & Fullscreen-PiP event listeners (Standard Web API + Safari + Mozilla Firefox)
   useEffect(() => {
     const video = videoRef.current as any;
     if (!video) return;
 
     const onEnterPip = () => {
       setIsPipActive(true);
+      syncAudioOutputRouting();
       if (activeChannelRef.current && !userPausedRef.current && video.paused) {
         video.play().catch(() => {});
       }
     };
     const onLeavePip = () => {
       setIsPipActive(false);
-      // When the user locks their phone while in PiP, Android exits PiP and pauses the video.
-      // Immediately trigger persistent resumption so audio keeps playing on the lock screen!
+      // When the user locks their phone while in PiP, Android exits PiP and pauses the <video>.
+      // Immediately switch audio output to the companion <audio> element and resume playback!
+      syncAudioOutputRouting();
       if (activeChannelRef.current && !userPausedRef.current) {
         resumePlaybackPersistently();
       }
@@ -1720,7 +2200,20 @@ export const LiveTvArena: React.FC = () => {
     const onWebkitModeChange = () => {
       const inPip = video.webkitPresentationMode === 'picture-in-picture';
       setIsPipActive(inPip);
+      syncAudioOutputRouting();
       if (!inPip && activeChannelRef.current && !userPausedRef.current) {
+        resumePlaybackPersistently();
+      }
+    };
+    const onFullscreenChange = () => {
+      const doc = document as any;
+      const fsEl = doc.fullscreenElement || doc.mozFullScreenElement || doc.webkitFullscreenElement;
+      const isFirefox =
+        typeof navigator !== 'undefined' && /Firefox|FxiOS/i.test(navigator.userAgent);
+      if (isFirefox) {
+        setIsPipActive(Boolean(fsEl));
+      }
+      if (!fsEl && activeChannelRef.current && !userPausedRef.current) {
         resumePlaybackPersistently();
       }
     };
@@ -1728,13 +2221,17 @@ export const LiveTvArena: React.FC = () => {
     video.addEventListener('enterpictureinpicture', onEnterPip);
     video.addEventListener('leavepictureinpicture', onLeavePip);
     video.addEventListener('webkitpresentationmodechanged', onWebkitModeChange);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    document.addEventListener('mozfullscreenchange', onFullscreenChange);
 
     return () => {
       video.removeEventListener('enterpictureinpicture', onEnterPip);
       video.removeEventListener('leavepictureinpicture', onLeavePip);
       video.removeEventListener('webkitpresentationmodechanged', onWebkitModeChange);
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+      document.removeEventListener('mozfullscreenchange', onFullscreenChange);
     };
-  }, [resumePlaybackPersistently]);
+  }, [resumePlaybackPersistently, syncAudioOutputRouting]);
 
   // Background Play, MediaSession Lock-Screen Controls & Screen Wake Lock
   useEffect(() => {
@@ -1772,8 +2269,14 @@ export const LiveTvArena: React.FC = () => {
 
         navigator.mediaSession.setActionHandler('play', () => {
           userPausedRef.current = false;
+          syncAudioOutputRouting();
           const v = videoRef.current;
-          if (v) {
+          const a = bgAudioRef.current;
+          if (bgAudioActiveRef.current && a) {
+            a.play()
+              .then(() => setIsPlaying(true))
+              .catch(() => {});
+          } else if (v) {
             if (!userMutedRef.current && v.muted) {
               v.muted = false;
               setIsMuted(false);
@@ -1789,6 +2292,7 @@ export const LiveTvArena: React.FC = () => {
           userPausedRef.current = true;
           clearResumeTimers();
           videoRef.current?.pause();
+          bgAudioRef.current?.pause();
           setIsPlaying(false);
           navigator.mediaSession.playbackState = 'paused';
         });
@@ -1846,24 +2350,26 @@ export const LiveTvArena: React.FC = () => {
     // 2. Keep stream alive across app switches, window blur & mobile screen lock (verrouillage)
     const handleVisibilityOrBlur = () => {
       const v = videoRef.current as any;
+      const a = bgAudioRef.current;
       if (!v || !activeChannelRef.current) return;
+      syncAudioOutputRouting();
+
       if (document.hidden) {
         if (isBackgroundPlayEnabledRef.current && !userPausedRef.current) {
-          // Try entering Picture-in-Picture if supported during app switch, and persistently resume audio playback
-          if (
-            typeof document !== 'undefined' &&
-            !document.pictureInPictureElement &&
-            document.pictureInPictureEnabled &&
-            typeof v.requestPictureInPicture === 'function'
-          ) {
-            v.requestPictureInPicture()
-              .then(() => setIsPipActive(true))
-              .catch(() => {});
-          }
           resumePlaybackPersistently();
         }
       } else {
-        // Returned to foreground: resume playback & re-acquire screen wake lock
+        // Returned to foreground: sync <video> playhead to <audio> playhead if background audio was running
+        if (
+          a &&
+          Number.isFinite(a.currentTime) &&
+          a.currentTime > 0 &&
+          Math.abs(v.currentTime - a.currentTime) > 0.6
+        ) {
+          try {
+            v.currentTime = a.currentTime;
+          } catch {}
+        }
         if (!userPausedRef.current && v.paused) {
           v.play()
             .then(() => setIsPlaying(true))
@@ -1882,6 +2388,7 @@ export const LiveTvArena: React.FC = () => {
 
     const handleWindowBlur = () => {
       if (isBackgroundPlayEnabledRef.current && !userPausedRef.current && activeChannelRef.current) {
+        syncAudioOutputRouting();
         resumePlaybackPersistently();
       }
     };
@@ -1893,6 +2400,7 @@ export const LiveTvArena: React.FC = () => {
     // Continuous 1s background watchdog while stream is active so OS sleep/lock transitions never leave audio paused
     const bgWatchdog = window.setInterval(() => {
       const v = videoRef.current;
+      const a = bgAudioRef.current;
       if (
         !v ||
         userPausedRef.current ||
@@ -1901,7 +2409,20 @@ export const LiveTvArena: React.FC = () => {
       ) {
         return;
       }
-      if (v.paused && !v.ended && !loadingStream) {
+      syncAudioOutputRouting();
+
+      if (bgAudioActiveRef.current && a) {
+        if (a.paused && !a.ended && !loadingStream) {
+          a.play()
+            .then(() => setIsPlaying(true))
+            .catch(() => {});
+        }
+        if (Number.isFinite(a.currentTime) && Math.abs(a.currentTime - v.currentTime) >= 1.5) {
+          try {
+            v.currentTime = a.currentTime;
+          } catch {}
+        }
+      } else if (v.paused && !v.ended && !loadingStream) {
         v.play()
           .then(() => setIsPlaying(true))
           .catch(() => {});
@@ -1947,6 +2468,7 @@ export const LiveTvArena: React.FC = () => {
     loadingStream,
     clearResumeTimers,
     resumePlaybackPersistently,
+    syncAudioOutputRouting,
     stopLiveStream,
     tuneChannel,
   ]);
@@ -2162,16 +2684,21 @@ export const LiveTvArena: React.FC = () => {
 
   const toggleMute = () => {
     const v = videoRef.current;
+    const a = bgAudioRef.current;
     if (!v) return;
-    const nextMuted = !v.muted;
+    const nextMuted = !userMutedRef.current;
     userMutedRef.current = nextMuted;
     v.defaultMuted = nextMuted;
     v.muted = nextMuted;
+    if (a) {
+      a.muted = bgAudioActiveRef.current ? nextMuted : false;
+    }
     if (!nextMuted) {
       if (v.volume === 0) v.volume = 1;
       unlockAndUnmuteVideoAudio(v, isAudioCleanEnabled);
     }
     setIsMuted(nextMuted);
+    syncAudioOutputRouting();
   };
 
   const toggleFullscreen = () => {
@@ -2180,9 +2707,18 @@ export const LiveTvArena: React.FC = () => {
     if (!video && !container) return;
 
     const doc = document as any;
-    if (doc.fullscreenElement || doc.webkitFullscreenElement || video?.webkitDisplayingFullscreen) {
+    if (
+      doc.fullscreenElement ||
+      doc.mozFullScreenElement ||
+      doc.webkitFullscreenElement ||
+      video?.webkitDisplayingFullscreen
+    ) {
       if (typeof doc.exitFullscreen === 'function' && doc.fullscreenElement) {
         doc.exitFullscreen().catch(() => {});
+      } else if (typeof doc.mozCancelFullScreen === 'function') {
+        try {
+          doc.mozCancelFullScreen();
+        } catch {}
       } else if (typeof doc.webkitExitFullscreen === 'function') {
         try {
           doc.webkitExitFullscreen();
@@ -2204,13 +2740,18 @@ export const LiveTvArena: React.FC = () => {
       } catch {}
     };
 
-    // Always prioritize native <video> element fullscreen first (gives true edge-to-edge hardware video player on mobile & desktop)
+    // Always prioritize native <video> element fullscreen first (gives true edge-to-edge hardware video player on mobile & desktop, and enables Firefox Android OS PiP!)
     if (typeof video?.requestFullscreen === 'function') {
       video
         .requestFullscreen()
         .then(lockLandscapeIfSupported)
         .catch(() => {
-          if (typeof video?.webkitEnterFullscreen === 'function') {
+          if (typeof video?.mozRequestFullScreen === 'function') {
+            try {
+              video.mozRequestFullScreen();
+              lockLandscapeIfSupported();
+            } catch {}
+          } else if (typeof video?.webkitEnterFullscreen === 'function') {
             try {
               video.webkitEnterFullscreen();
             } catch {}
@@ -2218,6 +2759,11 @@ export const LiveTvArena: React.FC = () => {
             container.requestFullscreen().then(lockLandscapeIfSupported).catch(() => {});
           }
         });
+    } else if (typeof video?.mozRequestFullScreen === 'function') {
+      try {
+        video.mozRequestFullScreen();
+        lockLandscapeIfSupported();
+      } catch {}
     } else if (typeof video?.webkitEnterFullscreen === 'function') {
       try {
         video.webkitEnterFullscreen();
@@ -2234,9 +2780,17 @@ export const LiveTvArena: React.FC = () => {
 
   return (
     <>
-      {/* Persistent In-Viewport Parking Host for the Single Shared Live TV <video> Element
+      {pipToastMessage && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[120] max-w-md w-[92vw] px-4 py-2.5 rounded-xl bg-indigo-950/95 border border-indigo-400/50 text-white text-xs font-bold shadow-2xl flex items-center gap-2.5 backdrop-blur-md pointer-events-none">
+          <PictureInPicture2 className="w-4 h-4 text-indigo-300 shrink-0" />
+          <span>{pipToastMessage}</span>
+        </div>
+      )}
+
+      {/* Persistent In-Viewport Parking Host for the Single Shared Live TV <video> Element + Companion Pure-Audio <audio> Element
           Kept inside the viewport at 2x2px with 1% opacity so Chromium's IntersectionObserver
-          always treats the video as in-viewport for autoPictureInPicture and background MediaSession! */}
+          always treats the video as in-viewport for autoPictureInPicture, and the pure-audio <audio> (HasVideo() == false)
+          keeps playing uninterrupted in Chrome when switching apps or locking the phone screen! */}
       <div
         ref={bgVideoParkingRef}
         className="fixed bottom-0 right-0 w-[2px] h-[2px] overflow-hidden opacity-[0.01] pointer-events-none z-0"
@@ -2244,7 +2798,7 @@ export const LiveTvArena: React.FC = () => {
       >
         <video
           ref={videoRef}
-          controls={isArenaOpen && !isMiniPlayerMode}
+          controls={isArenaOpen || !isMiniPlayerMode}
           playsInline
           autoPlay
           muted={isMuted}
@@ -2255,12 +2809,20 @@ export const LiveTvArena: React.FC = () => {
             lastVideoGestureMsRef.current = Date.now();
           }}
           onDoubleClick={toggleFullscreen}
+          onTimeUpdate={handleVideoTimeUpdate}
           onWaiting={handleVideoWaiting}
           onPlaying={handleVideoPlaying}
           onCanPlay={handleVideoPlaying}
           onPause={handleVideoPause}
           onVolumeChange={handleVideoVolumeChange}
           className="w-full h-full object-contain cursor-pointer bg-black"
+        />
+        <audio
+          ref={bgAudioRef}
+          playsInline
+          preload="auto"
+          onTimeUpdate={handleBgAudioTimeUpdate}
+          className="hidden"
         />
       </div>
 
