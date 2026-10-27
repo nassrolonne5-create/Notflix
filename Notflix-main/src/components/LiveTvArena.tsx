@@ -162,9 +162,11 @@ const SPORT_FILTERS = [
 ];
 
 const CHANNEL_CATEGORIES = [
-  { id: 'all', label: 'All Networks (134)' },
+  { id: 'all', label: 'All Networks' },
   { id: 'bein', label: 'beIN Sports' },
-  { id: 'mena', label: 'MENA & SSC / Alkass' },
+  { id: 'starzplay', label: 'STARZPLAY' },
+  { id: 'algeria', label: 'Algeria TV' },
+  { id: 'canal', label: 'France TV & Canal+' },
   { id: 'movies', label: 'Movies & Cinema' },
   { id: 'entertainment', label: 'MBC & Arabic TV' },
   { id: 'europe', label: 'European Sports' },
@@ -175,6 +177,42 @@ const CHANNEL_CATEGORIES = [
   { id: 'motorsport', label: 'Motorsport' },
   { id: 'combat', label: 'UFC & Combat' },
 ];
+
+function matchesChannelCategory(ch: LiveTvChannel, categoryId: string): boolean {
+  if (!categoryId || categoryId === 'all') return true;
+  const cat = String(ch.category || '').toLowerCase();
+  const id = String(ch.id || '').toLowerCase();
+  const country = String((ch as any).country || '').toUpperCase();
+
+  if (categoryId === 'algeria') {
+    return cat === 'algeria' || id.startsWith('algeria-') || country === 'DZ';
+  }
+  if (categoryId === 'starzplay') {
+    return cat === 'starzplay' || id.startsWith('starzplay-') || id === 'starz-hd';
+  }
+  if (categoryId === 'canal') {
+    return (
+      cat === 'canal' ||
+      id.startsWith('canal-plus-') ||
+      id.startsWith('rmc-sport-') ||
+      id === 'lequipe-fr' ||
+      id === 'dazn-ligue1-fr' ||
+      id === 'fifa-plus-fr' ||
+      id.startsWith('bein-sports-fr-') ||
+      id.startsWith('bein-sports-max-')
+    );
+  }
+  if (categoryId === 'movies') {
+    return cat === 'movies' || id === 'starz-hd';
+  }
+  if (categoryId === 'europe') {
+    return cat === 'europe' || cat === 'eurosport';
+  }
+  if (categoryId === 'usa') {
+    return cat === 'usa' || cat === 'us-sports';
+  }
+  return cat === categoryId;
+}
 
 const CHANNEL_LANGUAGES = [
   { id: 'all', label: 'All' },
@@ -353,22 +391,61 @@ function formatCompactChannelBadge(channelId?: string, rawName?: string): string
     'sky-sport-24-it': 'Sky Sport 24',
     'sky-sport-bundesliga-1-de': 'Sky Buli 1',
     'sky-sport-top-event-de': 'Sky Top Event',
-    'starzplay-sports-1-ar': 'StarzPlay 1',
-    'starzplay-sports-2-ar': 'StarzPlay 2',
+    'starzplay-sports-1-ar': 'STARZPLAY 1',
+    'starzplay-sports-2-ar': 'STARZPLAY 2',
+    'starzplay-sports-3-ar': 'STARZPLAY 3',
+    'starzplay-asia-1-ar': 'STARZPLAY Asia 1',
+    'starzplay-asia-2-ar': 'STARZPLAY Asia 2',
+    'starzplay-criclife-1': 'CricLife 1',
+    'starzplay-criclife-2': 'CricLife 2',
+    'starzplay-encore-hd': 'STARZPLAY Encore',
+    'starzplay-action-hd': 'STARZPLAY Action',
+    'starz-hd': 'STARZPLAY Cinema',
     'sport-tv-1-pt': 'Sport TV1',
     'sport-tv-2-pt': 'Sport TV2',
     'eleven-sports-1-pt': 'Eleven 1 PT',
+    'canal-plus-fr': 'Canal+ FR',
     'canal-plus-foot-fr': 'Canal+ Foot',
+    'canal-plus-sport-fr': 'Canal+ Sport',
+    'canal-plus-sport-360-fr': 'Canal+ 360',
+    'canal-plus-premier-league-fr': 'Canal+ PL',
+    'canal-plus-top14-fr': 'Canal+ Top 14',
+    'canal-plus-f1-fr': 'Canal+ F1',
+    'canal-plus-motogp-fr': 'Canal+ MotoGP',
+    'canal-plus-golf-fr': 'Canal+ Golf',
+    'canal-plus-box-office-fr': 'Canal+ Box Office',
+    'canal-plus-cinema-fr': 'Canal+ Cinéma',
+    'canal-plus-grand-ecran-fr': 'Canal+ Grand Écran',
+    'canal-plus-series-fr': 'Canal+ Séries',
+    'canal-plus-docs-fr': 'Canal+ Docs',
     'rmc-sport-1-fr': 'RMC Sport 1',
+    'rmc-sport-2-fr': 'RMC Sport 2',
+    'lequipe-fr': "L'Équipe HD",
+    'dazn-ligue1-fr': 'DAZN Ligue 1',
+    'fifa-plus-fr': 'FIFA+ FR',
+    'algeria-tv1-entv': 'TV1 Programme National',
+    'algeria-tv2-canal': 'TV2 Canal Algérie',
+    'algeria-tv3-news': 'TV3 Algérie A3',
+    'algeria-tv4-tamazight': 'TV4 Tamazight',
+    'algeria-tv5-coran': 'TV5 Coran',
+    'algeria-tv6-youth': 'TV6 Algérie Sport',
+    'algeria-tv7-elmaarifa': 'TV7 El Maarifa',
+    'algeria-tv8-edhakira': 'TV8 Edhakira',
+    'algeria-el-heddaf-tv': 'El Heddaf TV',
+    'algeria-al24-news': 'AL24 News',
+    'algeria-echorouk-tv': 'Echorouk TV',
+    'algeria-echorouk-news': 'Echorouk News',
+    'algeria-ennahar-tv': 'Ennahar TV',
+    'algeria-el-bilad-tv': 'El Bilad TV',
+    'algeria-samira-tv': 'Samira TV',
+    'algeria-elwatania-tv': 'Elwatania TV',
+    'algeria-amou-yazid-tv': 'Amou Yazid TV',
     'usa-network-hd': 'USA Network',
     'espn-deportes': 'ESPN Deportes',
     'fox-deportes': 'Fox Deportes',
     'tudn-usa': 'TUDN HD',
-    'ad-sports-1-ar': 'AD Sports 1',
-    'ad-sports-2-ar': 'AD Sports 2',
-    'dubai-sports-1-ar': 'Dubai Sports 1',
-    'on-time-sports-1-ar': 'ON Time 1',
-    'arryadia-maroc-ar': 'Arryadia HD',
+    'saudi-sbc-ar': 'SBC Saudi',
+    'saudi-big-time-ar': 'Big Time+',
   };
   if (id && compactMap[id]) return compactMap[id];
 
@@ -2663,12 +2740,7 @@ export const LiveTvArena: React.FC = () => {
 
   const filteredChannels = useMemo(() => {
     return channels.filter((ch) => {
-      if (channelCategory !== 'all') {
-        const cat = String(ch.category || '').toLowerCase();
-        if (channelCategory === 'europe' && cat !== 'europe' && cat !== 'eurosport') return false;
-        else if (channelCategory === 'usa' && cat !== 'usa' && cat !== 'us-sports') return false;
-        else if (channelCategory !== 'europe' && channelCategory !== 'usa' && cat !== channelCategory) return false;
-      }
+      if (!matchesChannelCategory(ch, channelCategory)) return false;
       if (channelLang !== 'all' && ch.language !== channelLang) return false;
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
@@ -3181,7 +3253,7 @@ export const LiveTvArena: React.FC = () => {
                       activeView === 'channels' ? 'bg-black/30 text-white' : 'bg-white/5 text-slate-400'
                     }`}
                   >
-                    {channels.length || 117}
+                    {channels.length || 175}
                   </span>
                 </button>
               </div>
@@ -3198,7 +3270,7 @@ export const LiveTvArena: React.FC = () => {
                     placeholder={
                       activeView === 'events'
                         ? 'Search team, league, or channel...'
-                        : 'Search 117+ live sports, movie & TV channels...'
+                        : `Search ${channels.length || 175}+ live sports, movie & TV channels...`
                     }
                     className="w-full pl-8 pr-8 py-1.5 rounded-lg bg-[#080c15] border border-white/15 focus:border-rose-500 focus:outline-none text-xs text-white placeholder-slate-500"
                   />
@@ -3287,18 +3359,31 @@ export const LiveTvArena: React.FC = () => {
                     <div className="flex items-center gap-1 shrink-0">
                       {CHANNEL_CATEGORIES.map((cat) => {
                         const active = channelCategory === cat.id;
+                        const catCount =
+                          cat.id === 'all'
+                            ? channels.length
+                            : channels.filter((ch) => matchesChannelCategory(ch, cat.id)).length;
                         return (
                           <button
                             key={cat.id}
                             type="button"
                             onClick={() => setChannelCategory(cat.id)}
-                            className={`shrink-0 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                            className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
                               active
                                 ? 'bg-white text-slate-950 font-bold'
                                 : 'bg-white/[0.04] text-slate-400 hover:text-white'
                             }`}
                           >
-                            {cat.label}
+                            <span>{cat.label}</span>
+                            {catCount > 0 && (
+                              <span
+                                className={`text-[10px] font-mono ${
+                                  active ? 'text-slate-600' : 'text-slate-500'
+                                }`}
+                              >
+                                {catCount}
+                              </span>
+                            )}
                           </button>
                         );
                       })}
@@ -3958,12 +4043,12 @@ export const LiveTvArena: React.FC = () => {
             )}
 
             {/* =================================================================
-                VIEW 2: 24/7 SPORTS TV CHANNELS GRID
+                VIEW 2: 24/7 SPORTS TV CHANNELS GRID (GROUPED BY CATEGORY IN ALL VIEW)
                 ================================================================= */}
             {activeView === 'channels' && (
-              <section className="max-w-5xl mx-auto pb-12">
-                <div className="grid grid-cols-1 xs:grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2.5 sm:gap-3">
-                  {filteredChannels.map((ch) => {
+              <section className="max-w-5xl mx-auto pb-12 space-y-6">
+                {(() => {
+                  const renderChannelCard = (ch: LiveChannel) => {
                     const isSelected = activeChannel?.id === ch.id;
                     const nowProg = ch.epg?.nowPlaying || ch.epg?.currentProgram;
                     const nextProg = ch.epg?.nextUp || ch.epg?.nextProgram;
@@ -4044,8 +4129,68 @@ export const LiveTvArena: React.FC = () => {
                         </div>
                       </a>
                     );
-                  })}
-                </div>
+                  };
+
+                  if (channelCategory === 'all' && !searchQuery.trim()) {
+                    const seenIds = new Set<string>();
+                    const categorySections = CHANNEL_CATEGORIES.filter((c) => c.id !== 'all')
+                      .map((catDef) => {
+                        const groupItems = filteredChannels.filter((ch) => {
+                          if (seenIds.has(ch.id)) return false;
+                          if (matchesChannelCategory(ch, catDef.id)) {
+                            seenIds.add(ch.id);
+                            return true;
+                          }
+                          return false;
+                        });
+                        return { ...catDef, items: groupItems };
+                      })
+                      .filter((sec) => sec.items.length > 0);
+
+                    const uncategorized = filteredChannels.filter((ch) => !seenIds.has(ch.id));
+                    if (uncategorized.length > 0) {
+                      categorySections.push({
+                        id: 'other',
+                        label: 'International Channels',
+                        items: uncategorized,
+                      });
+                    }
+
+                    return categorySections.map((sec) => (
+                      <div key={sec.id} className="space-y-2.5">
+                        <div className="flex items-center justify-between px-1">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-full bg-[#1d63ff]" />
+                            <h2 className="text-xs sm:text-sm font-extrabold uppercase tracking-wider text-white">
+                              {sec.label}
+                            </h2>
+                            <span className="px-2 py-0.5 rounded-full bg-white/[0.06] border border-white/10 text-[10px] font-mono font-bold text-slate-300">
+                              {sec.items.length}
+                            </span>
+                          </div>
+                          {sec.id !== 'other' && (
+                            <button
+                              type="button"
+                              onClick={() => setChannelCategory(sec.id)}
+                              className="text-[11px] font-bold text-sky-400 hover:text-sky-300 transition-colors cursor-pointer"
+                            >
+                              View {sec.label} →
+                            </button>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-1 xs:grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2.5 sm:gap-3">
+                          {sec.items.map((ch) => renderChannelCard(ch))}
+                        </div>
+                      </div>
+                    ));
+                  }
+
+                  return (
+                    <div className="grid grid-cols-1 xs:grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2.5 sm:gap-3">
+                      {filteredChannels.map((ch) => renderChannelCard(ch))}
+                    </div>
+                  );
+                })()}
               </section>
             )}
           </div>
