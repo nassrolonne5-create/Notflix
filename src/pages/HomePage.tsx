@@ -1,21 +1,26 @@
 import React, { useEffect, useState } from 'react';
 import { Film, Tv, List } from 'lucide-react';
-import { fetchHomeContent } from '../services/api';
+import { fetchHomeContent, getCachedHomeContent } from '../services/api';
 import { MediaItem } from '../types';
 import { HeroSlider } from '../components/HeroSlider';
 import { MediaCard } from '../components/MediaCard';
 
 export const HomePage: React.FC = () => {
-  const [heroItems, setHeroItems] = useState<MediaItem[]>([]);
-  const [trendingTodayMovies, setTrendingTodayMovies] = useState<MediaItem[]>([]);
-  const [trendingTodayTv, setTrendingTodayTv] = useState<MediaItem[]>([]);
-  const [hboShows, setHboShows] = useState<MediaItem[]>([]);
-  const [disneyShows, setDisneyShows] = useState<MediaItem[]>([]);
-  const [marvelMovies, setMarvelMovies] = useState<MediaItem[]>([]);
-  const [appleShows, setAppleShows] = useState<MediaItem[]>([]);
-  const [amazonShows, setAmazonShows] = useState<MediaItem[]>([]);
-  const [topRated, setTopRated] = useState<MediaItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const initialCached = getCachedHomeContent();
+  const [heroItems, setHeroItems] = useState<MediaItem[]>(() => initialCached?.heroItems || []);
+  const [trendingTodayMovies, setTrendingTodayMovies] = useState<MediaItem[]>(
+    () => initialCached?.trendingTodayMovies || []
+  );
+  const [trendingTodayTv, setTrendingTodayTv] = useState<MediaItem[]>(
+    () => initialCached?.trendingTodayTv || []
+  );
+  const [hboShows, setHboShows] = useState<MediaItem[]>(() => initialCached?.hbo || []);
+  const [disneyShows, setDisneyShows] = useState<MediaItem[]>(() => initialCached?.disney || []);
+  const [marvelMovies, setMarvelMovies] = useState<MediaItem[]>(() => initialCached?.marvel || []);
+  const [appleShows, setAppleShows] = useState<MediaItem[]>(() => initialCached?.apple || []);
+  const [amazonShows, setAmazonShows] = useState<MediaItem[]>(() => initialCached?.amazon || []);
+  const [topRated, setTopRated] = useState<MediaItem[]>(() => initialCached?.topRated || []);
+  const [loading, setLoading] = useState<boolean>(() => !initialCached);
 
   // Section Toggle for Trending Today
   const [todayTab, setTodayTab] = useState<'movies' | 'tv'>('movies');

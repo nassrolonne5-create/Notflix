@@ -1,0 +1,6 @@
+{
+  "summary":  "Architectural and UX implementation plan for Cloudflare Turnstile verification on Notflix, including a full-site session entry gate, server-side Siteverify API validation with HMAC session tokens, environment variable defaults, and runtime Admin Dashboard controls.",
+  "updatedAt":  "2026-10-29T17:15:09.304439465Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

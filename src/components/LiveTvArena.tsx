@@ -1173,13 +1173,19 @@ export const LiveTvArena: React.FC = () => {
   }, [fetchLiveEvents, fetchLiveChannels, openArenaWithSeoUrl]);
 
   useEffect(() => {
-    fetchLiveEvents();
-    fetchLiveChannels();
+    const initialDelay = isArenaOpen ? 0 : 1600;
+    const bootTimer = window.setTimeout(() => {
+      fetchLiveEvents();
+      fetchLiveChannels();
+    }, initialDelay);
     const interval = window.setInterval(() => {
       fetchLiveEvents();
     }, 40000);
-    return () => window.clearInterval(interval);
-  }, [fetchLiveEvents, fetchLiveChannels]);
+    return () => {
+      window.clearTimeout(bootTimer);
+      window.clearInterval(interval);
+    };
+  }, [fetchLiveEvents, fetchLiveChannels, isArenaOpen]);
 
   // Real-time Live Arena viewers count poll (aggregated viewers only)
   const fetchLiveArenaViewers = useCallback(async () => {
@@ -1195,10 +1201,14 @@ export const LiveTvArena: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    fetchLiveArenaViewers();
+    const initialDelay = isArenaOpen ? 0 : 2000;
+    const bootTimer = window.setTimeout(fetchLiveArenaViewers, initialDelay);
     const interval = window.setInterval(fetchLiveArenaViewers, 20000);
-    return () => window.clearInterval(interval);
-  }, [fetchLiveArenaViewers]);
+    return () => {
+      window.clearTimeout(bootTimer);
+      window.clearInterval(interval);
+    };
+  }, [fetchLiveArenaViewers, isArenaOpen]);
 
   // Active viewer presence tracking while user is in Live Arena, Mini-Player, PiP, or Background Play
   useEffect(() => {

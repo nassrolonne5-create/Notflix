@@ -1579,6 +1579,162 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     }
   };
 
+  // =========================================================================
+  // Cloudflare Turnstile Security Gate Configuration & Browser Vault Sync
+  // =========================================================================
+  const TURNSTILE_VAULT_KEY = 'notflix_admin_turnstile_vault_v1';
+  const [turnstileEnabled, setTurnstileEnabled] = useState<boolean>(true);
+  const [turnstileMode, setTurnstileMode] = useState<'custom' | 'test'>('custom');
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState<string>('0x4AAAAAAFtBNaXqrUAtPyOc');
+  const [turnstileSecretKey, setTurnstileSecretKey] = useState<string>('');
+  const [turnstileTheme, setTurnstileTheme] = useState<'dark' | 'auto'>('dark');
+  const [turnstileVerifiedCount, setTurnstileVerifiedCount] = useState<number>(0);
+  const [turnstileFailedCount, setTurnstileFailedCount] = useState<number>(0);
+  const [turnstileUsingTestKeys, setTurnstileUsingTestKeys] = useState<boolean>(false);
+  const [turnstileHasEnvKeys, setTurnstileHasEnvKeys] = useState<boolean>(true);
+  const [showTurnstileSecret, setShowTurnstileSecret] = useState<boolean>(false);
+  const [turnstileSaving, setTurnstileSaving] = useState<boolean>(false);
+  const [turnstileBanner, setTurnstileBanner] = useState<{
+    type: 'success' | 'error' | 'info';
+    text: string;
+  } | null>(null);
+
+  const fetchAndSyncTurnstile = useCallback(async () => {
+    if (!token) return;
+    try {
+      const res = await fetch(`/api/admin/turnstile?_cb=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data.success || !data.config) return;
+      const cfg = data.config;
+
+      // Auto-restore from Admin Browser Vault only if vault has non-empty custom keys and is newer than server
+      try {
+        const rawVault = localStorage.getItem(TURNSTILE_VAULT_KEY);
+        if (rawVault) {
+          const parsedVault = JSON.parse(rawVault);
+          if (
+            parsedVault &&
+            typeof parsedVault === 'object' &&
+            parsedVault.siteKey &&
+            parsedVault.secretKey &&
+            Number(parsedVault.updatedAt || 0) > Number(cfg.updatedAt || 0)
+          ) {
+            const restoreRes = await fetch('/api/admin/turnstile', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify(parsedVault),
+            });
+            if (restoreRes.ok) {
+              const restoredData = await restoreRes.json();
+              if (restoredData.success && restoredData.config) {
+                const rCfg = restoredData.config;
+                setTurnstileEnabled(Boolean(rCfg.enabled));
+                setTurnstileMode(rCfg.mode === 'custom' ? 'custom' : 'test');
+                setTurnstileSiteKey(rCfg.siteKey || '');
+                setTurnstileSecretKey(rCfg.secretKey || '');
+                setTurnstileTheme(rCfg.theme === 'auto' ? 'auto' : 'dark');
+                setTurnstileVerifiedCount(Number(rCfg.verifiedCount) || 0);
+                setTurnstileFailedCount(Number(rCfg.failedCount) || 0);
+                setTurnstileUsingTestKeys(Boolean(rCfg.usingTestKeys));
+                setTurnstileHasEnvKeys(Boolean(rCfg.hasEnvSiteKey && rCfg.hasEnvSecretKey));
+                return;
+              }
+            }
+          }
+        }
+      } catch {}
+
+      setTurnstileEnabled(Boolean(cfg.enabled));
+      setTurnstileMode(cfg.mode === 'custom' ? 'custom' : 'test');
+      setTurnstileSiteKey(cfg.siteKey || '');
+      setTurnstileSecretKey(cfg.secretKey || '');
+      setTurnstileTheme(cfg.theme === 'auto' ? 'auto' : 'dark');
+      setTurnstileVerifiedCount(Number(cfg.verifiedCount) || 0);
+      setTurnstileFailedCount(Number(cfg.failedCount) || 0);
+      setTurnstileUsingTestKeys(Boolean(cfg.usingTestKeys));
+      setTurnstileHasEnvKeys(Boolean(cfg.hasEnvSiteKey && cfg.hasEnvSecretKey));
+    } catch {}
+  }, [token]);
+
+  const handleSaveTurnstile = async (overridePartial?: {
+    enabled?: boolean;
+    mode?: 'custom' | 'test';
+  }) => {
+    if (!token || turnstileSaving) return;
+    setTurnstileSaving(true);
+    setTurnstileBanner(null);
+
+    const nextEnabled =
+      overridePartial?.enabled !== undefined ? overridePartial.enabled : turnstileEnabled;
+    const nextMode = overridePartial?.mode !== undefined ? overridePartial.mode : turnstileMode;
+    const now = Date.now();
+
+    try {
+      const payload = {
+        enabled: nextEnabled,
+        mode: nextMode,
+        siteKey: turnstileSiteKey.trim(),
+        secretKey: turnstileSecretKey.trim(),
+        theme: turnstileTheme,
+        updatedAt: now,
+      };
+
+      const res = await fetch('/api/admin/turnstile', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (res.ok && data.success && data.config) {
+        const cfg = data.config;
+        setTurnstileEnabled(Boolean(cfg.enabled));
+        setTurnstileMode(cfg.mode === 'custom' ? 'custom' : 'test');
+        setTurnstileSiteKey(cfg.siteKey || '');
+        setTurnstileSecretKey(cfg.secretKey || '');
+        setTurnstileTheme(cfg.theme === 'auto' ? 'auto' : 'dark');
+        setTurnstileVerifiedCount(Number(cfg.verifiedCount) || 0);
+        setTurnstileFailedCount(Number(cfg.failedCount) || 0);
+        setTurnstileUsingTestKeys(Boolean(cfg.usingTestKeys));
+        setTurnstileHasEnvKeys(Boolean(cfg.hasEnvSiteKey && cfg.hasEnvSecretKey));
+
+        try {
+          localStorage.setItem(TURNSTILE_VAULT_KEY, JSON.stringify(payload));
+          window.dispatchEvent(new CustomEvent('notflix:turnstile-updated'));
+        } catch {}
+
+        setTurnstileBanner({
+          type: 'success',
+          text:
+            data.message ||
+            'Cloudflare Turnstile Gate settings saved and synced to Admin Browser Vault.',
+        });
+        setTimeout(() => setTurnstileBanner(null), 4500);
+      } else {
+        setTurnstileBanner({
+          type: 'error',
+          text: data.error || 'Failed to update Cloudflare Turnstile settings.',
+        });
+      }
+    } catch {
+      setTurnstileBanner({
+        type: 'error',
+        text: 'Network error while saving Cloudflare Turnstile settings.',
+      });
+    } finally {
+      setTurnstileSaving(false);
+    }
+  };
+
   // Initial fetch and on dateRange change
   useEffect(() => {
     if (isAuthenticated) {
@@ -1586,15 +1742,23 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     }
   }, [isAuthenticated, dateRange, fetchAnalytics]);
 
-  // Fetch & sync scraper server config + Programmatic SEO status + Live Arena status + Ad-Blocker policy once authenticated
+  // Fetch & sync scraper server config + Programmatic SEO status + Live Arena status + Ad-Blocker policy + Turnstile once authenticated
   useEffect(() => {
     if (isAuthenticated) {
       fetchAndSyncScrapers();
       fetchSeoStatus(false);
       fetchLiveArenaStatus(false);
       fetchAndSyncAdBlockPolicy();
+      fetchAndSyncTurnstile();
     }
-  }, [isAuthenticated, fetchAndSyncScrapers, fetchSeoStatus, fetchLiveArenaStatus, fetchAndSyncAdBlockPolicy]);
+  }, [
+    isAuthenticated,
+    fetchAndSyncScrapers,
+    fetchSeoStatus,
+    fetchLiveArenaStatus,
+    fetchAndSyncAdBlockPolicy,
+    fetchAndSyncTurnstile,
+  ]);
 
   // Auto-refresh timer (polls every 10 seconds for real live stream updates)
   useEffect(() => {
@@ -1602,9 +1766,10 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     const interval = setInterval(() => {
       fetchAnalytics();
       fetchLiveArenaStatus(false);
+      fetchAndSyncTurnstile();
     }, 10000);
     return () => clearInterval(interval);
-  }, [isAuthenticated, autoRefresh, fetchAnalytics, fetchLiveArenaStatus]);
+  }, [isAuthenticated, autoRefresh, fetchAnalytics, fetchLiveArenaStatus, fetchAndSyncTurnstile]);
 
   // -------------------------------------------------------------
   // RENDER: Loading check
@@ -3688,6 +3853,219 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                   ))}
                 </div>
               )}
+            </div>
+
+            {/* 4.8. Cloudflare Turnstile Entry Gate (Env Vars + Live Admin Controls) */}
+            <div
+              className={`bg-[#0e1424] border rounded-xl p-4 flex flex-col gap-3.5 transition-colors ${
+                turnstileEnabled
+                  ? 'border-blue-500/40 shadow-lg shadow-blue-950/15'
+                  : 'border-white/10'
+              }`}
+            >
+              <div className="flex items-start lg:items-center justify-between flex-col lg:flex-row gap-3 border-b border-white/10 pb-3">
+                <div className="flex items-start gap-2.5">
+                  <div
+                    className={`w-8 h-8 rounded-lg border flex items-center justify-center shrink-0 ${
+                      turnstileEnabled
+                        ? 'bg-blue-500/15 border-blue-500/35 text-blue-400'
+                        : 'bg-slate-800/60 border-white/10 text-slate-400'
+                    }`}
+                  >
+                    <Shield className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                        Cloudflare Turnstile Full-Site Entry Gate
+                      </h3>
+                      <span
+                        className={`text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded border ${
+                          turnstileEnabled
+                            ? 'bg-emerald-500/15 border-emerald-500/35 text-emerald-300'
+                            : 'bg-slate-800 border-white/10 text-slate-400'
+                        }`}
+                      >
+                        {turnstileEnabled ? 'Active · Session Gate On' : 'Disabled · Direct Entry'}
+                      </span>
+                      {turnstileEnabled && (
+                        <span className="text-[10px] font-mono text-blue-300">
+                          · {turnstileUsingTestKeys ? 'Cloudflare Test Keys Active' : 'Custom Production Keys Active'}
+                        </span>
+                      )}
+                      {turnstileHasEnvKeys && (
+                        <span className="text-[10px] font-mono text-amber-300">
+                          · .env Keys Detected
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Verifies every new browser session on first visit until the tab closes. Automatically bypasses{' '}
+                      <code className="text-blue-300">/admin</code> and legitimate search crawlers (Googlebot, Bingbot, Telegram).
+                    </p>
+                  </div>
+                </div>
+
+                {/* Live Counters & Enable/Disable Toggle */}
+                <div className="flex items-center gap-2 flex-wrap shrink-0">
+                  <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-white/5 flex items-center gap-1.5 text-xs font-mono tabular-nums">
+                    <span className="text-[10px] font-sans text-slate-400">Verified Sessions:</span>
+                    <span className="font-bold text-emerald-400">
+                      {turnstileVerifiedCount.toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-white/5 flex items-center gap-1.5 text-xs font-mono tabular-nums">
+                    <span className="text-[10px] font-sans text-slate-400">Failed / Blocked:</span>
+                    <span className="font-bold text-rose-400">
+                      {turnstileFailedCount.toLocaleString()}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center bg-[#090d18] border border-white/10 rounded-xl p-1 gap-1">
+                    <button
+                      type="button"
+                      disabled={turnstileSaving}
+                      onClick={() => handleSaveTurnstile({ enabled: false })}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                        !turnstileEnabled
+                          ? 'bg-slate-700 text-white shadow-sm'
+                          : 'text-slate-400 hover:text-white hover:bg-white/5'
+                      }`}
+                    >
+                      Gate Off
+                    </button>
+                    <button
+                      type="button"
+                      disabled={turnstileSaving}
+                      onClick={() => handleSaveTurnstile({ enabled: true })}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                        turnstileEnabled
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'text-slate-400 hover:text-white hover:bg-white/5'
+                      }`}
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>Enable Gate</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {turnstileBanner && (
+                <div
+                  className={`p-2.5 rounded-lg border text-xs font-medium flex items-center justify-between gap-2 ${
+                    turnstileBanner.type === 'success'
+                      ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-200'
+                      : 'bg-rose-500/15 border-rose-500/30 text-rose-200'
+                  }`}
+                >
+                  <span>{turnstileBanner.text}</span>
+                  <button
+                    type="button"
+                    onClick={() => setTurnstileBanner(null)}
+                    className="text-slate-400 hover:text-white px-2 cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              {/* Key & Mode Configuration Row */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-end">
+                <div className="lg:col-span-3">
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                    Protection Key Mode
+                  </label>
+                  <div className="flex items-center bg-[#0b101d] border border-white/10 rounded-lg p-1 gap-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTurnstileMode('custom');
+                        handleSaveTurnstile({ mode: 'custom' });
+                      }}
+                      className={`flex-1 py-1.5 px-2 rounded-md text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                        turnstileMode === 'custom'
+                          ? 'bg-blue-600 text-white'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      Custom Keys
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTurnstileMode('test');
+                        handleSaveTurnstile({ mode: 'test' });
+                      }}
+                      className={`flex-1 py-1.5 px-2 rounded-md text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                        turnstileMode === 'test'
+                          ? 'bg-amber-600 text-white'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      Test / Demo Mode
+                    </button>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-4">
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                    Turnstile Site Key (Public Widget Key)
+                  </label>
+                  <input
+                    type="text"
+                    value={turnstileSiteKey}
+                    onChange={(e) => setTurnstileSiteKey(e.target.value)}
+                    placeholder="0x4AAAAAA... (or set TURNSTILE_SITE_KEY in .env)"
+                    className="w-full bg-[#0b101d] border border-white/10 rounded-lg px-2.5 py-1.5 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div className="lg:col-span-3">
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                    Turnstile Secret Key (Server Verification)
+                  </label>
+                  <div className="relative flex items-center">
+                    <input
+                      type={showTurnstileSecret ? 'text' : 'password'}
+                      value={turnstileSecretKey}
+                      onChange={(e) => setTurnstileSecretKey(e.target.value)}
+                      placeholder="0x4AAAAAA... (or set TURNSTILE_SECRET_KEY in .env)"
+                      className="w-full bg-[#0b101d] border border-white/10 rounded-lg pl-2.5 pr-8 py-1.5 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowTurnstileSecret((prev) => !prev)}
+                      className="absolute right-2 text-slate-400 hover:text-white cursor-pointer"
+                      title={showTurnstileSecret ? 'Hide Secret Key' : 'Show Secret Key'}
+                    >
+                      {showTurnstileSecret ? (
+                        <EyeOff className="w-3.5 h-3.5" />
+                      ) : (
+                        <Eye className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-2 flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={turnstileSaving}
+                    onClick={() =>
+                      handleSaveTurnstile({
+                        mode:
+                          turnstileSiteKey.trim() && turnstileSecretKey.trim()
+                            ? 'custom'
+                            : turnstileMode,
+                      })
+                    }
+                    className="w-full py-1.5 px-3 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    {turnstileSaving ? 'Saving...' : 'Save Keys & Sync'}
+                  </button>
+                </div>
+              </div>
             </div>
 
             {/* 5. Compact 2-Column Anti-Interception & Permanent IP Block Shield */}

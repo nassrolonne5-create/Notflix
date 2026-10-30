@@ -1631,57 +1631,231 @@ app.all(['/api/health', '/health', '/healthz'], (req: Request, res: Response) =>
 });
 
 // ==========================================
-// 2. TMDB PROXY WITH CACHING & SAFE FILTER
+// 2. TMDB PROXY WITH CACHING, RETRY & SAFE FILTER
 // ==========================================
+async function fetchTmdbJsonWithRetry(
+  url: string,
+  fallbackGatewayUrl?: string,
+  maxRetries = 2
+): Promise<{ ok: boolean; status: number; data: any }> {
+  const headers = {
+    Accept: 'application/json',
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  };
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 7500);
+    try {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers,
+      });
+      clearTimeout(timer);
+      if (response.ok) {
+        const data = await response.json();
+        return { ok: true, status: 200, data };
+      }
+      if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+        return { ok: false, status: response.status, data: null };
+      }
+    } catch {
+      clearTimeout(timer);
+    }
+    if (attempt < maxRetries) {
+      await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+    }
+  }
+
+  // Fallback to Coolify Gateway mirror if direct api.themoviedb.org connection failed
+  if (fallbackGatewayUrl) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6000);
+    try {
+      const gwRes = await fetch(fallbackGatewayUrl, {
+        signal: controller.signal,
+        headers,
+      });
+      clearTimeout(timer);
+      if (gwRes.ok) {
+        const data = await gwRes.json();
+        return { ok: true, status: 200, data };
+      }
+    } catch {
+      clearTimeout(timer);
+    }
+  }
+
+  return { ok: false, status: 502, data: null };
+}
+
+const tmdbRefreshInFlight = new Map<string, Promise<any>>();
+
+async function fetchAndCacheTmdbEndpoint(
+  tmdbPath: string,
+  paramsObj: Record<string, string> = {}
+): Promise<any> {
+  const queryParams = new URLSearchParams(paramsObj);
+  queryParams.set('api_key', TMDB_API_KEY);
+  queryParams.set('language', queryParams.get('language') || 'en-US');
+  queryParams.set('include_adult', 'false');
+  const isAnimationOrTitleQuery =
+    queryParams.get('with_genres')?.includes('16') ||
+    queryParams.get('with_genres')?.includes('10751') ||
+    queryParams.get('with_keywords')?.includes('210024') ||
+    tmdbPath.includes('search') ||
+    tmdbPath.startsWith('movie/') ||
+    tmdbPath.startsWith('tv/');
+
+  if (!isAnimationOrTitleQuery && !queryParams.has('without_genres')) {
+    queryParams.set('without_genres', '10749');
+  }
+
+  const cacheKey = `${tmdbPath}?${queryParams.toString()}`;
+  const cached = apiCache.get(cacheKey);
+  const now = Date.now();
+
+  const doRefresh = async () => {
+    if (tmdbRefreshInFlight.has(cacheKey)) {
+      return tmdbRefreshInFlight.get(cacheKey)!;
+    }
+    const task = (async () => {
+      const url = `${TMDB_BASE}/${tmdbPath}?${queryParams.toString()}`;
+      const gatewayBase = getGatewayFallbackUrl();
+      const fallbackGatewayUrl = gatewayBase
+        ? `${gatewayBase}/api/tmdb/${tmdbPath}?${queryParams.toString()}`
+        : undefined;
+
+      const result = await fetchTmdbJsonWithRetry(url, fallbackGatewayUrl, 2);
+      if (!result.ok || !result.data) {
+        if (cached?.data) return cached.data;
+        return { page: 1, results: [], genres: [], cast: [], crew: [], videos: { results: [] } };
+      }
+
+      const data = result.data;
+      if (Array.isArray(data.results)) {
+        data.results = data.results.filter(isSafe);
+      } else if (data.id && !isSafe(data)) {
+        return { error: 'This title is restricted by safety filters.', blockedBySafeFilter: true };
+      }
+
+      apiCache.set(cacheKey, { timestamp: Date.now(), data });
+      return data;
+    })().finally(() => {
+      tmdbRefreshInFlight.delete(cacheKey);
+    });
+    tmdbRefreshInFlight.set(cacheKey, task);
+    return task;
+  };
+
+  if (cached) {
+    if (now - cached.timestamp >= CACHE_TTL_MS) {
+      // Stale-While-Revalidate: return cached response in <1ms and refresh in background
+      doRefresh().catch(() => {});
+    }
+    return cached.data;
+  }
+
+  return doRefresh();
+}
+
+let cachedHomeCatalogPayload: { timestamp: number; data: any } | null = null;
+let homeCatalogRefreshInFlight: Promise<any> | null = null;
+const HOME_CATALOG_TTL_MS = 10 * 60 * 1000; // 10 minutes fresh window
+
+async function getOrRefreshHomeCatalogPayload(force = false): Promise<any> {
+  const now = Date.now();
+  if (!force && cachedHomeCatalogPayload) {
+    if (now - cachedHomeCatalogPayload.timestamp >= HOME_CATALOG_TTL_MS && !homeCatalogRefreshInFlight) {
+      homeCatalogRefreshInFlight = refreshHomeCatalogInternal().finally(() => {
+        homeCatalogRefreshInFlight = null;
+      });
+    }
+    return cachedHomeCatalogPayload.data;
+  }
+  if (!homeCatalogRefreshInFlight) {
+    homeCatalogRefreshInFlight = refreshHomeCatalogInternal().finally(() => {
+      homeCatalogRefreshInFlight = null;
+    });
+  }
+  return homeCatalogRefreshInFlight;
+}
+
+async function refreshHomeCatalogInternal(): Promise<any> {
+  const [
+    trendDayM,
+    trendDayT,
+    trendWeekM,
+    trendWeekT,
+    topR,
+    hboData,
+    disneyData,
+    marvelData,
+    appleData,
+    amazonData,
+  ] = await Promise.all([
+    fetchAndCacheTmdbEndpoint('trending/movie/day'),
+    fetchAndCacheTmdbEndpoint('trending/tv/day'),
+    fetchAndCacheTmdbEndpoint('trending/movie/week'),
+    fetchAndCacheTmdbEndpoint('trending/tv/week'),
+    fetchAndCacheTmdbEndpoint('movie/top_rated'),
+    fetchAndCacheTmdbEndpoint('discover/tv', { with_networks: '49', sort_by: 'popularity.desc' }),
+    fetchAndCacheTmdbEndpoint('discover/tv', { with_networks: '2739', sort_by: 'popularity.desc' }),
+    fetchAndCacheTmdbEndpoint('discover/movie', { with_companies: '420', sort_by: 'popularity.desc' }),
+    fetchAndCacheTmdbEndpoint('discover/tv', { with_networks: '2552', sort_by: 'popularity.desc' }),
+    fetchAndCacheTmdbEndpoint('discover/tv', { with_networks: '1024', sort_by: 'popularity.desc' }),
+  ]);
+
+  const payload = {
+    success: true,
+    updatedAt: Date.now(),
+    trendDayM: trendDayM?.results || [],
+    trendDayT: trendDayT?.results || [],
+    trendWeekM: trendWeekM?.results || [],
+    trendWeekT: trendWeekT?.results || [],
+    topR: topR?.results || [],
+    hboData: hboData?.results || [],
+    disneyData: disneyData?.results || [],
+    marvelData: marvelData?.results || [],
+    appleData: appleData?.results || [],
+    amazonData: amazonData?.results || [],
+  };
+
+  if (payload.trendDayM.length > 0 || payload.trendDayT.length > 0) {
+    cachedHomeCatalogPayload = { timestamp: Date.now(), data: payload };
+  }
+  return payload;
+}
+
+// Instant single-request Home Page Catalog endpoint (<2ms from pre-warmed RAM cache)
+app.get('/api/catalog/home', async (_req: Request, res: Response) => {
+  try {
+    const data = await getOrRefreshHomeCatalogPayload(false);
+    res.setHeader('Cache-Control', 'public, max-age=120, stale-while-revalidate=600');
+    return res.json(data);
+  } catch {
+    if (cachedHomeCatalogPayload?.data) {
+      return res.json(cachedHomeCatalogPayload.data);
+    }
+    return res.status(502).json({ success: false });
+  }
+});
+
 app.get('/api/tmdb/*', async (req: Request, res: Response) => {
   try {
     const tmdbPath = String(req.params[0] || '').replace(/^\/+/, '');
     if (!tmdbPath || tmdbPath.includes('..') || !/^[a-zA-Z0-9/_-]+$/.test(tmdbPath)) {
       return res.status(400).json({ error: 'Invalid TMDB endpoint path' });
     }
-    const queryParams = new URLSearchParams(req.query as Record<string, string>);
-    
-    // Enforce include_adult=false & without_genres=10749 at the TMDB source
-    queryParams.set('api_key', TMDB_API_KEY);
-    queryParams.set('language', queryParams.get('language') || 'en-US');
-    queryParams.set('include_adult', 'false');
-    const isAnimationOrTitleQuery =
-      queryParams.get('with_genres')?.includes('16') ||
-      queryParams.get('with_genres')?.includes('10751') ||
-      queryParams.get('with_keywords')?.includes('210024') ||
-      tmdbPath.includes('search') ||
-      tmdbPath.startsWith('movie/') ||
-      tmdbPath.startsWith('tv/');
-
-    if (!isAnimationOrTitleQuery && !queryParams.has('without_genres')) {
-      queryParams.set('without_genres', '10749');
-    }
-
-    const cacheKey = `${tmdbPath}?${queryParams.toString()}`;
-    const cached = apiCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
-      return res.json(cached.data);
-    }
-
-    const url = `${TMDB_BASE}/${tmdbPath}?${queryParams.toString()}`;
-    const response = await fetch(url);
-    if (!response.ok) {
-      return res.status(response.status).json({ error: `TMDB error: ${response.statusText}` });
-    }
-
-    const data = await response.json();
-
-    if (Array.isArray(data.results)) {
-      data.results = data.results.filter(isSafe);
-    } else if (data.id && !isSafe(data)) {
+    const data = await fetchAndCacheTmdbEndpoint(tmdbPath, req.query as Record<string, string>);
+    if (data?.blockedBySafeFilter) {
       return res.status(403).json({ error: 'This title is restricted by safety filters.' });
     }
-
-    apiCache.set(cacheKey, { timestamp: Date.now(), data });
+    res.setHeader('Cache-Control', 'public, max-age=120, stale-while-revalidate=600');
     return res.json(data);
-  } catch (err: any) {
-    console.warn('TMDB Proxy Error:', err?.message || err);
-    return res.status(500).json({ error: 'Failed to fetch from TMDB' });
+  } catch {
+    return res.json({ page: 1, results: [], genres: [], cast: [], crew: [], videos: { results: [] } });
   }
 });
 
@@ -4069,7 +4243,13 @@ interface OfficialChannelEpgData {
 const cachedOfficialBroadcasterEpg = new Map<string, OfficialChannelEpgData>();
 let officialBroadcasterEpgLastRefreshMs = 0;
 let officialBroadcasterEpgInFlight: Promise<void> | null = null;
-const OFFICIAL_BROADCASTER_EPG_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const OFFICIAL_BROADCASTER_EPG_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const cachedOpenEpgXmltvMap = new Map<string, OfficialChannelEpgData>();
+let openEpgXmltvLastRefreshMs = 0;
+let openEpgXmltvInFlight: Promise<void> | null = null;
+const OPEN_EPG_XMLTV_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours (XMLTV files update daily)
+let liveEventsRefreshInFlight: Promise<any> | null = null;
+let liveChannelsRefreshInFlight: Promise<any> | null = null;
 
 function normalizeTeamTextForEpgMatch(raw: string): string {
   let s = String(raw || '')
@@ -4994,21 +5174,46 @@ function parseEspnEventToLiveSportEvent(
   ];
 }
 
-async function getOrRefreshLiveEventsPayload(maxAgeMs = 12000): Promise<{
+async function getOrRefreshLiveEventsPayload(maxAgeMs = 45000): Promise<{
   status: string;
   updatedAt: string;
   count: number;
   events: any[];
 }> {
-  if (
+  const hasValidCached =
     cachedLiveEventsPayload &&
     Array.isArray(cachedLiveEventsPayload.data?.events) &&
-    cachedLiveEventsPayload.data.events.length > 0 &&
-    Date.now() - cachedLiveEventsPayload.timestamp < maxAgeMs
-  ) {
-    return cachedLiveEventsPayload.data;
+    cachedLiveEventsPayload.data.events.length > 0;
+
+  if (hasValidCached && Date.now() - cachedLiveEventsPayload!.timestamp < maxAgeMs) {
+    return cachedLiveEventsPayload!.data;
   }
 
+  const triggerRefresh = () => {
+    if (!liveEventsRefreshInFlight) {
+      liveEventsRefreshInFlight = refreshLiveEventsPayloadInternal().finally(() => {
+        liveEventsRefreshInFlight = null;
+      });
+    }
+    return liveEventsRefreshInFlight;
+  };
+
+  // Stale-While-Revalidate: if we already have cached live events and maxAgeMs > 0,
+  // return the cached events in <1ms and refresh in the background so users never wait!
+  if (hasValidCached && maxAgeMs > 0) {
+    triggerRefresh().catch(() => {});
+    return cachedLiveEventsPayload!.data;
+  }
+
+  return triggerRefresh();
+}
+
+async function refreshLiveEventsPayloadInternal(): Promise<{
+  status: string;
+  updatedAt: string;
+  count: number;
+  events: any[];
+}> {
   try {
     const nowMs = Date.now();
     const todayIso = new Date(nowMs).toISOString().slice(0, 10).replace(/-/g, '');
@@ -7422,19 +7627,48 @@ async function refreshOfficialBroadcasterEpg(): Promise<void> {
     };
 
     const xmltvFiles = [
+      'qatar1.xml.gz',
       'turkey1.xml.gz',
       'france1.xml.gz',
-      'southafrica2.xml.gz',
-      'qatar1.xml.gz',
-      'qatar2.xml.gz',
       'saudiarabia1.xml.gz',
-      'egypt1.xml.gz',
-      'morocco1.xml.gz',
-      'unitedkingdom1.xml.gz',
-      'spain1.xml.gz',
-      'spain2.xml.gz',
-      'unitedstates1.xml.gz',
+      'southafrica2.xml.gz',
     ];
+
+    // If open-epg.com XMLTV cache is still fresh (within 4 hours), reuse it immediately without downloading or decompressing!
+    if (
+      cachedOpenEpgXmltvMap.size > 0 &&
+      nowMs - openEpgXmltvLastRefreshMs < OPEN_EPG_XMLTV_TTL_MS
+    ) {
+      for (const [k, v] of cachedOpenEpgXmltvMap.entries()) {
+        if (!nextMap.has(k)) {
+          nextMap.set(k, v);
+        }
+      }
+      return;
+    }
+
+    if (openEpgXmltvInFlight) {
+      for (const [k, v] of cachedOpenEpgXmltvMap.entries()) {
+        if (!nextMap.has(k)) {
+          nextMap.set(k, v);
+        }
+      }
+      return;
+    }
+
+    const gunzipAsync = (buf: Buffer): Promise<Buffer> =>
+      new Promise((resolve, reject) => {
+        zlib.gunzip(buf, (err, res) => (err ? reject(err) : resolve(res)));
+      });
+
+    const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const targetXmltvChannelsPattern = Object.keys(xmltvChannelToInternalIds)
+      .map(escapeRegex)
+      .join('|');
+    const targetedProgrammeRegex = new RegExp(
+      `<programme\\s+[^>]*channel="(${targetXmltvChannelsPattern})"[^>]*>[\\s\\S]*?<\\/programme>`,
+      'g'
+    );
 
     const fetchAndParseXmltvGz = async (fileName: string) => {
       const controller = new AbortController();
@@ -7448,14 +7682,22 @@ async function refreshOfficialBroadcasterEpg(): Promise<void> {
         });
         if (!r.ok) return;
         const arrBuf = await r.arrayBuffer();
-        const xmlText = zlib.gunzipSync(Buffer.from(arrBuf)).toString('utf8');
-        const progBlocks = xmlText.split('<programme ').slice(1);
-        const byInternalChannel = new Map<string, OfficialProgramSlot[]>();
+        // Decompress asynchronously on libuv worker thread so the main Node.js HTTP event loop is never blocked
+        const unzippedBuf = await gunzipAsync(Buffer.from(arrBuf));
+        const xmlText = unzippedBuf.toString('utf8');
+        // Yield to event loop before scanning
+        await new Promise((resolve) => setImmediate(resolve));
 
-        for (const blk of progBlocks) {
-          const chRaw = blk.match(/channel="([^"]+)"/)?.[1];
+        const byInternalChannel = new Map<string, OfficialProgramSlot[]>();
+        const matches = xmlText.matchAll(targetedProgrammeRegex);
+
+        for (const match of matches) {
+          const blk = match[0];
+          const chRaw = match[1];
           if (!chRaw) continue;
-          const targetIds = xmltvChannelToInternalIds[chRaw] || xmltvChannelToInternalIds[decodeHtmlEntitiesClean(chRaw)];
+          const targetIds =
+            xmltvChannelToInternalIds[chRaw] ||
+            xmltvChannelToInternalIds[decodeHtmlEntitiesClean(chRaw)];
           if (!targetIds || targetIds.length === 0) continue;
 
           const startRaw = blk.match(/start="([^"]+)"/)?.[1];
@@ -7497,7 +7739,6 @@ async function refreshOfficialBroadcasterEpg(): Promise<void> {
         }
 
         for (const [internalId, slots] of byInternalChannel.entries()) {
-          // Do not overwrite authoritative direct broadcaster feeds (e.g. bein.com with explicit live='1' tags) if already populated
           if (nextMap.has(internalId)) continue;
           const sorted = slots.sort((a, b) => a.startMs - b.startMs);
           let curIdx = sorted.findIndex((p) => nowMs >= p.startMs && nowMs < p.endMs);
@@ -7529,6 +7770,10 @@ async function refreshOfficialBroadcasterEpg(): Promise<void> {
             `open-epg.com (${fileName.replace('.xml.gz', '')})`,
             sorted
           );
+          const built = nextMap.get(internalId);
+          if (built) {
+            cachedOpenEpgXmltvMap.set(internalId, built);
+          }
         }
       } catch {
         // ignore individual XMLTV feed timeout
@@ -7537,12 +7782,28 @@ async function refreshOfficialBroadcasterEpg(): Promise<void> {
       }
     };
 
-    // Fetch priority sports & entertainment XMLTV feeds in two fast parallel waves
-    await Promise.allSettled(xmltvFiles.slice(0, 6).map(fetchAndParseXmltvGz));
-    await Promise.allSettled(xmltvFiles.slice(6).map(fetchAndParseXmltvGz));
+    // Process XMLTV files sequentially in the background so CPU/memory stays flat
+    openEpgXmltvInFlight = (async () => {
+      for (const file of xmltvFiles) {
+        await fetchAndParseXmltvGz(file);
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      if (cachedOpenEpgXmltvMap.size > 0) {
+        openEpgXmltvLastRefreshMs = Date.now();
+      }
+    })().finally(() => {
+      openEpgXmltvInFlight = null;
+    });
+
+    // Apply any already-cached XMLTV channels immediately without waiting for the background XMLTV download
+    for (const [k, v] of cachedOpenEpgXmltvMap.entries()) {
+      if (!nextMap.has(k)) {
+        nextMap.set(k, v);
+      }
+    }
   };
 
-  // Run primary official broadcaster harvesters first, then fill remaining channels from open-epg.com XMLTV feeds
+  // Run primary official broadcaster harvesters first, then attach cached/background open-epg.com XMLTV feeds
   await Promise.allSettled([
     fetchBeinOfficial(),
     fetchSkyUkOfficial(),
@@ -7563,7 +7824,7 @@ async function refreshOfficialBroadcasterEpg(): Promise<void> {
   }
 }
 
-async function ensureOfficialBroadcasterEpgReady(maxWaitMs = 9500): Promise<void> {
+async function ensureOfficialBroadcasterEpgReady(maxWaitMs = 2500): Promise<void> {
   const now = Date.now();
   if (
     cachedOfficialBroadcasterEpg.size > 0 &&
@@ -7576,7 +7837,8 @@ async function ensureOfficialBroadcasterEpgReady(maxWaitMs = 9500): Promise<void
       officialBroadcasterEpgInFlight = null;
     });
   }
-  if (cachedOfficialBroadcasterEpg.size === 0) {
+  // If we already have EPG data in memory, never block the caller — let refresh finish in the background!
+  if (cachedOfficialBroadcasterEpg.size === 0 && maxWaitMs > 0) {
     await Promise.race([
       officialBroadcasterEpgInFlight,
       new Promise<void>((resolve) => setTimeout(resolve, maxWaitMs)),
@@ -7586,8 +7848,8 @@ async function ensureOfficialBroadcasterEpgReady(maxWaitMs = 9500): Promise<void
 
 // Kick off initial background harvest of official broadcaster EPG on server startup
 setTimeout(() => {
-  ensureOfficialBroadcasterEpgReady(8000).catch(() => {});
-}, 500);
+  ensureOfficialBroadcasterEpgReady(0).catch(() => {});
+}, 1200);
 
 // Helper to build per-channel EPG (nowPlaying, nextUp, upcoming, currentProgram, nextProgram) combining Official Broadcaster EPG + de-conflicted live events + curated 24/7 EPG
 function buildChannelEpgDirectory(events: any[]): Record<
@@ -8068,13 +8330,13 @@ app.get(['/api/live/channels', '/v1/live/channels'], async (req: Request, res: R
     const qs = params.toString() ? `?${params.toString()}` : '';
     const isUnfiltered = !qs;
 
-    const eventsPayload = await getOrRefreshLiveEventsPayload(20000);
+    const eventsPayload = await getOrRefreshLiveEventsPayload(60000);
     const channelEpgMap = buildChannelEpgDirectory(eventsPayload?.events || []);
 
     if (
       isUnfiltered &&
       cachedLiveChannelsPayload &&
-      Date.now() - cachedLiveChannelsPayload.timestamp < 30000
+      Date.now() - cachedLiveChannelsPayload.timestamp < 5 * 60 * 1000
     ) {
       const enrichedCached = (cachedLiveChannelsPayload.data.channels || []).map((ch: any) => {
         const synced = channelEpgMap[ch.id];
@@ -10191,6 +10453,7 @@ app.get('/api/internal/handover-snapshot', (req: Request, res: Response) => {
     },
     scraperConfig: scraperConfigStore,
     adBlockPolicy: adBlockPolicyStore,
+    turnstileConfig: turnstileConfigStore,
   });
 });
 
@@ -10262,6 +10525,18 @@ async function pullStateFromLivePeerOnStartup(): Promise<void> {
         ) {
           adBlockPolicyStore = data.adBlockPolicy;
           saveAdBlockPolicyToDiskSync(adBlockPolicyStore);
+          mergedAny = true;
+        }
+        if (
+          data.turnstileConfig &&
+          typeof data.turnstileConfig === 'object' &&
+          (data.turnstileConfig.updatedAt || 0) > (turnstileConfigStore.updatedAt || 0)
+        ) {
+          turnstileConfigStore = {
+            ...turnstileConfigStore,
+            ...data.turnstileConfig,
+          };
+          saveTurnstileConfigToDiskSync(turnstileConfigStore);
           mergedAny = true;
         }
         if (mergedAny) {
@@ -10543,6 +10818,439 @@ app.post('/api/admin/adblock-policy', requireAdminAuth, (req: Request, res: Resp
     return res.status(500).json({
       success: false,
       error: err?.message || 'Failed to update Ad-Blocker policy',
+    });
+  }
+});
+
+// ============================================================================
+// CLOUDFLARE TURNSTILE SECURITY GATE (Env Vars + Admin Dashboard Controls)
+// ============================================================================
+const CF_TURNSTILE_TEST_SITE_KEY = '1x00000000000000000000AA';
+const CF_TURNSTILE_TEST_SECRET_KEY = '1x0000000000000000000000000000000AA';
+const DEFAULT_TURNSTILE_SITE_KEY = '0x4AAAAAAFtBNaXqrUAtPyOc';
+const DEFAULT_TURNSTILE_SECRET_KEY = '0x4AAAAAAFtBNVrLfiSVyyv03sVdDegQ_rs';
+
+// Track consumed Turnstile challenge tokens to prevent token replay attacks (Cloudflare Turnstile best practice)
+const consumedTurnstileTokens = new Map<string, number>();
+
+interface TurnstileConfigStore {
+  enabled: boolean;
+  mode: 'custom' | 'test';
+  siteKey: string;
+  secretKey: string;
+  theme: 'dark' | 'auto';
+  verifiedCount: number;
+  failedCount: number;
+  updatedAt: number;
+}
+
+const TURNSTILE_CONFIG_FILE = path.join(DATA_DIR, 'turnstile_config.json');
+const TURNSTILE_BACKUP_FILE = '/var/tmp/notflix_turnstile_backup.json';
+
+function getDefaultTurnstileConfigStore(): TurnstileConfigStore {
+  const envEnabledRaw = String(process.env.TURNSTILE_ENABLED || '').trim().toLowerCase();
+  const envSiteKey = String(
+    process.env.TURNSTILE_SITE_KEY || process.env.VITE_TURNSTILE_SITE_KEY || DEFAULT_TURNSTILE_SITE_KEY
+  ).trim();
+  const envSecretKey = String(process.env.TURNSTILE_SECRET_KEY || DEFAULT_TURNSTILE_SECRET_KEY).trim();
+  const hasCustomKeys = Boolean(envSiteKey && envSecretKey);
+  const disabledByEnv = envEnabledRaw === 'false' || envEnabledRaw === '0' || envEnabledRaw === 'no';
+
+  return {
+    enabled: !disabledByEnv,
+    mode: hasCustomKeys ? 'custom' : 'test',
+    siteKey: envSiteKey,
+    secretKey: envSecretKey,
+    theme: 'dark',
+    verifiedCount: 0,
+    failedCount: 0,
+    updatedAt: Date.now(),
+  };
+}
+
+function saveTurnstileConfigToDiskSync(store: TurnstileConfigStore): void {
+  const payload = JSON.stringify(store, null, 2);
+  try {
+    writeFileAtomicallyToMirrors('turnstile_config.json', payload, TURNSTILE_BACKUP_FILE);
+  } catch {}
+}
+
+function loadTurnstileConfigFromDisk(): TurnstileConfigStore {
+  const defaults = getDefaultTurnstileConfigStore();
+  const candidates = Array.from(
+    new Set([
+      ...PERSISTENT_READ_DIRS.map((d) => path.join(d, 'turnstile_config.json')),
+      TURNSTILE_CONFIG_FILE,
+      TURNSTILE_BACKUP_FILE,
+    ])
+  );
+
+  let newest: TurnstileConfigStore | null = null;
+  for (const file of candidates) {
+    try {
+      if (fs.existsSync(file)) {
+        const raw = fs.readFileSync(file, 'utf-8').trim();
+        if (!raw) continue;
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          const updatedAt = typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0;
+          const storedSiteKey = typeof parsed.siteKey === 'string' ? parsed.siteKey.trim() : '';
+          const storedSecretKey = typeof parsed.secretKey === 'string' ? parsed.secretKey.trim() : '';
+          // Upgrade any legacy unconfigured placeholder config to the production Turnstile keys
+          const isUnconfiguredLegacy = !storedSiteKey || storedSiteKey === CF_TURNSTILE_TEST_SITE_KEY;
+
+          if (!newest || updatedAt >= newest.updatedAt) {
+            newest = {
+              enabled: isUnconfiguredLegacy
+                ? defaults.enabled
+                : typeof parsed.enabled === 'boolean'
+                ? parsed.enabled
+                : defaults.enabled,
+              mode: isUnconfiguredLegacy
+                ? 'custom'
+                : parsed.mode === 'test' || parsed.mode === 'custom'
+                ? parsed.mode
+                : defaults.mode,
+              siteKey: !isUnconfiguredLegacy && storedSiteKey ? storedSiteKey : defaults.siteKey,
+              secretKey: !isUnconfiguredLegacy && storedSecretKey ? storedSecretKey : defaults.secretKey,
+              theme: parsed.theme === 'auto' ? 'auto' : 'dark',
+              verifiedCount: Number(parsed.verifiedCount) || 0,
+              failedCount: Number(parsed.failedCount) || 0,
+              updatedAt: isUnconfiguredLegacy ? Date.now() : updatedAt,
+            };
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const finalConfig = newest || defaults;
+  saveTurnstileConfigToDiskSync(finalConfig);
+  return finalConfig;
+}
+
+let turnstileConfigStore: TurnstileConfigStore = loadTurnstileConfigFromDisk();
+
+function resolveActiveTurnstileKeys(store: TurnstileConfigStore): {
+  siteKey: string;
+  secretKey: string;
+  usingTestKeys: boolean;
+} {
+  const effectiveSiteKey = String(
+    store.siteKey ||
+      process.env.TURNSTILE_SITE_KEY ||
+      process.env.VITE_TURNSTILE_SITE_KEY ||
+      DEFAULT_TURNSTILE_SITE_KEY
+  ).trim();
+  const effectiveSecretKey = String(
+    store.secretKey || process.env.TURNSTILE_SECRET_KEY || DEFAULT_TURNSTILE_SECRET_KEY
+  ).trim();
+
+  if (store.mode === 'custom' && effectiveSiteKey && effectiveSecretKey) {
+    return {
+      siteKey: effectiveSiteKey,
+      secretKey: effectiveSecretKey,
+      usingTestKeys: false,
+    };
+  }
+
+  return {
+    siteKey: CF_TURNSTILE_TEST_SITE_KEY,
+    secretKey: CF_TURNSTILE_TEST_SECRET_KEY,
+    usingTestKeys: true,
+  };
+}
+
+function createTurnstileSessionToken(ip: string): string {
+  const ts = Date.now();
+  const cleanIp = String(ip || '0.0.0.0').replace(/^::ffff:/i, '').trim();
+  const sig = crypto
+    .createHmac('sha256', STREAM_SECURITY_SECRET)
+    .update(`cf_turnstile:${ts}:${cleanIp}`)
+    .digest('hex');
+  return `${ts}.${sig}`;
+}
+
+function verifyTurnstileSessionToken(rawToken: string, ip: string): boolean {
+  if (!rawToken || typeof rawToken !== 'string' || !rawToken.includes('.')) return false;
+  const [tsPart, sigPart] = rawToken.trim().split('.');
+  const ts = Number(tsPart);
+  if (!ts || !sigPart || Math.abs(Date.now() - ts) > 24 * 60 * 60 * 1000) return false;
+
+  const cleanIp = String(ip || '0.0.0.0').replace(/^::ffff:/i, '').trim();
+  const expectedIpSig = crypto
+    .createHmac('sha256', STREAM_SECURITY_SECRET)
+    .update(`cf_turnstile:${tsPart}:${cleanIp}`)
+    .digest('hex');
+
+  if (safeCompareStrings(sigPart, expectedIpSig)) return true;
+
+  // Fallback check without IP binding in case mobile carrier rotated IP mid-session
+  const fallbackSig = crypto
+    .createHmac('sha256', STREAM_SECURITY_SECRET)
+    .update(`cf_turnstile:${tsPart}:0.0.0.0`)
+    .digest('hex');
+  return safeCompareStrings(sigPart, fallbackSig);
+}
+
+function extractTurnstileCookie(req: Request): string {
+  const cookieHeader = String(req.headers.cookie || '');
+  if (!cookieHeader) return '';
+  const match = cookieHeader.match(/(?:^|;\s*)notflix_cf_verified=([^;]+)/);
+  return match && match[1] ? decodeURIComponent(match[1].trim()) : '';
+}
+
+// Public endpoint: Check if Cloudflare Turnstile gate is active and whether current browser session is verified
+app.get('/api/security/turnstile/status', (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  const ip = getClientIp(req);
+  const userAgent = String(req.headers['user-agent'] || '');
+
+  // Legitimate search engine & social preview crawlers always bypass Turnstile so SEO indexing is never blocked
+  if (isLegitimateSearchCrawler(userAgent)) {
+    const active = resolveActiveTurnstileKeys(turnstileConfigStore);
+    return res.json({
+      success: true,
+      enabled: false,
+      mode: active.usingTestKeys ? 'test' : turnstileConfigStore.mode,
+      siteKey: active.siteKey,
+      theme: turnstileConfigStore.theme || 'dark',
+      verified: true,
+    });
+  }
+
+  const headerToken = String(req.headers['x-turnstile-token'] || '').trim();
+  const cookieToken = extractTurnstileCookie(req);
+  const isVerified =
+    !turnstileConfigStore.enabled ||
+    verifyTurnstileSessionToken(headerToken, ip) ||
+    verifyTurnstileSessionToken(cookieToken, ip);
+
+  const active = resolveActiveTurnstileKeys(turnstileConfigStore);
+
+  return res.json({
+    success: true,
+    enabled: Boolean(turnstileConfigStore.enabled),
+    mode: active.usingTestKeys ? 'test' : turnstileConfigStore.mode,
+    siteKey: active.siteKey,
+    theme: turnstileConfigStore.theme || 'dark',
+    verified: isVerified,
+  });
+});
+
+// Public endpoint: Verify Cloudflare Turnstile challenge token and issue session-only verification cookie + token
+app.post('/api/security/turnstile/verify', async (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  const ip = getClientIp(req);
+  const userAgent = String(req.headers['user-agent'] || '');
+  const token = String(req.body?.token || req.body?.['cf-turnstile-response'] || '').trim();
+  const isPreviewFallback = req.body?.previewFallback === true;
+
+  if (!turnstileConfigStore.enabled) {
+    const sessionToken = createTurnstileSessionToken(ip);
+    res.setHeader(
+      'Set-Cookie',
+      `notflix_cf_verified=${encodeURIComponent(sessionToken)}; Path=/; SameSite=Lax`
+    );
+    return res.json({
+      success: true,
+      verified: true,
+      sessionToken,
+    });
+  }
+
+  if (!token || token.length > 2048) {
+    turnstileConfigStore.failedCount = (turnstileConfigStore.failedCount || 0) + 1;
+    return res.status(400).json({
+      success: false,
+      error: !token ? 'Missing Cloudflare Turnstile challenge token.' : 'Invalid Turnstile token length.',
+    });
+  }
+
+  // Reject single-use token replay attempts
+  const now = Date.now();
+  if (consumedTurnstileTokens.size > 2000) {
+    for (const [tKey, ts] of consumedTurnstileTokens.entries()) {
+      if (now - ts > 10 * 60 * 1000) consumedTurnstileTokens.delete(tKey);
+    }
+  }
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  if (consumedTurnstileTokens.has(tokenHash)) {
+    turnstileConfigStore.failedCount = (turnstileConfigStore.failedCount || 0) + 1;
+    return res.status(403).json({
+      success: false,
+      error: 'Turnstile challenge token has already been used. Please complete a fresh challenge.',
+    });
+  }
+
+  const active = resolveActiveTurnstileKeys(turnstileConfigStore);
+  const reqHost = String(req.hostname || req.headers.host || '').toLowerCase();
+  const isPreviewHost =
+    reqHost.includes('.run.app') || reqHost.includes('localhost') || reqHost.startsWith('127.0.0.1');
+  const secretToUse =
+    isPreviewFallback && isPreviewHost ? CF_TURNSTILE_TEST_SECRET_KEY : active.secretKey;
+
+  try {
+    const formData = new URLSearchParams();
+    formData.append('secret', secretToUse);
+    formData.append('response', token);
+    if (ip && ip !== '0.0.0.0') {
+      formData.append('remoteip', ip);
+    }
+    if (crypto.randomUUID) {
+      formData.append('idempotency_key', crypto.randomUUID());
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6500);
+    const cfRes = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: formData.toString(),
+    });
+    clearTimeout(timer);
+
+    const cfData: any = await cfRes.json();
+
+    if (cfData && cfData.success === true) {
+      consumedTurnstileTokens.set(tokenHash, now);
+      turnstileConfigStore.verifiedCount = (turnstileConfigStore.verifiedCount || 0) + 1;
+      saveTurnstileConfigToDiskSync(turnstileConfigStore);
+
+      const sessionToken = createTurnstileSessionToken(ip);
+      // Session-only cookie (no Max-Age or Expires) so verification lasts until browser tab/session closes
+      res.setHeader(
+        'Set-Cookie',
+        `notflix_cf_verified=${encodeURIComponent(sessionToken)}; Path=/; SameSite=Lax`
+      );
+      return res.json({
+        success: true,
+        verified: true,
+        sessionToken,
+      });
+    }
+
+    turnstileConfigStore.failedCount = (turnstileConfigStore.failedCount || 0) + 1;
+    saveTurnstileConfigToDiskSync(turnstileConfigStore);
+    recordSecurityEvent(
+      ip,
+      `Cloudflare Turnstile Verification Failed (${Array.isArray(cfData?.['error-codes']) ? cfData['error-codes'].join(', ') : 'invalid-token'})`,
+      userAgent,
+      '/api/security/turnstile/verify',
+      'turnstile',
+      false
+    );
+
+    return res.status(403).json({
+      success: false,
+      error: 'Cloudflare Turnstile verification failed. Please complete the challenge again.',
+      codes: cfData?.['error-codes'] || [],
+    });
+  } catch (err: any) {
+    // If running in Test Mode or preview fallback and Cloudflare's API is unreachable, fail-safe for valid non-empty tokens
+    if ((active.usingTestKeys || (isPreviewFallback && isPreviewHost)) && token.length >= 8) {
+      consumedTurnstileTokens.set(tokenHash, now);
+      turnstileConfigStore.verifiedCount = (turnstileConfigStore.verifiedCount || 0) + 1;
+      saveTurnstileConfigToDiskSync(turnstileConfigStore);
+      const sessionToken = createTurnstileSessionToken(ip);
+      res.setHeader(
+        'Set-Cookie',
+        `notflix_cf_verified=${encodeURIComponent(sessionToken)}; Path=/; SameSite=Lax`
+      );
+      return res.json({
+        success: true,
+        verified: true,
+        sessionToken,
+      });
+    }
+
+    return res.status(502).json({
+      success: false,
+      error: 'Could not reach Cloudflare Turnstile verification service: ' + (err?.message || 'Timeout'),
+    });
+  }
+});
+
+// Admin endpoint: Fetch Cloudflare Turnstile configuration & verification telemetry
+app.get('/api/admin/turnstile', requireAdminAuth, (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  const active = resolveActiveTurnstileKeys(turnstileConfigStore);
+  const hasEnvSiteKey = Boolean(
+    String(
+      process.env.TURNSTILE_SITE_KEY || process.env.VITE_TURNSTILE_SITE_KEY || DEFAULT_TURNSTILE_SITE_KEY
+    ).trim()
+  );
+  const hasEnvSecretKey = Boolean(
+    String(process.env.TURNSTILE_SECRET_KEY || DEFAULT_TURNSTILE_SECRET_KEY).trim()
+  );
+
+  return res.json({
+    success: true,
+    config: {
+      ...turnstileConfigStore,
+      activeSiteKey: active.siteKey,
+      usingTestKeys: active.usingTestKeys,
+      hasEnvSiteKey,
+      hasEnvSecretKey,
+    },
+  });
+});
+
+// Admin endpoint: Update Cloudflare Turnstile configuration (enable/disable, mode, keys, theme)
+app.post('/api/admin/turnstile', requireAdminAuth, (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    const nextEnabled =
+      typeof body.enabled === 'boolean' ? body.enabled : turnstileConfigStore.enabled;
+    const nextMode: 'custom' | 'test' =
+      body.mode === 'test' || body.mode === 'custom' ? body.mode : turnstileConfigStore.mode;
+    const nextSiteKey =
+      typeof body.siteKey === 'string' ? body.siteKey.trim() : turnstileConfigStore.siteKey;
+    const nextSecretKey =
+      typeof body.secretKey === 'string' ? body.secretKey.trim() : turnstileConfigStore.secretKey;
+    const nextTheme: 'dark' | 'auto' = body.theme === 'auto' ? 'auto' : 'dark';
+    const nextUpdatedAt =
+      typeof body.updatedAt === 'number' && body.updatedAt > 0 ? body.updatedAt : Date.now();
+
+    turnstileConfigStore = {
+      ...turnstileConfigStore,
+      enabled: nextEnabled,
+      mode: nextMode,
+      siteKey: nextSiteKey,
+      secretKey: nextSecretKey,
+      theme: nextTheme,
+      updatedAt: nextUpdatedAt,
+    };
+
+    saveTurnstileConfigToDiskSync(turnstileConfigStore);
+    const active = resolveActiveTurnstileKeys(turnstileConfigStore);
+    const hasEnvSiteKey = Boolean(
+      String(process.env.TURNSTILE_SITE_KEY || process.env.VITE_TURNSTILE_SITE_KEY || '').trim()
+    );
+    const hasEnvSecretKey = Boolean(String(process.env.TURNSTILE_SECRET_KEY || '').trim());
+
+    return res.json({
+      success: true,
+      config: {
+        ...turnstileConfigStore,
+        activeSiteKey: active.siteKey,
+        usingTestKeys: active.usingTestKeys,
+        hasEnvSiteKey,
+        hasEnvSecretKey,
+      },
+      message: nextEnabled
+        ? active.usingTestKeys
+          ? 'Cloudflare Turnstile Gate enabled (using Cloudflare Official Demo/Test Keys until custom keys are provided).'
+          : 'Cloudflare Turnstile Gate enabled with your custom Site & Secret keys.'
+        : 'Cloudflare Turnstile Gate disabled.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Failed to update Cloudflare Turnstile configuration',
     });
   }
 });
@@ -10832,11 +11540,12 @@ async function startServer() {
     return seoCatalogCache.entries;
   }
 
-  // Warm up the Programmatic SEO catalog + Live Arena events immediately on server start
+  // Warm up the Home Catalog, Programmatic SEO catalog & Live Arena events immediately on server start
   setTimeout(() => {
+    getOrRefreshHomeCatalogPayload(false).catch(() => {});
     refreshSeoCatalog().catch(() => {});
     getOrRefreshLiveEventsPayload(60000).catch(() => {});
-  }, 250);
+  }, 150);
 
   function buildLiveMatchSeoPath(ev: any): string {
     const idPart = String(ev?.id || 'match').trim();
@@ -11575,10 +12284,8 @@ async function startServer() {
         }
 
         if (seoCatalogCache.entries.length === 0) {
-          await Promise.race([
-            refreshSeoCatalog().catch(() => {}),
-            new Promise((resolve) => setTimeout(resolve, 450)),
-          ]);
+          // Trigger SEO catalog warmup in background without delaying initial HTML response
+          refreshSeoCatalog().catch(() => {});
         }
 
         // Filter catalog sample to match the active category tab while keeping Movies & Series #1
@@ -11677,6 +12384,16 @@ async function startServer() {
           /<meta\s+name="twitter:image"\s+content="[^"]*"\s*\/?>/i,
           `<meta name="twitter:image" content="${safeImg}" />`
         );
+
+      const activeTurnstile = resolveActiveTurnstileKeys(turnstileConfigStore);
+      const turnstileBootstrapScript = `<script data-cfasync="false">window.__NOTFLIX_TURNSTILE__=${JSON.stringify({
+        enabled: Boolean(turnstileConfigStore.enabled),
+        mode: activeTurnstile.usingTestKeys ? 'test' : turnstileConfigStore.mode,
+        siteKey: activeTurnstile.siteKey,
+        theme: turnstileConfigStore.theme || 'dark',
+      })};</script>`;
+
+      modified = modified.replace('<head>', `<head>${turnstileBootstrapScript}`);
 
       if (extraJsonLd) {
         modified = modified.replace('</head>', `  ${extraJsonLd}\n  </head>`);
@@ -11942,14 +12659,23 @@ Sitemap: https://notflixtv.com/sitemap.xml
       res.status(404).type('text/plain').send('Asset chunk superseded by new deployment');
     });
 
+    // Cache production index.html template in RAM so disk I/O never slows down HTML responses
+    const prodIndex = path.join(distPath, 'index.html');
+    const rootIndex = path.join(__dirname, 'index.html');
+    const targetIndex = fs.existsSync(prodIndex) ? prodIndex : rootIndex;
+    let cachedProdHtmlTemplate = '';
+    try {
+      cachedProdHtmlTemplate = fs.readFileSync(targetIndex, 'utf-8');
+    } catch {}
+
     // Single-Page Application (SPA) catch-all route with Server-Side SEO Pre-Rendering for /, /live*, /watch/:type/:id, /movies, /series, /anime
     app.get('*', async (req: Request, res: Response) => {
       setHtmlResponseHeaders(req, res);
-      const prodIndex = path.join(distPath, 'index.html');
-      const rootIndex = path.join(__dirname, 'index.html');
-      const targetIndex = fs.existsSync(prodIndex) ? prodIndex : rootIndex;
       try {
-        const rawHtml = fs.readFileSync(targetIndex, 'utf-8');
+        const rawHtml = cachedProdHtmlTemplate || fs.readFileSync(targetIndex, 'utf-8');
+        if (!cachedProdHtmlTemplate && rawHtml) {
+          cachedProdHtmlTemplate = rawHtml;
+        }
         const seoHtml = await injectDynamicSeoIntoHtml(rawHtml, req.originalUrl || req.path);
         return res.status(200).type('text/html; charset=utf-8').send(seoHtml);
       } catch {

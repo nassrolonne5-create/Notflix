@@ -199,14 +199,14 @@ if (typeof window !== 'undefined') {
   if (!(window as any)._notflixAdPacingState) {
     (window as any)._notflixAdPacingState = getInitialAdPacingState();
   }
-  // Ensure popunder tag is active ONLY on public pages
+  // Ensure popunder tag is active ONLY on public pages (deferred past initial load)
   setTimeout(() => {
     if (!isAdminActive()) {
       ensurePopunderScriptLoaded();
     } else {
       purgePopunderFromAdmin();
     }
-  }, 300);
+  }, 1800);
 }
 
 import { smartAdController } from './smartAdController';

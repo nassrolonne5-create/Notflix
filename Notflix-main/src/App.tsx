@@ -1,20 +1,24 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
 import { Header } from './components/Header';
 import { Dock } from './components/Dock';
 import { HomePage } from './pages/HomePage';
-import { MoviesPage } from './pages/MoviesPage';
-import { SeriesPage } from './pages/SeriesPage';
-import { AnimePage } from './pages/AnimePage';
-import { LibraryPage } from './pages/LibraryPage';
-import { SearchPage } from './pages/SearchPage';
-import { AdminPage } from './pages/AdminPage';
-import { VideoPlayerModal } from './components/VideoPlayerModal';
 import { SettingsModal } from './components/SettingsModal';
 import { Toast } from './components/Toast';
 import { ResumeBanner } from './components/ResumeBanner';
 import { AdBlockerBanner } from './components/AdBlockerBanner';
 import { LiveTvArena } from './components/LiveTvArena';
+import { TurnstileGate } from './components/TurnstileGate';
+
+const MoviesPage = React.lazy(() => import('./pages/MoviesPage').then((m) => ({ default: m.MoviesPage })));
+const SeriesPage = React.lazy(() => import('./pages/SeriesPage').then((m) => ({ default: m.SeriesPage })));
+const AnimePage = React.lazy(() => import('./pages/AnimePage').then((m) => ({ default: m.AnimePage })));
+const LibraryPage = React.lazy(() => import('./pages/LibraryPage').then((m) => ({ default: m.LibraryPage })));
+const SearchPage = React.lazy(() => import('./pages/SearchPage').then((m) => ({ default: m.SearchPage })));
+const AdminPage = React.lazy(() => import('./pages/AdminPage').then((m) => ({ default: m.AdminPage })));
+const VideoPlayerModal = React.lazy(() =>
+  import('./components/VideoPlayerModal').then((m) => ({ default: m.VideoPlayerModal }))
+);
 import { telemetry } from './services/telemetry';
 import { securitySentinel, PermanentBlockInfo } from './services/securitySentinel';
 import { ensurePopunderScriptLoaded, purgePopunderFromAdmin } from './services/adService';
@@ -292,15 +296,23 @@ const AppContent: React.FC = () => {
           setTimeout(ensurePopunderScriptLoaded, 100);
         }}
       >
-        <AdminPage
-          onExit={() => {
-            window.history.pushState({}, '', '/');
-            window.location.hash = '';
-            (window as any).__NOTFLIX_IS_ADMIN__ = false;
-            setIsAdmin(false);
-            setTimeout(ensurePopunderScriptLoaded, 100);
-          }}
-        />
+        <Suspense
+          fallback={
+            <div className="min-h-screen bg-[#080c14] text-white flex items-center justify-center">
+              <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+            </div>
+          }
+        >
+          <AdminPage
+            onExit={() => {
+              window.history.pushState({}, '', '/');
+              window.location.hash = '';
+              (window as any).__NOTFLIX_IS_ADMIN__ = false;
+              setIsAdmin(false);
+              setTimeout(ensurePopunderScriptLoaded, 100);
+            }}
+          />
+        </Suspense>
       </AdminErrorBoundary>
     );
   }
@@ -403,21 +415,24 @@ const AppContent: React.FC = () => {
   }
 
   return (
-    <div
-      onContextMenu={(e) => e.preventDefault()}
-      className="min-h-screen bg-[#0b0f19] text-[#f8fafc] flex flex-col selection:bg-rose-600 selection:text-white relative select-none"
-    >
-      {/* Top Header */}
-      <Header />
+    <TurnstileGate>
+      <div
+        onContextMenu={(e) => e.preventDefault()}
+        className="min-h-screen bg-[#0b0f19] text-[#f8fafc] flex flex-col selection:bg-rose-600 selection:text-white relative select-none"
+      >
+        {/* Top Header */}
+        <Header />
 
       {/* Main Content Area */}
       <main className="flex-1 pt-16 md:pt-18 md:pl-20">
         {activeTab === 'home' && <HomePage />}
-        {activeTab === 'movies' && <MoviesPage />}
-        {activeTab === 'tv' && <SeriesPage />}
-        {activeTab === 'anime' && <AnimePage />}
-        {activeTab === 'library' && <LibraryPage />}
-        {activeTab === 'search' && <SearchPage />}
+        <Suspense fallback={<div className="min-h-[60vh]" />}>
+          {activeTab === 'movies' && <MoviesPage />}
+          {activeTab === 'tv' && <SeriesPage />}
+          {activeTab === 'anime' && <AnimePage />}
+          {activeTab === 'library' && <LibraryPage />}
+          {activeTab === 'search' && <SearchPage />}
+        </Suspense>
       </main>
 
       {/* Footer */}
@@ -530,7 +545,7 @@ const AppContent: React.FC = () => {
             { id: 'sky-sports-main-event', label: 'Sky Sports Main Event' },
             { id: 'sky-sports-premier-league', label: 'Sky Sports Premier League' },
             { id: 'espn-1', label: 'ESPN HD Live' },
-            { id: 'ssc-1', label: 'SSC Sports 1 HD' },
+            { id: 'starzplay-sports-1-ar', label: 'STARZPLAY Sports 1 HD' },
           ].map((ch, idx) => (
             <React.Fragment key={ch.id}>
               {idx > 0 && <span className="text-slate-800">·</span>}
@@ -560,7 +575,11 @@ const AppContent: React.FC = () => {
       <LiveTvArena />
 
       {/* Video Player Modal */}
-      {activeModalItem && <VideoPlayerModal />}
+      {activeModalItem && (
+        <Suspense fallback={null}>
+          <VideoPlayerModal />
+        </Suspense>
+      )}
 
       {/* Settings Modal */}
       <SettingsModal />
@@ -573,7 +592,8 @@ const AppContent: React.FC = () => {
 
       {/* Non-intrusive Ad-Blocker Support Banner */}
       <AdBlockerBanner />
-    </div>
+      </div>
+    </TurnstileGate>
   );
 };
 

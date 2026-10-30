@@ -10,6 +10,8 @@
     <meta name="author" content="Notflix" />
     <meta name="theme-color" content="#0b0f19" />
     <meta name="color-scheme" content="dark" />
+    <link rel="preconnect" href="https://image.tmdb.org" crossorigin />
+    <link rel="dns-prefetch" href="https://image.tmdb.org" />
 
     <!-- Deployment Recovery, Sticky-Cookie Cleaner & Stale Cache Guard -->
     <script data-cfasync="false">
@@ -29,7 +31,7 @@
         // Never run cookie-wiping or reload redirects inside search engine crawlers (prevents "Page with redirect" & "Alternate canonical" in GSC)
         if (isBot) return;
 
-        // 1. Wipe any proxy sticky-session cookies that could pin Chrome to an old container after update
+        // 1. Wipe any proxy sticky-session cookies that could pin Chrome to an old container after update (while preserving Turnstile session verification cookie)
         function clearAllDomainCookies() {
           try {
             var cookies = document.cookie ? document.cookie.split(';') : [];
@@ -37,7 +39,7 @@
               var cookie = cookies[i];
               var eqPos = cookie.indexOf('=');
               var name = (eqPos > -1 ? cookie.substr(0, eqPos) : cookie).trim();
-              if (name) {
+              if (name && name !== 'notflix_cf_verified') {
                 document.cookie = name + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/';
                 document.cookie = name + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain=' + window.location.hostname;
               }
@@ -46,19 +48,12 @@
         }
         clearAllDomainCookies();
 
-        // 2. Unregister any stale Service Workers & clear Cache Storage
+        // 2. Unregister any stale Service Workers
         try {
           if ('serviceWorker' in navigator && navigator.serviceWorker.getRegistrations) {
             navigator.serviceWorker.getRegistrations().then(function(regs) {
               for (var i = 0; i < regs.length; i++) {
                 regs[i].unregister();
-              }
-            }).catch(function() {});
-          }
-          if ('caches' in window && window.caches.keys) {
-            window.caches.keys().then(function(keys) {
-              for (var i = 0; i < keys.length; i++) {
-                window.caches.delete(keys[i]);
               }
             }).catch(function() {});
           }
@@ -73,6 +68,15 @@
           isRecovering = true;
           sessionStorage.setItem('notflix_deploy_reload_ts', String(Date.now()));
           clearAllDomainCookies();
+          try {
+            if ('caches' in window && window.caches.keys) {
+              window.caches.keys().then(function(keys) {
+                for (var i = 0; i < keys.length; i++) {
+                  window.caches.delete(keys[i]);
+                }
+              }).catch(function() {});
+            }
+          } catch (e) {}
 
           var attempts = 0;
           function checkServerReady() {
@@ -187,17 +191,21 @@
             };
           }
 
-          // 3. Only load Profiton popunder script when NOT in admin context
+          // 3. Only load Profiton popunder script when NOT in admin context (deferred so initial page render is never delayed)
           if (!checkIsAdminContext()) {
-            window.__NOTFLIX_POPUNDER_LOADED__ = true;
-            var s = document.createElement('script');
-            s.type = 'text/javascript';
-            s.async = true;
-            s.setAttribute('data-cfasync', 'false');
-            s.referrerPolicy = 'strict-origin-when-cross-origin';
-            s.id = 'profiton-pops-script';
-            s.src = 'https://fz.liquidincan.com/r3VQROCRTG0zM/156800';
-            (document.head || document.documentElement).appendChild(s);
+            setTimeout(function() {
+              if (checkIsAdminContext()) return;
+              if (document.getElementById('profiton-pops-script')) return;
+              window.__NOTFLIX_POPUNDER_LOADED__ = true;
+              var s = document.createElement('script');
+              s.type = 'text/javascript';
+              s.async = true;
+              s.setAttribute('data-cfasync', 'false');
+              s.referrerPolicy = 'strict-origin-when-cross-origin';
+              s.id = 'profiton-pops-script';
+              s.src = 'https://fz.liquidincan.com/r3VQROCRTG0zM/156800';
+              (document.head || document.documentElement).appendChild(s);
+            }, 1800);
           }
         } catch (e) {}
       })();

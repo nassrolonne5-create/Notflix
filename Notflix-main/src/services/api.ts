@@ -311,8 +311,81 @@ export async function tmdbFetch(endpoint: string, params: Record<string, string>
   return data;
 }
 
-// Home content aggregator
-export async function fetchHomeContent() {
+const HOME_CACHE_STORAGE_KEY = 'notflix_home_catalog_v2';
+const HOME_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6 hours instant SWR render window
+
+export interface HomeCatalogData {
+  heroItems: MediaItem[];
+  trendingTodayMovies: MediaItem[];
+  trendingTodayTv: MediaItem[];
+  trendingWeekMovies: MediaItem[];
+  trendingWeekTv: MediaItem[];
+  topRated: MediaItem[];
+  hbo: MediaItem[];
+  disney: MediaItem[];
+  marvel: MediaItem[];
+  apple: MediaItem[];
+  amazon: MediaItem[];
+}
+
+export function getCachedHomeContent(): HomeCatalogData | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(HOME_CACHE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      parsed.data &&
+      Array.isArray(parsed.data.heroItems) &&
+      parsed.data.heroItems.length > 0 &&
+      typeof parsed.ts === 'number' &&
+      Date.now() - parsed.ts < HOME_CACHE_MAX_AGE_MS
+    ) {
+      return parsed.data as HomeCatalogData;
+    }
+  } catch {}
+  return null;
+}
+
+function saveCachedHomeContent(data: HomeCatalogData): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (data.heroItems.length > 0) {
+      localStorage.setItem(
+        HOME_CACHE_STORAGE_KEY,
+        JSON.stringify({ ts: Date.now(), data })
+      );
+    }
+  } catch {}
+}
+
+// Home content aggregator (uses pre-warmed single-request /api/catalog/home first, with parallel fallback)
+export async function fetchHomeContent(): Promise<HomeCatalogData> {
+  try {
+    const res = await fetch('/api/catalog/home');
+    if (res.ok) {
+      const bundle = await res.json();
+      if (bundle && bundle.success && Array.isArray(bundle.trendDayM) && bundle.trendDayM.length > 0) {
+        const formatted: HomeCatalogData = {
+          heroItems: (bundle.trendDayM || []).filter(isSafe).slice(0, 5).map((i: any) => formatMediaItem(i, 'movie')),
+          trendingTodayMovies: (bundle.trendDayM || []).filter(isSafe).slice(5).map((i: any) => formatMediaItem(i, 'movie')),
+          trendingTodayTv: (bundle.trendDayT || []).filter(isSafe).map((i: any) => formatMediaItem(i, 'tv')),
+          trendingWeekMovies: (bundle.trendWeekM || []).filter(isSafe).map((i: any) => formatMediaItem(i, 'movie')),
+          trendingWeekTv: (bundle.trendWeekT || []).filter(isSafe).map((i: any) => formatMediaItem(i, 'tv')),
+          topRated: (bundle.topR || []).filter(isSafe).slice(0, 18).map((i: any) => formatMediaItem(i, 'movie')),
+          hbo: (bundle.hboData || []).filter(isSafe).slice(0, 15).map((i: any) => formatMediaItem(i, 'tv')),
+          disney: (bundle.disneyData || []).filter(isSafe).slice(0, 15).map((i: any) => formatMediaItem(i, 'tv')),
+          marvel: (bundle.marvelData || []).filter(isSafe).slice(0, 15).map((i: any) => formatMediaItem(i, 'movie')),
+          apple: (bundle.appleData || []).filter(isSafe).slice(0, 15).map((i: any) => formatMediaItem(i, 'tv')),
+          amazon: (bundle.amazonData || []).filter(isSafe).slice(0, 15).map((i: any) => formatMediaItem(i, 'tv')),
+        };
+        saveCachedHomeContent(formatted);
+        return formatted;
+      }
+    }
+  } catch {}
+
   const [
     trendDayM,
     trendDayT,
@@ -337,7 +410,7 @@ export async function fetchHomeContent() {
     tmdbFetch('/discover/tv', { with_networks: '1024', sort_by: 'popularity.desc' }).catch(() => ({ results: [] })),
   ]);
 
-  return {
+  const result: HomeCatalogData = {
     heroItems: (trendDayM.results || []).filter(isSafe).slice(0, 5).map((i: any) => formatMediaItem(i, 'movie')),
     trendingTodayMovies: (trendDayM.results || []).filter(isSafe).slice(5).map((i: any) => formatMediaItem(i, 'movie')),
     trendingTodayTv: (trendDayT.results || []).filter(isSafe).map((i: any) => formatMediaItem(i, 'tv')),
@@ -350,6 +423,9 @@ export async function fetchHomeContent() {
     apple: (appleData.results || []).filter(isSafe).slice(0, 15).map((i: any) => formatMediaItem(i, 'tv')),
     amazon: (amazonData.results || []).filter(isSafe).slice(0, 15).map((i: any) => formatMediaItem(i, 'tv')),
   };
+
+  saveCachedHomeContent(result);
+  return result;
 }
 
 // Movies Catalog fetcher
