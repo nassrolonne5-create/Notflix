@@ -64,9 +64,7 @@ export const TurnstileGate: React.FC<{ children: React.ReactNode }> = ({ childre
   });
   const [siteKey, setSiteKey] = useState<string>(() => initialBootstrap?.siteKey || DEFAULT_PROD_SITE_KEY);
   const [theme, setTheme] = useState<'dark' | 'auto'>(() => initialBootstrap?.theme || 'dark');
-  const [mode, setMode] = useState<'custom' | 'test'>(() => initialBootstrap?.mode || 'custom');
   const [previewFallback, setPreviewFallback] = useState<boolean>(false);
-  const [verifyingToken, setVerifyingToken] = useState<boolean>(false);
   const [verifiedSuccess, setVerifiedSuccess] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [scriptLoaded, setScriptLoaded] = useState<boolean>(false);
@@ -117,7 +115,6 @@ export const TurnstileGate: React.FC<{ children: React.ReactNode }> = ({ childre
       } catch {}
       setSiteKey(data.siteKey || DEFAULT_PROD_SITE_KEY);
       setTheme(data.theme || 'dark');
-      setMode(data.mode || 'custom');
       setPreviewFallback(false);
       setGateRequired(true);
       setChecking(false);
@@ -178,7 +175,6 @@ export const TurnstileGate: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [gateRequired]);
 
   const handleVerifyToken = useCallback(async (token: string, isFallback = false) => {
-    setVerifyingToken(true);
     setErrorMsg(null);
     try {
       const res = await fetch('/api/security/turnstile/verify', {
@@ -208,8 +204,6 @@ export const TurnstileGate: React.FC<{ children: React.ReactNode }> = ({ childre
       }
     } catch {
       setErrorMsg('Network error while verifying security token. Please retry.');
-    } finally {
-      setVerifyingToken(false);
     }
   }, []);
 
@@ -312,9 +306,9 @@ export const TurnstileGate: React.FC<{ children: React.ReactNode }> = ({ childre
       <div className="absolute top-1/4 -left-32 w-96 h-96 bg-blue-600/10 rounded-full blur-3xl pointer-events-none" />
       <div className="absolute bottom-1/4 -right-32 w-96 h-96 bg-rose-600/10 rounded-full blur-3xl pointer-events-none" />
 
-      <div className="w-full max-w-md bg-[#0e1424] border border-white/10 rounded-2xl p-6 sm:p-8 shadow-2xl relative z-10 text-center">
-        {/* Brand Header */}
-        <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-blue-500/10 border border-blue-500/25 text-blue-400 mb-4 shadow-lg shadow-blue-950/40">
+      <div className="w-full max-w-sm bg-[#0e1424] border border-white/10 rounded-2xl px-4 py-6 sm:p-7 shadow-2xl relative z-10 flex flex-col items-center text-center">
+        {/* Brand Header (Red Rectangle Area) */}
+        <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-blue-500/10 border border-blue-500/25 text-blue-400 mb-3.5 shadow-lg shadow-blue-950/40">
           {verifiedSuccess ? (
             <CheckCircle2 className="w-7 h-7 text-emerald-400 animate-pulse" />
           ) : (
@@ -322,52 +316,29 @@ export const TurnstileGate: React.FC<{ children: React.ReactNode }> = ({ childre
           )}
         </div>
 
-        <div className="font-display text-2xl tracking-wider text-white uppercase mb-1">
+        <div className="font-display text-2xl tracking-wider text-white uppercase mb-2">
           Notflix<span className="text-blue-500">.</span>
         </div>
 
-        <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-blue-500/10 border border-blue-500/25 text-blue-300 text-[10px] font-mono font-bold uppercase tracking-widest mb-3">
-          <Lock className="w-3 h-3" />
+        <div className="inline-flex items-center justify-center gap-1.5 px-3 py-1 rounded-md bg-blue-500/10 border border-blue-500/25 text-blue-300 text-[10px] font-mono font-bold uppercase tracking-widest mb-5">
+          <Lock className="w-3 h-3 shrink-0" />
           <span>Cloudflare Turnstile Connection Check</span>
         </div>
 
-        <h1 className="text-lg sm:text-xl font-extrabold text-white tracking-tight mb-1.5">
-          {verifiedSuccess ? 'Connection Verified' : 'Verifying Your Browser Session'}
-        </h1>
-        <p className="text-xs text-slate-400 leading-relaxed mb-6">
-          {verifiedSuccess
-            ? 'Security handshake complete. Launching Notflix HD streaming...'
-            : 'Please complete the quick security check below to confirm you are a real viewer and access Notflix.'}
-        </p>
-
-        {/* Cloudflare Turnstile Widget Mount Box */}
-        <div className="bg-[#090d18] border border-white/10 rounded-xl p-4 min-h-[96px] flex flex-col items-center justify-center gap-3 mb-5">
+        {/* Original Cloudflare Turnstile Widget */}
+        <div className="w-full flex flex-col items-center justify-center min-h-[65px]">
           {!scriptLoaded && !errorMsg && (
-            <div className="flex items-center gap-2 text-xs text-slate-400 font-mono">
+            <div className="flex items-center gap-2 text-xs text-slate-400 font-mono py-3">
               <RefreshCw className="w-4 h-4 animate-spin text-blue-400" />
-              <span>Loading Cloudflare Challenge...</span>
+              <span>Loading Cloudflare...</span>
             </div>
           )}
 
-          <div ref={widgetContainerRef} className="flex items-center justify-center min-h-[65px]" />
-
-          {verifyingToken && (
-            <div className="flex items-center gap-2 text-xs font-mono text-blue-400">
-              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-              <span>Validating session token...</span>
-            </div>
-          )}
-
-          {verifiedSuccess && (
-            <div className="flex items-center gap-1.5 text-xs font-mono font-bold text-emerald-400">
-              <CheckCircle2 className="w-4 h-4" />
-              <span>Session Verified — Entering Notflix</span>
-            </div>
-          )}
+          <div ref={widgetContainerRef} className="flex items-center justify-center" />
         </div>
 
         {errorMsg && (
-          <div className="bg-rose-500/10 border border-rose-500/30 rounded-xl p-3 mb-4 text-left flex items-start justify-between gap-2">
+          <div className="w-full bg-rose-500/10 border border-rose-500/30 rounded-xl p-3 mt-4 text-left flex items-start justify-between gap-2">
             <div className="flex items-start gap-2 text-xs text-rose-300">
               <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
               <span>{errorMsg}</span>
@@ -381,13 +352,6 @@ export const TurnstileGate: React.FC<{ children: React.ReactNode }> = ({ childre
             </button>
           </div>
         )}
-
-        <div className="flex items-center justify-between text-[11px] font-mono text-slate-500 pt-3 border-t border-white/5">
-          <span>Protected by Cloudflare Turnstile</span>
-          <span>
-            {mode === 'test' ? 'Test Gate Active' : 'Session-Only Verification'}
-          </span>
-        </div>
       </div>
     </div>
   );
