@@ -821,6 +821,21 @@ export const LiveTvArena: React.FC = () => {
   }, [activeChannel, isAudioCleanEnabled]);
 
   const handleVideoWaiting = useCallback(() => {
+    const v = videoRef.current;
+    if (v && !userPausedRef.current && v.buffered.length > 1) {
+      try {
+        const cur = v.currentTime;
+        for (let i = 0; i < v.buffered.length - 1; i++) {
+          const endCur = v.buffered.end(i);
+          const startNext = v.buffered.start(i + 1);
+          if (cur >= endCur - 0.5 && cur < startNext && startNext - endCur <= 16.0) {
+            v.currentTime = startNext + 0.05;
+            v.play().catch(() => {});
+            return;
+          }
+        }
+      } catch {}
+    }
     if (bufferingTimerRef.current !== null) {
       window.clearTimeout(bufferingTimerRef.current);
     }
@@ -1848,6 +1863,40 @@ export const LiveTvArena: React.FC = () => {
         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
     const canPlayNativeHls = Boolean(video.canPlayType('application/vnd.apple.mpegurl'));
 
+    let stallWatchdogInterval: number | null = null;
+    let lastPlayheadPos = -1;
+    let lastPlayheadMoveMs = Date.now();
+
+    const bridgeBufferedDiscontinuity = (): boolean => {
+      try {
+        const cur = video.currentTime;
+        if (video.buffered.length > 1) {
+          for (let i = 0; i < video.buffered.length - 1; i++) {
+            const endCur = video.buffered.end(i);
+            const startNext = video.buffered.start(i + 1);
+            if (cur >= endCur - 0.5 && cur < startNext && startNext - endCur <= 16.0) {
+              video.currentTime = startNext + 0.05;
+              video.play().catch(() => {});
+              lastPlayheadMoveMs = Date.now();
+              return true;
+            }
+          }
+        }
+        // If playhead fell completely behind the sliding live buffer window, snap into the first available range
+        if (video.buffered.length > 0) {
+          const firstStart = video.buffered.start(0);
+          const lastEnd = video.buffered.end(video.buffered.length - 1);
+          if (cur < firstStart - 0.5 && lastEnd > firstStart) {
+            video.currentTime = Math.max(firstStart + 0.1, lastEnd - 12);
+            video.play().catch(() => {});
+            lastPlayheadMoveMs = Date.now();
+            return true;
+          }
+        }
+      } catch {}
+      return false;
+    };
+
     const startHlsJsPlayback = () => {
       if (!Hls.isSupported()) return false;
       setupCompanionBgAudioPipeline();
@@ -1858,30 +1907,60 @@ export const LiveTvArena: React.FC = () => {
         backBufferLength: 30,
         maxBufferLength: 50,
         maxMaxBufferLength: 90,
-        // Use fixed seconds (liveSyncDuration / liveMaxLatencyDuration) instead of Count so fluctuating
-        // upstream #EXT-X-TARGETDURATION values never recalculate target latency and jump 15 seconds forward
-        liveSyncDuration: 24,
-        liveMaxLatencyDuration: 120,
-        maxLiveSyncPlaybackRate: 1.03,
+        // Keep a comfortable 18s live cushion with 60s max latency so 2-segment upstream feeds never underrun
+        liveSyncDuration: 18,
+        liveMaxLatencyDuration: 60,
+        maxLiveSyncPlaybackRate: 1.04,
         liveDurationInfinity: true,
-        maxBufferHole: 0.8,
+        maxBufferHole: 1.5,
         maxFragLookUpTolerance: 0.5,
-        highBufferWatchdogPeriod: 3,
-        nudgeOffset: 0.25,
-        nudgeMaxRetry: 12,
-        manifestLoadingTimeOut: 15000,
-        manifestLoadingMaxRetry: 8,
-        manifestLoadingRetryDelay: 800,
-        levelLoadingTimeOut: 15000,
-        levelLoadingMaxRetry: 8,
-        levelLoadingRetryDelay: 800,
-        fragLoadingTimeOut: 18000,
-        fragLoadingMaxRetry: 8,
-        fragLoadingRetryDelay: 600,
+        highBufferWatchdogPeriod: 2,
+        nudgeOffset: 0.3,
+        nudgeMaxRetry: 15,
+        manifestLoadingTimeOut: 12000,
+        manifestLoadingMaxRetry: 10,
+        manifestLoadingRetryDelay: 500,
+        levelLoadingTimeOut: 12000,
+        levelLoadingMaxRetry: 10,
+        levelLoadingRetryDelay: 500,
+        fragLoadingTimeOut: 14000,
+        fragLoadingMaxRetry: 10,
+        fragLoadingRetryDelay: 400,
       });
       hlsRef.current = hls;
       hls.loadSource(playUrl);
       hls.attachMedia(video);
+
+      // Periodic 2s Discontinuity & Stall Watchdog to prevent any freeze on PTS gaps or stalled upstream segments
+      stallWatchdogInterval = window.setInterval(() => {
+        if (isEffectDisposed || userPausedRef.current || !playbackStarted) return;
+        const activeMedia = bgAudioActiveRef.current && bgAudio ? bgAudio : video;
+        const curTime = activeMedia.currentTime;
+
+        if (Math.abs(curTime - lastPlayheadPos) > 0.08) {
+          lastPlayheadPos = curTime;
+          lastPlayheadMoveMs = Date.now();
+          return;
+        }
+
+        // Playhead has not moved: first try bridging any buffered discontinuity range
+        if (bridgeBufferedDiscontinuity()) {
+          return;
+        }
+
+        const stalledMs = Date.now() - lastPlayheadMoveMs;
+        if (stalledMs >= 6000 && stalledMs < 18000) {
+          try {
+            hls.startLoad();
+            if (video.paused && !userPausedRef.current) {
+              video.play().catch(() => {});
+            }
+          } catch {}
+        } else if (stalledMs >= 18000) {
+          lastPlayheadMoveMs = Date.now();
+          showSignalInterruptedOverlay();
+        }
+      }, 2000);
 
       // Mirror pure audio track into companion <audio> MediaSource for uninterrupted Android Chrome lock-screen audio
       hls.on(Hls.Events.BUFFER_CODECS, (_event, data: any) => {
@@ -1961,6 +2040,7 @@ export const LiveTvArena: React.FC = () => {
         recoveryAttempts = 0;
         if (!playbackStarted) {
           playbackStarted = true;
+          lastPlayheadMoveMs = Date.now();
           window.clearTimeout(watchdogTimer);
           setLoadingStream(false);
         }
@@ -1969,10 +2049,12 @@ export const LiveTvArena: React.FC = () => {
       hls.on(Hls.Events.FRAG_BUFFERED, () => {
         if (!playbackStarted) {
           playbackStarted = true;
+          lastPlayheadMoveMs = Date.now();
           window.clearTimeout(watchdogTimer);
           setLoadingStream(false);
         }
         if (!userPausedRef.current) {
+          bridgeBufferedDiscontinuity();
           if (bgAudioActiveRef.current && bgAudio && bgAudio.paused) {
             bgAudio.play().then(() => setIsPlaying(true)).catch(() => {});
           } else if (!bgAudioActiveRef.current && video.paused) {
@@ -1987,25 +2069,12 @@ export const LiveTvArena: React.FC = () => {
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (!data.fatal) {
-          // If playback stalls at a small discontinuity micro-gap (< 3.5s) between buffered ranges,
-          // gently nudge across the micro-gap without ever jumping 15 seconds forward
           if (
-            data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR &&
-            !userPausedRef.current &&
-            video.buffered.length > 1
+            (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR ||
+              data.details === Hls.ErrorDetails.BUFFER_NUDGE_ON_STALL) &&
+            !userPausedRef.current
           ) {
-            try {
-              const cur = video.currentTime;
-              for (let i = 0; i < video.buffered.length - 1; i++) {
-                const endCur = video.buffered.end(i);
-                const startNext = video.buffered.start(i + 1);
-                if (cur >= endCur - 0.3 && cur < startNext && startNext - endCur < 3.5) {
-                  video.currentTime = startNext + 0.05;
-                  video.play().catch(() => {});
-                  break;
-                }
-              }
-            } catch {}
+            bridgeBufferedDiscontinuity();
           }
           return;
         }
@@ -2020,7 +2089,7 @@ export const LiveTvArena: React.FC = () => {
               if (hlsRef.current === hls) {
                 hls.startLoad();
               }
-            }, 800);
+            }, 600);
             return;
           }
         } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
@@ -2087,6 +2156,9 @@ export const LiveTvArena: React.FC = () => {
     return () => {
       isEffectDisposed = true;
       window.clearTimeout(watchdogTimer);
+      if (stallWatchdogInterval !== null) {
+        window.clearInterval(stallWatchdogInterval);
+      }
       if (recoveryTimeoutId !== null) {
         window.clearTimeout(recoveryTimeoutId);
       }
