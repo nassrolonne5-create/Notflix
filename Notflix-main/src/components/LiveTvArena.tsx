@@ -178,7 +178,7 @@ const CHANNEL_CATEGORIES = [
   { id: 'combat', label: 'UFC & Combat' },
 ];
 
-function matchesChannelCategory(ch: LiveTvChannel, categoryId: string): boolean {
+function matchesChannelCategory(ch: LiveChannel, categoryId: string): boolean {
   if (!categoryId || categoryId === 'all') return true;
   const cat = String(ch.category || '').toLowerCase();
   const id = String(ch.id || '').toLowerCase();
@@ -1806,8 +1806,14 @@ export const LiveTvArena: React.FC = () => {
       } catch {}
     };
 
+    const isAndroidChromiumMobile =
+      typeof navigator !== 'undefined' &&
+      /Android/i.test(navigator.userAgent) &&
+      !isFirefoxBrowser;
+
     const setupCompanionBgAudioPipeline = () => {
-      if (isFirefoxBrowser || !bgAudio || typeof MediaSource === 'undefined') return;
+      // Only needed on mobile Android Chromium for lock-screen audio when PiP is not active
+      if (!isAndroidChromiumMobile || !bgAudio || typeof MediaSource === 'undefined') return;
       cleanupBgAudioMediaSource();
       try {
         bgMs = new MediaSource();
@@ -1834,7 +1840,7 @@ export const LiveTvArena: React.FC = () => {
       if (!playbackStarted) {
         showSignalInterruptedOverlay();
       }
-    }, 22000);
+    }, 24000);
 
     const isIosDevice =
       typeof navigator !== 'undefined' &&
@@ -1847,32 +1853,39 @@ export const LiveTvArena: React.FC = () => {
       setupCompanionBgAudioPipeline();
 
       const hls = new Hls({
-        // Keep enableWorker: false so HLS demuxing runs on the active media-exempt main thread
-        // and is never throttled or suspended by Android/iOS when the screen is locked or app is backgrounded
-        enableWorker: false,
+        enableWorker: !isAndroidChromiumMobile,
         lowLatencyMode: false,
         backBufferLength: 30,
-        maxBufferLength: 45,
+        maxBufferLength: 50,
         maxMaxBufferLength: 90,
-        liveSyncDurationCount: 3,
-        liveMaxLatencyDurationCount: 10,
+        // Use fixed seconds (liveSyncDuration / liveMaxLatencyDuration) instead of Count so fluctuating
+        // upstream #EXT-X-TARGETDURATION values never recalculate target latency and jump 15 seconds forward
+        liveSyncDuration: 24,
+        liveMaxLatencyDuration: 120,
+        maxLiveSyncPlaybackRate: 1.03,
+        liveDurationInfinity: true,
+        maxBufferHole: 0.8,
+        maxFragLookUpTolerance: 0.5,
+        highBufferWatchdogPeriod: 3,
+        nudgeOffset: 0.25,
+        nudgeMaxRetry: 12,
         manifestLoadingTimeOut: 15000,
-        manifestLoadingMaxRetry: 6,
-        manifestLoadingRetryDelay: 1000,
+        manifestLoadingMaxRetry: 8,
+        manifestLoadingRetryDelay: 800,
         levelLoadingTimeOut: 15000,
-        levelLoadingMaxRetry: 6,
-        levelLoadingRetryDelay: 1000,
-        fragLoadingTimeOut: 20000,
-        fragLoadingMaxRetry: 6,
-        fragLoadingRetryDelay: 1000,
+        levelLoadingMaxRetry: 8,
+        levelLoadingRetryDelay: 800,
+        fragLoadingTimeOut: 18000,
+        fragLoadingMaxRetry: 8,
+        fragLoadingRetryDelay: 600,
       });
       hlsRef.current = hls;
       hls.loadSource(playUrl);
       hls.attachMedia(video);
 
-      // Mirror pure audio track into companion <audio> MediaSource for uninterrupted Chrome background / lock-screen audio
+      // Mirror pure audio track into companion <audio> MediaSource for uninterrupted Android Chrome lock-screen audio
       hls.on(Hls.Events.BUFFER_CODECS, (_event, data: any) => {
-        if (isFirefoxBrowser || !bgAudio) return;
+        if (!isAndroidChromiumMobile || !bgAudio) return;
         const audioTrack = data?.audio;
         if (audioTrack && !bgCodecMime) {
           const container = audioTrack.container || 'audio/mp4';
@@ -1883,7 +1896,7 @@ export const LiveTvArena: React.FC = () => {
       });
 
       hls.on(Hls.Events.BUFFER_APPENDING, (_event, eventData: any) => {
-        if (isFirefoxBrowser || !bgAudio) return;
+        if (!isAndroidChromiumMobile || !bgAudio) return;
         if (eventData?.type === 'audio' && eventData?.data) {
           if (!bgCodecMime) {
             const mainAudioTrack = (hls as any).bufferController?.tracks?.audio;
@@ -1973,10 +1986,32 @@ export const LiveTvArena: React.FC = () => {
       });
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (!data.fatal) return;
+        if (!data.fatal) {
+          // If playback stalls at a small discontinuity micro-gap (< 3.5s) between buffered ranges,
+          // gently nudge across the micro-gap without ever jumping 15 seconds forward
+          if (
+            data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR &&
+            !userPausedRef.current &&
+            video.buffered.length > 1
+          ) {
+            try {
+              const cur = video.currentTime;
+              for (let i = 0; i < video.buffered.length - 1; i++) {
+                const endCur = video.buffered.end(i);
+                const startNext = video.buffered.start(i + 1);
+                if (cur >= endCur - 0.3 && cur < startNext && startNext - endCur < 3.5) {
+                  video.currentTime = startNext + 0.05;
+                  video.play().catch(() => {});
+                  break;
+                }
+              }
+            } catch {}
+          }
+          return;
+        }
 
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          if (recoveryAttempts < 5) {
+          if (recoveryAttempts < 8) {
             recoveryAttempts++;
             if (recoveryTimeoutId !== null) {
               window.clearTimeout(recoveryTimeoutId);
@@ -1985,12 +2020,15 @@ export const LiveTvArena: React.FC = () => {
               if (hlsRef.current === hls) {
                 hls.startLoad();
               }
-            }, 1000);
+            }, 800);
             return;
           }
         } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-          if (recoveryAttempts < 3) {
+          if (recoveryAttempts < 5) {
             recoveryAttempts++;
+            if (recoveryAttempts === 3) {
+              hls.swapAudioCodec();
+            }
             hls.recoverMediaError();
             return;
           }

@@ -3976,71 +3976,72 @@ function sortEventChannelsForCardDisplay(channelIds: string[]): string[] {
 }
 
 // Strict per-channel stream allowlist/blocklist so a channel NEVER includes another numbered channel's feed as "Server 2 / Backup"
+// while preserving each channel's dedicated Bluetier Hardware HLS (wideiptv.top/player/...) primary mirror
 const STRICT_CHANNEL_REQUIRED_STREAM_TOKEN: Record<string, string[]> = {
   // beIN Sports Arabic 1–9 & Open & Premium
-  'bein-sports-1-ar': ['premium91'],
-  'bein-sports-2-ar': ['premium92'],
-  'bein-sports-3-ar': ['premium93'],
-  'bein-sports-4-ar': ['premium94'],
-  'bein-sports-5-ar': ['premium95'],
-  'bein-sports-6-ar': ['premium96'],
-  'bein-sports-7-ar': ['premium97'],
-  'bein-sports-8-ar': ['premium98', 'premium97', 'premium99'], // 8-ar uses failover if 98 is offline
-  'bein-sports-9-ar': ['premium99'],
-  'bein-sports-open-ar': ['premium578'],
-  'bein-sports-premium-1-ar': ['premium91'],
-  'bein-sports-premium-2-ar': ['premium92'],
-  'bein-sports-premium-3-ar': ['premium93'],
+  'bein-sports-1-ar': ['player/beinar/', 'premium91', 'beinfhd11'],
+  'bein-sports-2-ar': ['player/beinar2/', 'premium92'],
+  'bein-sports-3-ar': ['player/beinar3/', 'premium93'],
+  'bein-sports-4-ar': ['player/beinar4/', 'premium94'],
+  'bein-sports-5-ar': ['player/beinar5/', 'premium95'],
+  'bein-sports-6-ar': ['player/beinar6/', 'premium96'],
+  'bein-sports-7-ar': ['player/beinar7/', 'premium97'],
+  'bein-sports-8-ar': ['player/beinar8/', 'premium98', 'premium97', 'premium99'],
+  'bein-sports-9-ar': ['player/beinar9/', 'premium99'],
+  'bein-sports-open-ar': ['premium578', 'beinsportsnews'],
+  'bein-sports-premium-1-ar': ['player/beinar/', 'premium91'],
+  'bein-sports-premium-2-ar': ['player/beinar2/', 'premium92'],
+  'bein-sports-premium-3-ar': ['player/beinar3/', 'premium93'],
   // beIN Sports English 1–3
-  'bein-sports-en-1': ['premium712'],
+  'bein-sports-en-1': ['premium61', 'premium712'],
   'bein-sports-en-2': ['premium713'],
   'bein-sports-en-3': ['premium714'],
   // beIN Sports France 1–3 & MAX
-  'bein-sports-fr-1': ['premium116'],
-  'bein-sports-fr-2': ['premium117'],
-  'bein-sports-fr-3': ['premium118'],
-  'bein-sports-max-4-fr': ['premium494'],
-  'bein-sports-max-5-fr': ['premium495'],
-  'bein-sports-max-6-fr': ['premium496'],
-  'bein-sports-max-7-fr': ['premium497'],
-  'bein-sports-max-8-fr': ['premium498'],
-  'bein-sports-max-9-fr': ['premium499'],
+  'bein-sports-fr-1': ['player/beinsport1fr/', 'premium116'],
+  'bein-sports-fr-2': ['player/beinsport2fr/', 'premium117'],
+  'bein-sports-fr-3': ['player/beinsport3fr/', 'premium118'],
+  'bein-sports-max-4-fr': ['player/beinmax4fr/', 'premium494'],
+  'bein-sports-max-5-fr': ['player/beinmax5fr/', 'premium495'],
+  'bein-sports-max-6-fr': ['player/beinmax6fr/', 'premium496'],
+  'bein-sports-max-7-fr': ['player/beinmax7fr/', 'premium497'],
+  'bein-sports-max-8-fr': ['player/beinmax8fr/', 'premium498'],
+  'bein-sports-max-9-fr': ['player/beinmax9fr/', 'premium499'],
   'bein-sports-max-10-fr': ['premium500'],
   // France TV & Canal+ Channels (Strictly dedicated transponders)
   'canal-plus-fr': ['premium121'],
-  'canal-plus-sport-fr': ['premium122'],
-  'canal-plus-foot-fr': ['premium463'],
+  'canal-plus-sport-fr': ['player/canalsportfr/', 'premium122'],
+  'canal-plus-foot-fr': ['player/footplusfr/', 'premium463'],
   'canal-plus-sport-360-fr': ['premium464', '92.114.85.87'],
   'canal-plus-f1-fr': ['premium273'],
   'canal-plus-motogp-fr': ['premium271'],
-  'canal-plus-afrique-1': ['premium122', 'premium463'],
-  'canal-plus-afrique-2': ['premium463', 'premium121'],
+  'canal-plus-afrique-1': ['premium486', 'premium122', 'premium463'],
+  'canal-plus-afrique-2': ['premium487', 'premium463', 'premium121'],
   'canal-plus-extra-1': ['premium983'],
   'canal-plus-extra-2': ['premium984'],
   'canal-plus-sport-1-eu': ['premium48', 'premium75'],
   'canal-plus-sport-2-eu': ['premium73', 'premium259'],
   'canal-plus-premium-hd': ['premium566', 'premium567'],
-  'rmc-sport-1-fr': ['premium119'],
-  'rmc-sport-2-fr': ['premium120'],
+  'rmc-sport-1-fr': ['player/rmcsport1fr/', 'premium119'],
+  'rmc-sport-2-fr': ['player/rmcsport2fr/', 'premium120'],
   'dazn-ligue1-fr': ['premium960'],
   // Spain LaLiga & Movistar
   'movistar-laliga-es': ['premium84'],
-  'dazn-laliga-es': ['premium538'],
+  'dazn-laliga-es': ['player/daznlaliga/', 'premium538'],
   'movistar-plus-es': ['premium437'],
   'laliga-hypermotion-es': ['premium539'],
   'movistar-liga-de-campeones-es': ['premium435'],
   // TNT Sports 1–4 UK
-  'tnt-sports-1': ['premium31'],
-  'tnt-sports-2': ['premium32'],
-  'tnt-sports-3': ['premium33'],
-  'tnt-sports-4': ['premium34'],
+  'tnt-sports-1': ['player/tnt1uk/', 'premium31'],
+  'tnt-sports-2': ['player/tntsports2/', 'premium32'],
+  'tnt-sports-3': ['player/tntsports3/', 'premium33'],
+  'tnt-sports-4': ['player/tntsports4/', 'premium34'],
   // Sky Sports UK
-  'sky-sports-main-event': ['premium38'],
-  'sky-sports-premier-league': ['premium130', 'AAxBRQEBc2c'],
-  'sky-sports-football': ['premium35'],
-  'sky-sports-plus': ['premium36'],
-  'sky-sports-action': ['premium37', 'AQNASgYGemc'],
-  'sky-sports-f1': ['premium60', 'AwZGQwwEZA'],
+  'sky-sports-main-event': ['player/skysportsmainevent/', 'premium38'],
+  'sky-sports-premier-league': ['player/skysportspremierleague/', 'premium130', 'AAxBRQEBc2c'],
+  'sky-sports-football': ['player/skysportsfootballuk/', 'premium35'],
+  'sky-sports-plus': ['player/skysportsplus/', 'premium36'],
+  'sky-sports-action': ['player/skysportsaction/', 'premium37', 'AQNASgYGemc'],
+  'sky-sports-f1': ['player/skysportsf1/', 'premium60', 'AwZGQwwEZA'],
   // SuperSport
   'supersport-grandstand': ['premium412'],
   'supersport-football': ['premium56', 'premium413'],
@@ -4061,12 +4062,12 @@ const STRICT_CHANNEL_REQUIRED_STREAM_TOKEN: Record<string, string[]> = {
   // Italian Serie A Dedicated Channels
   'dazn-1-it': ['premium877'],
   'dazn-2-it': ['premium878'],
-  'sky-sport-calcio-it': ['premium870'],
-  'sky-sport-uno-it': ['premium461'],
-  'sky-sport-arena-it': ['premium462'],
+  'sky-sport-calcio-it': ['player/skysportcalcioit/', 'premium870'],
+  'sky-sport-uno-it': ['player/skysportunoit/', 'premium461'],
+  'sky-sport-arena-it': ['player/skysportarenait/', 'premium462'],
   'sky-sport-max-it': ['premium460'],
   'sky-sport-252-it': ['premium872'],
-  'sky-sport-24-it': ['premium869'],
+  'sky-sport-24-it': ['player/skysport24it/', 'premium869'],
 };
 
 // Filter out contaminated secondary mirrors where upstream bundles a different TV channel or a free FAST replay stream
@@ -8129,8 +8130,8 @@ app.get(['/api/live/epg.xml', '/v1/live/epg.xml'], async (req: Request, res: Res
       const logo = resolveChannelLogo(chId, meta.logo, meta.name);
       xmlLines.push(`  <channel id="${escapeHtmlText(chId)}">`);
       xmlLines.push(`    <display-name lang="${escapeHtmlText(meta.language || 'en')}">${escapeHtmlText(meta.name)}</display-name>`);
-      if (meta.shortName) {
-        xmlLines.push(`    <display-name>${escapeHtmlText(meta.shortName)}</display-name>`);
+      if ((meta as any).shortName) {
+        xmlLines.push(`    <display-name>${escapeHtmlText((meta as any).shortName)}</display-name>`);
       }
       if (logo) {
         xmlLines.push(`    <icon src="${escapeHtmlText(logo)}" />`);
@@ -8390,92 +8391,80 @@ app.get(['/api/live/channels', '/v1/live/channels'], async (req: Request, res: R
     };
 
     const CHANNEL_FAILOVER_RAW_URLS: Record<string, { url: string; label: string; headers?: Record<string, string> }[]> = {
-      'bein-sports-8-ar': [
-        {
-          url: 'https://edge.cowedd4855ws.sbs/premium97/index.m3u8',
-          label: 'beIN Sports HD Failover 1 (AR)',
-          headers: DEMBED_HEADERS,
-        },
-        {
-          url: 'https://edge.cowedd4855ws.sbs/premium99/index.m3u8',
-          label: 'beIN Sports HD Failover 2 (AR)',
-          headers: DEMBED_HEADERS,
-        },
-      ],
       'starzplay-sports-1-ar': [
         {
-          url: 'https://edge.cowedd4855ws.sbs/premium609/index.m3u8',
+          url: 'https://edge.wedd48c.top/premium609/index.m3u8',
           label: 'STARZPLAY Sports 1 / AD Sports Premium 1 HD (1080p)',
           headers: DEMBED_HEADERS,
         },
       ],
       'starzplay-sports-2-ar': [
         {
-          url: 'https://edge.cowedd4855ws.sbs/premium610/index.m3u8',
+          url: 'https://edge.wedd48c.top/premium610/index.m3u8',
           label: 'STARZPLAY Sports 2 / AD Sports Premium 2 HD (1080p)',
           headers: DEMBED_HEADERS,
         },
       ],
       'starzplay-sports-3-ar': [
         {
-          url: 'https://edge.cowedd4855ws.sbs/premium602/index.m3u8',
+          url: 'https://edge.wedd48c.top/premium602/index.m3u8',
           label: 'STARZPLAY Sports 3 / UFC Arabia HD (1080p)',
           headers: DEMBED_HEADERS,
         },
         {
-          url: 'https://edge.cowedd4855ws.sbs/premium609/index.m3u8',
+          url: 'https://edge.wedd48c.top/premium609/index.m3u8',
           label: 'STARZPLAY Sports Backup HD (1080p)',
           headers: DEMBED_HEADERS,
         },
       ],
       'starzplay-asia-1-ar': [
         {
-          url: 'https://edge.cowedd4855ws.sbs/premium608/index.m3u8',
+          url: 'https://edge.wedd48c.top/premium608/index.m3u8',
           label: 'STARZPLAY Sports Asia 1 / AD Sports Asia 1 HD (1080p)',
           headers: DEMBED_HEADERS,
         },
         {
-          url: 'https://edge.cowedd4855ws.sbs/premium600/index.m3u8',
+          url: 'https://edge.wedd48c.top/premium600/index.m3u8',
           label: 'STARZPLAY Asia 1 Backup HD (1080p)',
           headers: DEMBED_HEADERS,
         },
       ],
       'starzplay-asia-2-ar': [
         {
-          url: 'https://edge.cowedd4855ws.sbs/premium603/index.m3u8',
+          url: 'https://edge.wedd48c.top/premium603/index.m3u8',
           label: 'STARZPLAY Sports Asia 2 / AD Sports Asia 2 HD (1080p)',
           headers: DEMBED_HEADERS,
         },
         {
-          url: 'https://edge.cowedd4855ws.sbs/premium601/index.m3u8',
+          url: 'https://edge.wedd48c.top/premium601/index.m3u8',
           label: 'STARZPLAY Asia 2 Backup HD (1080p)',
           headers: DEMBED_HEADERS,
         },
       ],
       'starzplay-criclife-1': [
         {
-          url: 'https://edge.cowedd4855ws.sbs/premium612/index.m3u8',
+          url: 'https://edge.wedd48c.top/premium612/index.m3u8',
           label: 'STARZPLAY CricLife 1 HD (1080p)',
           headers: DEMBED_HEADERS,
         },
       ],
       'starzplay-criclife-2': [
         {
-          url: 'https://edge.cowedd4855ws.sbs/premium613/index.m3u8',
+          url: 'https://edge.wedd48c.top/premium613/index.m3u8',
           label: 'STARZPLAY CricLife 2 HD (1080p)',
           headers: DEMBED_HEADERS,
         },
       ],
       'starzplay-encore-hd': [
         {
-          url: 'https://edge.cowedd4855ws.sbs/premium336/index.m3u8',
+          url: 'https://edge.wedd48c.top/premium336/index.m3u8',
           label: 'STARZPLAY Encore Movies & Series HD (1080p)',
           headers: DEMBED_HEADERS,
         },
       ],
       'starzplay-action-hd': [
         {
-          url: 'https://edge.cowedd4855ws.sbs/premium337/index.m3u8',
+          url: 'https://edge.wedd48c.top/premium337/index.m3u8',
           label: 'STARZPLAY Edge Action & Originals HD (1080p)',
           headers: DEMBED_HEADERS,
         },
@@ -8833,92 +8822,80 @@ app.get(['/api/live/stream/:channelId', '/v1/live/stream/:channelId'], async (re
     Referer: 'https://dembed.st/',
   };
   const STREAM_FAILOVER_MAP: Record<string, { url: string; server: string; headers?: Record<string, string> }[]> = {
-    'bein-sports-8-ar': [
-      {
-        url: 'https://edge.cowedd4855ws.sbs/premium97/index.m3u8',
-        server: 'beIN Sports 8 HD Primary Failover (AR)',
-        headers: DEMBED_STREAM_HEADERS,
-      },
-      {
-        url: 'https://edge.cowedd4855ws.sbs/premium99/index.m3u8',
-        server: 'beIN Sports 8 HD Backup Mirror (AR)',
-        headers: DEMBED_STREAM_HEADERS,
-      },
-    ],
     'starzplay-sports-1-ar': [
       {
-        url: 'https://edge.cowedd4855ws.sbs/premium609/index.m3u8',
+        url: 'https://edge.wedd48c.top/premium609/index.m3u8',
         server: 'STARZPLAY Sports 1 / AD Sports Premium 1 HD (1080p)',
         headers: DEMBED_STREAM_HEADERS,
       },
     ],
     'starzplay-sports-2-ar': [
       {
-        url: 'https://edge.cowedd4855ws.sbs/premium610/index.m3u8',
+        url: 'https://edge.wedd48c.top/premium610/index.m3u8',
         server: 'STARZPLAY Sports 2 / AD Sports Premium 2 HD (1080p)',
         headers: DEMBED_STREAM_HEADERS,
       },
     ],
     'starzplay-sports-3-ar': [
       {
-        url: 'https://edge.cowedd4855ws.sbs/premium602/index.m3u8',
+        url: 'https://edge.wedd48c.top/premium602/index.m3u8',
         server: 'STARZPLAY Sports 3 / UFC Arabia HD (1080p)',
         headers: DEMBED_STREAM_HEADERS,
       },
       {
-        url: 'https://edge.cowedd4855ws.sbs/premium609/index.m3u8',
+        url: 'https://edge.wedd48c.top/premium609/index.m3u8',
         server: 'STARZPLAY Sports Backup HD (1080p)',
         headers: DEMBED_STREAM_HEADERS,
       },
     ],
     'starzplay-asia-1-ar': [
       {
-        url: 'https://edge.cowedd4855ws.sbs/premium608/index.m3u8',
+        url: 'https://edge.wedd48c.top/premium608/index.m3u8',
         server: 'STARZPLAY Sports Asia 1 / AD Sports Asia 1 HD (1080p)',
         headers: DEMBED_STREAM_HEADERS,
       },
       {
-        url: 'https://edge.cowedd4855ws.sbs/premium600/index.m3u8',
+        url: 'https://edge.wedd48c.top/premium600/index.m3u8',
         server: 'STARZPLAY Asia 1 Backup HD (1080p)',
         headers: DEMBED_STREAM_HEADERS,
       },
     ],
     'starzplay-asia-2-ar': [
       {
-        url: 'https://edge.cowedd4855ws.sbs/premium603/index.m3u8',
+        url: 'https://edge.wedd48c.top/premium603/index.m3u8',
         server: 'STARZPLAY Sports Asia 2 / AD Sports Asia 2 HD (1080p)',
         headers: DEMBED_STREAM_HEADERS,
       },
       {
-        url: 'https://edge.cowedd4855ws.sbs/premium601/index.m3u8',
+        url: 'https://edge.wedd48c.top/premium601/index.m3u8',
         server: 'STARZPLAY Asia 2 Backup HD (1080p)',
         headers: DEMBED_STREAM_HEADERS,
       },
     ],
     'starzplay-criclife-1': [
       {
-        url: 'https://edge.cowedd4855ws.sbs/premium612/index.m3u8',
+        url: 'https://edge.wedd48c.top/premium612/index.m3u8',
         server: 'STARZPLAY CricLife 1 HD (1080p)',
         headers: DEMBED_STREAM_HEADERS,
       },
     ],
     'starzplay-criclife-2': [
       {
-        url: 'https://edge.cowedd4855ws.sbs/premium613/index.m3u8',
+        url: 'https://edge.wedd48c.top/premium613/index.m3u8',
         server: 'STARZPLAY CricLife 2 HD (1080p)',
         headers: DEMBED_STREAM_HEADERS,
       },
     ],
     'starzplay-encore-hd': [
       {
-        url: 'https://edge.cowedd4855ws.sbs/premium336/index.m3u8',
+        url: 'https://edge.wedd48c.top/premium336/index.m3u8',
         server: 'STARZPLAY Encore Movies & Series HD (1080p)',
         headers: DEMBED_STREAM_HEADERS,
       },
     ],
     'starzplay-action-hd': [
       {
-        url: 'https://edge.cowedd4855ws.sbs/premium337/index.m3u8',
+        url: 'https://edge.wedd48c.top/premium337/index.m3u8',
         server: 'STARZPLAY Edge Action & Originals HD (1080p)',
         headers: DEMBED_STREAM_HEADERS,
       },
@@ -8948,7 +8925,7 @@ app.get(['/api/live/stream/:channelId', '/v1/live/stream/:channelId'], async (re
   };
 
   const failoverList = STREAM_FAILOVER_MAP[channelId];
-  if (failoverList && failoverList.length > 0) {
+  if (failoverList && failoverList.length > 0 && rawSources.length === 0) {
     failoverList.forEach((fo, idx) => {
       cineproSources.push({
         id: `${channelId}-failover-${idx + 1}`,
@@ -8959,7 +8936,7 @@ app.get(['/api/live/stream/:channelId', '/v1/live/stream/:channelId'], async (re
         type: 'hls',
         language: cleanChannelLang,
         languageLabel: cleanChannelLang,
-        verified: true,
+        verified: idx === 0,
       });
     });
   }
@@ -9181,7 +9158,242 @@ app.get(['/api/live/playlist.m3u8', '/v1/live/playlist.m3u8'], async (req: Reque
   }
 });
 
-// 6. BUILT-IN CORS-FREE HLS MANIFEST & SEGMENT PROXY RELAY (CINEPRO-FIRST FOR PNG/TIKTIKPX UNWRAPPING)
+// 6. BUILT-IN CORS-FREE HLS MANIFEST & SEGMENT PROXY RELAY (DIRECT CDN + LOCAL PNG/TIKTIKPX/GZIP UNWRAPPING + RAM CACHE)
+const liveProxyManifestCache = new Map<string, { text: string; expiresAt: number }>();
+const liveProxySegmentCache = new Map<string, { buffer: Buffer; contentType: string; expiresAt: number }>();
+const MAX_LIVE_SEGMENT_CACHE_ENTRIES = 28;
+
+function unwrapTikTikPxPayload(buf: Buffer): Buffer {
+  if (buf.length >= 12 && buf.subarray(0, 8).toString('ascii') === 'TIKTIKPX') {
+    const payloadLen = buf.readUInt32BE(8);
+    const endOffset = Math.min(buf.length, 12 + payloadLen);
+    const slice = buf.subarray(12, endOffset);
+    if (slice.length >= 2 && slice[0] === 0x1f && slice[1] === 0x8b) {
+      try {
+        return zlib.gunzipSync(slice);
+      } catch {
+        return slice;
+      }
+    }
+    return slice;
+  }
+  return buf;
+}
+
+function unwrapLiveMediaSegment(rawBuffer: Buffer): Buffer {
+  if (!rawBuffer || rawBuffer.length < 16) return rawBuffer;
+  let buffer = rawBuffer;
+
+  // 1. True PNG image container (0x89 'P' 'N' 'G') used by TikTok CDN (~tplv-tiktokx-origin.image)
+  //    Contains zlib-compressed IDAT scanlines -> PNG row filters (0..4) -> TIKTIKPX length prefix -> gzip -> MPEG-TS (0x47)
+  if (
+    buffer.length > 64 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47 &&
+    buffer[12] === 0x49 &&
+    buffer[13] === 0x48 &&
+    buffer[14] === 0x44 &&
+    buffer[15] === 0x52
+  ) {
+    try {
+      const width = buffer.readUInt32BE(16);
+      const height = buffer.readUInt32BE(20);
+      const colorType = buffer[25];
+      const bpp = colorType === 2 ? 3 : colorType === 6 ? 4 : colorType === 4 ? 2 : 1;
+      const rowBytes = width * bpp;
+      const stride = 1 + rowBytes;
+
+      if (width > 0 && width <= 4096 && height > 0 && height <= 8192) {
+        let pos = 8;
+        const idatChunks: Buffer[] = [];
+        while (pos + 8 <= buffer.length) {
+          const chunkLen = buffer.readUInt32BE(pos);
+          if (chunkLen < 0 || pos + 12 + chunkLen > buffer.length) break;
+          const chunkType = buffer.subarray(pos + 4, pos + 8).toString('ascii');
+          if (chunkType === 'IDAT') {
+            idatChunks.push(buffer.subarray(pos + 8, pos + 8 + chunkLen));
+          } else if (chunkType === 'IEND') {
+            break;
+          }
+          pos += 12 + chunkLen;
+        }
+
+        if (idatChunks.length > 0) {
+          const inflated = zlib.inflateSync(Buffer.concat(idatChunks));
+          if (inflated.length >= stride * height) {
+            const pixels = Buffer.allocUnsafe(rowBytes * height);
+            for (let y = 0; y < height; y++) {
+              const filter = inflated[y * stride];
+              const srcOff = y * stride + 1;
+              const dstOff = y * rowBytes;
+              const prevOff = (y - 1) * rowBytes;
+              if (filter === 0) {
+                inflated.copy(pixels, dstOff, srcOff, srcOff + rowBytes);
+              } else {
+                for (let x = 0; x < rowBytes; x++) {
+                  const raw = inflated[srcOff + x];
+                  const a = x >= bpp ? pixels[dstOff + x - bpp] : 0;
+                  const b = y > 0 ? pixels[prevOff + x] : 0;
+                  const c = x >= bpp && y > 0 ? pixels[prevOff + x - bpp] : 0;
+                  let val = raw;
+                  if (filter === 1) {
+                    val = (raw + a) & 0xff;
+                  } else if (filter === 2) {
+                    val = (raw + b) & 0xff;
+                  } else if (filter === 3) {
+                    val = (raw + ((a + b) >> 1)) & 0xff;
+                  } else if (filter === 4) {
+                    const p = a + b - c;
+                    const pa = Math.abs(p - a);
+                    const pb = Math.abs(p - b);
+                    const pc = Math.abs(p - c);
+                    const pr = pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+                    val = (raw + pr) & 0xff;
+                  }
+                  pixels[dstOff + x] = val;
+                }
+              }
+            }
+            buffer = unwrapTikTikPxPayload(pixels);
+          }
+        }
+      }
+    } catch {
+      // Fall through to raw signature scans if PNG inflate fails
+    }
+  }
+
+  // 2. Direct TIKTIKPX wrapper
+  if (buffer.length >= 12 && buffer.subarray(0, 8).toString('ascii') === 'TIKTIKPX') {
+    buffer = unwrapTikTikPxPayload(buffer);
+  }
+
+  // 3. Raw Gzip wrapper (0x1f 0x8b)
+  if (buffer.length >= 18 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
+    try {
+      buffer = zlib.gunzipSync(buffer);
+    } catch {
+      // Keep original buffer if not valid gzip
+    }
+  }
+
+  // 4. Strip any prepended PNG/GIF/ID3 header before the first valid 188-byte MPEG-TS 0x47 sync sequence
+  if (buffer.length > 376 && buffer[0] !== 0x47) {
+    const maxScan = Math.min(buffer.length - 376, 8192);
+    for (let i = 1; i < maxScan; i++) {
+      if (buffer[i] === 0x47 && buffer[i + 188] === 0x47 && buffer[i + 376] === 0x47) {
+        buffer = buffer.subarray(i);
+        break;
+      }
+    }
+  }
+
+  return buffer;
+}
+
+function stabilizeLiveM3u8Manifest(rawManifestText: string, effectiveUrl: string, customHeaders: Record<string, string>): string {
+  let text = rawManifestText;
+
+  // First rewrite any CinePro proxy URLs to our local /api/live/proxy/ endpoint
+  text = text.replace(/https?:\/\/[^/\s"']+\/v1\/live\/proxy\//gi, '/api/live/proxy/');
+  text = text.replace(/\/v1\/live\/proxy\//gi, '/api/live/proxy/');
+  text = text.replace(/([^\r\n"'])(\/api\/live\/proxy\/)/g, '$1\n$2');
+
+  const lines = text.split(/\r?\n/);
+  let expectVariantStream = false;
+  let maxExtinfDuration = 0;
+
+  for (const l of lines) {
+    const m = l.match(/^#EXTINF:([\d.]+)/i);
+    if (m) {
+      const dur = parseFloat(m[1]);
+      if (Number.isFinite(dur) && dur > maxExtinfDuration) {
+        maxExtinfDuration = dur;
+      }
+    }
+  }
+
+  const rewrittenLines: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      rewrittenLines.push(line);
+      continue;
+    }
+
+    if (trimmed.startsWith('#')) {
+      // Strip upstream #EXT-X-START:TIME-OFFSET=-15.0 which forces HLS players onto the bleeding edge
+      // and causes 15-second freezes/jumps when upstream publishes segments in 2-segment batches
+      if (trimmed.startsWith('#EXT-X-START:')) {
+        continue;
+      }
+
+      // Stabilize fluctuating #EXT-X-TARGETDURATION so hls.js never recalculates target latency mid-stream and seeks 15s forward
+      if (trimmed.startsWith('#EXT-X-TARGETDURATION:')) {
+        const declared = parseInt(trimmed.slice('#EXT-X-TARGETDURATION:'.length), 10) || 6;
+        const stableTarget = Math.max(declared, Math.ceil(maxExtinfDuration), 8);
+        rewrittenLines.push(`#EXT-X-TARGETDURATION:${stableTarget}`);
+        continue;
+      }
+
+      if (trimmed.startsWith('#EXT-X-STREAM-INF')) {
+        expectVariantStream = true;
+      }
+      if (trimmed.includes('URI="')) {
+        const isPlaylistUri =
+          trimmed.startsWith('#EXT-X-MEDIA') || trimmed.startsWith('#EXT-X-I-FRAME-STREAM-INF');
+        rewrittenLines.push(
+          line.replace(/URI="([^"]+)"/g, (_match, rawUri) => {
+            if (rawUri.startsWith('/api/live/proxy/')) {
+              return `URI="${rawUri}"`;
+            }
+            if (!effectiveUrl) return _match;
+            try {
+              const resolved = new URL(rawUri, effectiveUrl).toString();
+              const isChildM3u8 = isPlaylistUri || /\.m3u8(\?|$)/i.test(resolved);
+              return `URI="${buildLocalLiveProxyUrl(resolved, customHeaders, isChildM3u8)}"`;
+            } catch {
+              return _match;
+            }
+          })
+        );
+        continue;
+      }
+      rewrittenLines.push(line);
+      continue;
+    }
+
+    const isVariant = expectVariantStream;
+    expectVariantStream = false;
+
+    if (trimmed.startsWith('/api/live/proxy/')) {
+      rewrittenLines.push(trimmed);
+      continue;
+    }
+
+    if (effectiveUrl) {
+      try {
+        const resolved = new URL(trimmed, effectiveUrl).toString();
+        const isChildM3u8 =
+          isVariant ||
+          /\.m3u8(\?|$)/i.test(resolved) ||
+          /\/(playlist|chunklist|master|index|manifest|mono)[^/]*\.m3u8/i.test(resolved);
+        rewrittenLines.push(buildLocalLiveProxyUrl(resolved, customHeaders, isChildM3u8));
+        continue;
+      } catch {
+        rewrittenLines.push(line);
+        continue;
+      }
+    }
+
+    rewrittenLines.push(line);
+  }
+
+  return rewrittenLines.join('\n');
+}
+
 app.all(['/api/live/proxy/:endpoint', '/v1/live/proxy/:endpoint'], async (req: Request, res: Response) => {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Headers', '*');
@@ -9216,49 +9428,37 @@ app.all(['/api/live/proxy/:endpoint', '/v1/live/proxy/:endpoint'], async (req: R
       directUrl = urlParam.trim();
     }
 
-    const cineproProxyHeaders: Record<string, string> = {
-      Accept: '*/*',
-    };
-    if (req.headers.range) {
-      cineproProxyHeaders['Range'] = req.headers.range as string;
-    }
-
-    let upstream: globalThis.Response | null = null;
-    let fetchedDirectly = false;
-
     if (directUrl && !isSafeExternalProxyUrl(directUrl)) {
       return res.status(403).send('Forbidden: Internal or invalid proxy target URL');
     }
 
-    // Fast-path direct fetch for public CDNs that block datacenter scraper IPs (Rotana HibridCDN, Amagi, RMTV Akamai)
-    const preferDirectFetch =
-      Boolean(directUrl) &&
-      /(hibridcdn\.net|amagi\.tv|rmtv\.akamaized\.net|turner\.com|cbsi\.live\.ott\.irdeto\.com)/i.test(directUrl);
+    const isManifestEndpoint =
+      endpoint.endsWith('.m3u8') || /\.m3u8(\?|$)/i.test(directUrl);
+    const hasRangeHeader = Boolean(req.headers.range);
+    const cacheKey = directUrl || `${endpoint}${queryString}`;
 
-    if (!preferDirectFetch) {
-      // 1. Fetch from CinePro's /v1/live/proxy/:endpoint FIRST so CinePro's
-      //    built-in PNG/TIKTIKPX/gzip segment unwrapper and IP-bound session headers are used.
-      const cineproProxyUrl = `${getCineproUrl()}/v1/live/proxy/${encodeURIComponent(endpoint)}${queryString}`;
-      const cpController = new AbortController();
-      const cpTimeout = setTimeout(() => cpController.abort(), 14000);
-      try {
-        const resp = await fetch(cineproProxyUrl, {
-          headers: cineproProxyHeaders,
-          signal: cpController.signal,
-          redirect: 'follow',
-        });
-        clearTimeout(cpTimeout);
-        if (resp.ok || resp.status === 206) {
-          upstream = resp;
-        }
-      } catch {
-        clearTimeout(cpTimeout);
+    // 1. Check RAM Cache for Manifests (1.2s TTL) or Segments (18s TTL)
+    const now = Date.now();
+    if (isManifestEndpoint) {
+      const cachedManifest = liveProxyManifestCache.get(cacheKey);
+      if (cachedManifest && cachedManifest.expiresAt > now) {
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        return res.send(cachedManifest.text);
+      }
+    } else if (!hasRangeHeader) {
+      const cachedSeg = liveProxySegmentCache.get(cacheKey);
+      if (cachedSeg && cachedSeg.expiresAt > now) {
+        res.setHeader('Content-Type', cachedSeg.contentType);
+        res.setHeader('Content-Length', cachedSeg.buffer.length.toString());
+        res.setHeader('Cache-Control', 'public, max-age=15');
+        return res.status(200).end(cachedSeg.buffer);
       }
     }
 
-    // 2. Fall back to direct fetch (or run first for preferDirectFetch CDNs)
-    if (!upstream && directUrl && isSafeExternalProxyUrl(directUrl)) {
-      const requestHeaders: Record<string, string> = {
+    // Build headers for direct CDN fetch and CinePro proxy fallback
+    const buildDirectRequestHeaders = (): Record<string, string> => {
+      const h: Record<string, string> = {
         'User-Agent':
           customHeaders['User-Agent'] ||
           customHeaders['user-agent'] ||
@@ -9266,33 +9466,103 @@ app.all(['/api/live/proxy/:endpoint', '/v1/live/proxy/:endpoint'], async (req: R
         Accept: '*/*',
       };
       if (customHeaders['Referer'] || customHeaders['referer']) {
-        requestHeaders['Referer'] = customHeaders['Referer'] || customHeaders['referer'];
+        h['Referer'] = customHeaders['Referer'] || customHeaders['referer'];
       }
       if (customHeaders['Origin'] || customHeaders['origin']) {
-        requestHeaders['Origin'] = customHeaders['Origin'] || customHeaders['origin'];
+        h['Origin'] = customHeaders['Origin'] || customHeaders['origin'];
       }
       if (req.headers.range) {
-        requestHeaders['Range'] = req.headers.range as string;
+        h['Range'] = req.headers.range as string;
       }
+      return h;
+    };
 
-      const directController = new AbortController();
-      const directTimeout = setTimeout(() => directController.abort(), 10000);
+    const cineproProxyHeaders: Record<string, string> = { Accept: '*/*' };
+    if (req.headers.range) {
+      cineproProxyHeaders['Range'] = req.headers.range as string;
+    }
+
+    // Determine whether to fetch directly from the Edge CDN first:
+    // - All binary video segments (.ts / .image / .m4s / .aac) on public CDNs (TikTok CDN, cdn.wideiptv.top, Akamai, CloudFront, etc.)
+    //   are 10x–50x faster when fetched directly (~120–350ms vs 2,500–16,000ms through the remote CinePro VPS) and unwrapped locally.
+    // - Public M3U8 CDNs (HibridCDN, Amagi, Akamai, CloudFront, Kwikmotion, EdgeNext, EasyBroadcast) also fetch directly first.
+    const isIpBoundManifestHost =
+      isManifestEndpoint &&
+      /(wedd48c\.top|cowedd|wideiptv\.top\/player\/)/i.test(directUrl);
+
+    const preferDirectFetch =
+      Boolean(directUrl) &&
+      (!isManifestEndpoint ||
+        !isIpBoundManifestHost ||
+        /(hibridcdn\.net|amagi\.tv|akamaized\.net|cloudfront\.net|kwikmotion\.com|edgenextcdn\.net|easybroadcast\.io|turner\.com|irdeto\.com|daioncdn\.net|streamup\.eu)/i.test(
+          directUrl
+        ));
+
+    const fetchFromDirectCdn = async (timeoutMs: number): Promise<globalThis.Response | null> => {
+      if (!directUrl || !isSafeExternalProxyUrl(directUrl)) return null;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
         const resp = await fetch(directUrl, {
-          headers: requestHeaders,
-          signal: directController.signal,
+          headers: buildDirectRequestHeaders(),
+          signal: controller.signal,
           redirect: 'follow',
         });
-        clearTimeout(directTimeout);
         if (resp.url && !isSafeExternalProxyUrl(resp.url)) {
-          return res.status(403).send('Forbidden: Redirect to internal network blocked');
+          clearTimeout(timer);
+          return null;
         }
         if (resp.ok || resp.status === 206) {
-          upstream = resp;
-          fetchedDirectly = true;
+          clearTimeout(timer);
+          return resp;
         }
       } catch {
-        clearTimeout(directTimeout);
+        // ignore and allow fallback
+      }
+      clearTimeout(timer);
+      return null;
+    };
+
+    const fetchFromCineproRelay = async (timeoutMs: number): Promise<globalThis.Response | null> => {
+      const cineproProxyUrl = `${getCineproUrl()}/v1/live/proxy/${encodeURIComponent(endpoint)}${queryString}`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const resp = await fetch(cineproProxyUrl, {
+          headers: cineproProxyHeaders,
+          signal: controller.signal,
+          redirect: 'follow',
+        });
+        if (resp.ok || resp.status === 206) {
+          clearTimeout(timer);
+          return resp;
+        }
+      } catch {
+        // ignore and allow fallback
+      }
+      clearTimeout(timer);
+      return null;
+    };
+
+    let upstream: globalThis.Response | null = null;
+    let fetchedDirectly = false;
+
+    if (preferDirectFetch) {
+      upstream = await fetchFromDirectCdn(isManifestEndpoint ? 6000 : 7500);
+      if (upstream) {
+        fetchedDirectly = true;
+      } else {
+        upstream = await fetchFromCineproRelay(isManifestEndpoint ? 6500 : 9000);
+      }
+    } else {
+      // IP-bound manifest host (edge.wedd48c.top or wideiptv.top/player/): fetch from CinePro with fast 5.5s timeout + 1 retry
+      upstream = await fetchFromCineproRelay(5500);
+      if (!upstream) {
+        upstream = await fetchFromCineproRelay(5500);
+      }
+      if (!upstream && directUrl) {
+        upstream = await fetchFromDirectCdn(5500);
+        if (upstream) fetchedDirectly = true;
       }
     }
 
@@ -9302,29 +9572,6 @@ app.all(['/api/live/proxy/:endpoint', '/v1/live/proxy/:endpoint'], async (req: R
 
     const contentType = (upstream.headers.get('content-type') || '').toLowerCase();
     const effectiveUrl = fetchedDirectly ? upstream.url || directUrl || '' : directUrl || '';
-    const looksLikeM3u8 =
-      endpoint.endsWith('.m3u8') ||
-      contentType.includes('mpegurl') ||
-      contentType.includes('x-mpegurl');
-
-    // Fast-path: stream binary .ts/.m4s/.aac segments directly ONLY when already unwrapped by CinePro
-    if (!looksLikeM3u8 && !fetchedDirectly && !contentType.includes('image/') && upstream.body) {
-      res.setHeader('Content-Type', 'video/mp2t');
-      if (upstream.headers.get('content-length')) {
-        res.setHeader('Content-Length', upstream.headers.get('content-length')!);
-      }
-      if (upstream.headers.get('content-range')) {
-        res.setHeader('Content-Range', upstream.headers.get('content-range')!);
-      }
-      res.setHeader('Cache-Control', 'public, max-age=10');
-      res.status(upstream.status);
-
-      const nodeStream = Readable.fromWeb(upstream.body as any);
-      req.on('close', () => {
-        nodeStream.destroy();
-      });
-      return nodeStream.pipe(res);
-    }
 
     const arrayBuffer = await upstream.arrayBuffer();
     let buffer = Buffer.from(arrayBuffer);
@@ -9332,94 +9579,48 @@ app.all(['/api/live/proxy/:endpoint', '/v1/live/proxy/:endpoint'], async (req: R
     const isM3u8Content = headerPrefix.startsWith('#EXTM3U') || headerPrefix.startsWith('#EXT');
 
     if (isM3u8Content && buffer.length > 0) {
-      let text = buffer.toString('utf8');
-
-      // First rewrite any CinePro proxy URLs to our local /api/live/proxy/ endpoint
-      text = text.replace(/https?:\/\/[^/\s"']+\/v1\/live\/proxy\//gi, '/api/live/proxy/');
-      text = text.replace(/\/v1\/live\/proxy\//gi, '/api/live/proxy/');
-      text = text.replace(/([^\r\n"'])(\/api\/live\/proxy\/)/g, '$1\n$2');
-
-      // Also rewrite any remaining unproxied relative/absolute URLs inside the manifest
-      if (effectiveUrl) {
-        const lines = text.split(/\r?\n/);
-        let expectVariantStream = false;
-
-        const rewrittenLines = lines.map((line) => {
-          const trimmed = line.trim();
-          if (!trimmed) return line;
-
-          if (trimmed.startsWith('#')) {
-            if (trimmed.startsWith('#EXT-X-STREAM-INF')) {
-              expectVariantStream = true;
-            }
-            if (trimmed.includes('URI="')) {
-              const isPlaylistUri =
-                trimmed.startsWith('#EXT-X-MEDIA') || trimmed.startsWith('#EXT-X-I-FRAME-STREAM-INF');
-              return line.replace(/URI="([^"]+)"/g, (_match, rawUri) => {
-                if (rawUri.startsWith('/api/live/proxy/')) {
-                  return `URI="${rawUri}"`;
-                }
-                try {
-                  const resolved = new URL(rawUri, effectiveUrl).toString();
-                  const isChildM3u8 = isPlaylistUri || /\.m3u8(\?|$)/i.test(resolved);
-                  return `URI="${buildLocalLiveProxyUrl(resolved, customHeaders, isChildM3u8)}"`;
-                } catch {
-                  return _match;
-                }
-              });
-            }
-            return line;
-          }
-
-          const isVariant = expectVariantStream;
-          expectVariantStream = false;
-
-          if (trimmed.startsWith('/api/live/proxy/')) {
-            return trimmed;
-          }
-
-          try {
-            const resolved = new URL(trimmed, effectiveUrl).toString();
-            const isChildM3u8 =
-              isVariant ||
-              /\.m3u8(\?|$)/i.test(resolved) ||
-              /\/(playlist|chunklist|master|index|manifest|mono)[^/]*\.m3u8/i.test(resolved);
-            return buildLocalLiveProxyUrl(resolved, customHeaders, isChildM3u8);
-          } catch {
-            return line;
-          }
-        });
-
-        text = rewrittenLines.join('\n');
+      const stabilizedText = stabilizeLiveM3u8Manifest(buffer.toString('utf8'), effectiveUrl, customHeaders);
+      liveProxyManifestCache.set(cacheKey, {
+        text: stabilizedText,
+        expiresAt: Date.now() + 1200,
+      });
+      if (liveProxyManifestCache.size > 120) {
+        const oldestKey = liveProxyManifestCache.keys().next().value;
+        if (oldestKey) liveProxyManifestCache.delete(oldestKey);
       }
 
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-      return res.send(text);
+      return res.send(stabilizedText);
     }
 
-    // Strip any prepended PNG/GIF/ID3 wrapper before the first valid 188-byte MPEG-TS 0x47 sync sequence
-    if (buffer.length > 376 && buffer[0] !== 0x47) {
-      const maxScan = Math.min(buffer.length - 376, 8192);
-      for (let i = 1; i < maxScan; i++) {
-        if (buffer[i] === 0x47 && buffer[i + 188] === 0x47 && buffer[i + 376] === 0x47) {
-          buffer = buffer.subarray(i);
-          break;
-        }
+    // Unwrap PNG/IDAT/TIKTIKPX/Gzip/header-prefixed media segments into clean 0x47 MPEG-TS bytes
+    buffer = Buffer.from(unwrapLiveMediaSegment(buffer));
+
+    let resolvedContentType = 'video/mp2t';
+    if (buffer.length > 0 && buffer[0] === 0x47) {
+      resolvedContentType = 'video/mp2t';
+    } else if (contentType && !contentType.includes('image/') && !contentType.includes('text/plain')) {
+      resolvedContentType = contentType;
+    }
+
+    if (!hasRangeHeader && upstream.status === 200 && buffer.length > 0 && buffer.length <= 6 * 1024 * 1024) {
+      liveProxySegmentCache.set(cacheKey, {
+        buffer,
+        contentType: resolvedContentType,
+        expiresAt: Date.now() + 18000,
+      });
+      if (liveProxySegmentCache.size > MAX_LIVE_SEGMENT_CACHE_ENTRIES) {
+        const oldestKey = liveProxySegmentCache.keys().next().value;
+        if (oldestKey) liveProxySegmentCache.delete(oldestKey);
       }
     }
 
-    if (buffer.length > 0 && buffer[0] === 0x47) {
-      res.setHeader('Content-Type', 'video/mp2t');
-    } else if (contentType && !contentType.includes('image/')) {
-      res.setHeader('Content-Type', contentType);
-    } else {
-      res.setHeader('Content-Type', 'video/mp2t');
-    }
-
+    res.setHeader('Content-Type', resolvedContentType);
     if (upstream.headers.get('content-range')) {
       res.setHeader('Content-Range', upstream.headers.get('content-range')!);
     }
+    res.setHeader('Cache-Control', 'public, max-age=15');
     res.setHeader('Content-Length', buffer.length.toString());
     res.status(upstream.status);
     return res.end(buffer);
@@ -11140,7 +11341,7 @@ app.post('/api/security/turnstile/verify', async (req: Request, res: Response) =
       `Cloudflare Turnstile Verification Failed (${Array.isArray(cfData?.['error-codes']) ? cfData['error-codes'].join(', ') : 'invalid-token'})`,
       userAgent,
       '/api/security/turnstile/verify',
-      'turnstile',
+      'interception',
       false
     );
 

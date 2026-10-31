@@ -230,8 +230,15 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
   const [loginLoading, setLoginLoading] = useState<boolean>(false);
   const [loginError, setLoginError] = useState<string | null>(null);
 
-  // Admin Studio Page Switcher ('analytics' = Analytics Page, 'live_arena' = Live Arena Command Center, 'scrapers' = Edit Scraper Page)
-  const [adminView, setAdminView] = useState<'analytics' | 'live_arena' | 'scrapers'>('analytics');
+  // Admin Studio Workspace Switcher (5 organized workspaces for desktop & mobile)
+  const [adminView, setAdminView] = useState<
+    'analytics' | 'live_arena' | 'security' | 'monetization_seo' | 'scrapers'
+  >('analytics');
+  const [overviewMobileTab, setOverviewMobileTab] = useState<
+    'content' | 'activity' | 'audience' | 'all'
+  >('content');
+  const [arenaSubTab, setArenaSubTab] = useState<'matches' | 'channels' | 'both'>('matches');
+  const [securitySubTab, setSecuritySubTab] = useState<'bans' | 'logs'>('bans');
   const [dateRange, setDateRange] = useState<'today' | '7d' | '30d' | 'all'>('7d');
   const [mediaFilter, setMediaFilter] = useState<'all' | 'movie' | 'tv' | 'live'>('all');
   const [analytics, setAnalytics] = useState<AnalyticsResponse | null>(null);
@@ -1933,13 +1940,13 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
   return (
     <div id="notflix-admin-studio-root" className="min-h-screen bg-[#080c14] text-white flex flex-col font-sans selection:bg-blue-600 selection:text-white">
       {/* =========================================================
-          Compact Single-Row Top Studio Header
+          Clean Single-Row Top Studio Header (Mobile & Desktop)
          ========================================================= */}
-      <header className="sticky top-0 z-40 bg-[#0c101d]/95 backdrop-blur-md border-b border-white/10 px-4 md:px-6 py-2.5 flex flex-wrap items-center justify-between gap-2.5">
-        {/* Left: Brand, 2-Page Switcher & Live Beacon */}
-        <div className="flex items-center gap-2.5 md:gap-3 flex-wrap">
+      <header className="sticky top-0 z-40 h-14 bg-[#0c101d]/95 backdrop-blur-md border-b border-white/10 px-3.5 md:px-6 flex items-center justify-between gap-2">
+        {/* Left: Brand & Live Viewers Pill */}
+        <div className="flex items-center gap-2.5 min-w-0 shrink-0">
           <div className="flex items-center gap-1.5">
-            <span className="font-display text-xl tracking-wider text-white uppercase">
+            <span className="font-display text-lg sm:text-xl tracking-wider text-white uppercase">
               Notflix<span className="text-blue-500">.</span>
             </span>
             <span className="text-[9px] font-extrabold uppercase tracking-widest px-1.5 py-0.5 rounded bg-blue-600/20 text-blue-400 border border-blue-500/30">
@@ -1947,238 +1954,195 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
             </span>
           </div>
 
-          <div className="h-4 w-px bg-white/10 hidden sm:block" />
-
-          {/* Dedicated 3-Page Switcher: Analytics vs Live Arena vs Scraper Servers */}
-          <div className="flex items-center bg-[#131a2b] border border-white/15 rounded-lg p-0.5 gap-0.5">
-            <button
-              type="button"
-              onClick={() => {
-                setAdminView('analytics');
-                window.scrollTo({ top: 0, behavior: 'smooth' });
-              }}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-                adminView === 'analytics'
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-white hover:bg-white/5'
-              }`}
-            >
-              <BarChart3 className="w-3.5 h-3.5" />
-              <span>Analytics</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                setAdminView('live_arena');
-                fetchLiveArenaStatus(false);
-                window.scrollTo({ top: 0, behavior: 'smooth' });
-              }}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-                adminView === 'live_arena'
-                  ? 'bg-rose-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-white hover:bg-white/5'
-              }`}
-            >
-              <Trophy className="w-3.5 h-3.5" />
-              <span>Live Arena</span>
-              <span className="font-mono tabular-nums text-[10px] opacity-90">
-                ({liveArenaStatus?.totalEvents ?? seoStatus?.liveMatchesCount ?? 0})
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                setAdminView('scrapers');
-                window.scrollTo({ top: 0, behavior: 'smooth' });
-              }}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-                adminView === 'scrapers'
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-white hover:bg-white/5'
-              }`}
-            >
-              <Server className="w-3.5 h-3.5" />
-              <span>Scraper Servers</span>
-              <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  scraperIsCustom ? 'bg-amber-400' : 'bg-emerald-400'
-                }`}
-                title={scraperIsCustom ? 'Custom Scraper IPs Active' : 'Default Scraper IPs Active'}
-              />
-            </button>
-          </div>
-
-          {/* Compact Live Viewers Pill */}
-          <div className="hidden xl:flex items-center gap-1.5 bg-[#12192b] border border-white/10 px-2.5 py-1 rounded-md">
-            <span className="relative flex h-2 w-2">
+          {/* Live Viewers Badge — Always visible on mobile & desktop */}
+          <div className="flex items-center gap-1.5 bg-[#12192b] border border-white/10 px-2 py-1 rounded-lg">
+            <span className="relative flex h-2 w-2 shrink-0">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
               <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
             </span>
-            <span className="text-[11px] font-bold text-slate-200">
-              <span className="text-emerald-400 font-mono font-extrabold">{kpis.liveViewers}</span> Live
+            <span className="text-[11px] font-bold text-slate-200 whitespace-nowrap font-mono tabular-nums">
+              <span className="text-emerald-400 font-extrabold">{kpis.liveViewers}</span>{' '}
+              <span className="font-sans">Live</span>
             </span>
           </div>
         </div>
 
-        {/* Right: Context-Specific Action Controls */}
-        <div className="flex items-center gap-1.5 flex-wrap">
-          {adminView === 'analytics' ? (
-            <>
-              {/* Compact Date Range Picker */}
-              <div className="flex items-center bg-[#131a2b] border border-white/10 rounded-lg p-0.5 gap-0.5 text-[11px]">
-                {(
-                  [
-                    { id: 'today', label: 'Today' },
-                    { id: '7d', label: '7D' },
-                    { id: '30d', label: '30D' },
-                    { id: 'all', label: 'All' },
-                  ] as const
-                ).map((item) => (
-                  <button
-                    key={item.id}
-                    onClick={() => setDateRange(item.id)}
-                    className={`px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer ${
-                      dateRange === item.id
-                        ? 'bg-blue-600 text-white shadow-sm'
-                        : 'text-slate-400 hover:text-white hover:bg-white/5'
-                    }`}
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-
-              {/* Auto Refresh Toggle */}
-              <button
-                onClick={() => setAutoRefresh(!autoRefresh)}
-                title="Auto-refresh every 10 seconds"
-                className={`flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-semibold cursor-pointer transition-all ${
-                  autoRefresh
-                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
-                    : 'bg-white/5 border-white/10 text-slate-400 hover:text-white'
-                }`}
-              >
-                <Activity className="w-3 h-3" />
-                <span className="hidden sm:inline">10s</span>
-              </button>
-
-              {/* Manual Refresh Button */}
-              <button
-                onClick={() => {
-                  fetchAnalytics();
-                  fetchLiveArenaStatus(false);
-                  fetchSeoStatus(false);
-                }}
-                disabled={loadingData}
-                title="Refresh analytics data"
-                className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 active:scale-95 text-slate-300 hover:text-white border border-white/10 transition-all cursor-pointer"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${loadingData ? 'animate-spin text-blue-400' : ''}`} />
-              </button>
-
-              {/* Export Backup Button */}
-              <button
-                onClick={handleExportBackup}
-                title="Download Analytics JSON Backup"
-                className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-[11px] font-semibold transition-all cursor-pointer"
-              >
-                <Download className="w-3 h-3 text-emerald-400" />
-                <span className="hidden md:inline">Backup</span>
-              </button>
-
-              {/* Import / Restore Backup Button */}
-              <label
-                title="Restore / Import Analytics JSON Backup"
-                className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-[11px] font-semibold transition-all cursor-pointer"
-              >
-                <Upload className="w-3 h-3 text-blue-400" />
-                <span className="hidden md:inline">Restore</span>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".json"
-                  onChange={handleImportBackup}
-                  className="hidden"
-                />
-              </label>
-            </>
-          ) : adminView === 'live_arena' ? (
-            <>
-              <button
-                type="button"
-                onClick={() => setAdminView('analytics')}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 hover:text-white border border-white/10 text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0"
-              >
-                <BarChart3 className="w-3 h-3 text-blue-400" />
-                <span>← Analytics</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  fetchLiveArenaStatus(true);
-                  fetchSeoStatus(true);
-                }}
-                disabled={liveArenaRefreshing}
-                title="Force refresh Live Arena matches, channels & SEO sitemap"
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
-              >
-                <RefreshCw className={`w-3 h-3 ${liveArenaRefreshing ? 'animate-spin' : ''}`} />
-                <span>{liveArenaRefreshing ? 'Syncing Arena...' : 'Refresh Live Arena'}</span>
-              </button>
-            </>
-          ) : (
-            <>
-              <button
-                type="button"
-                onClick={() => setAdminView('analytics')}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 hover:text-white border border-white/10 text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0"
-              >
-                <BarChart3 className="w-3 h-3 text-blue-400" />
-                <span>← Analytics</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => fetchAndSyncScrapers()}
-                disabled={scraperLoading}
-                title="Reload scraper server configuration"
-                className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 active:scale-95 text-slate-300 hover:text-white border border-white/10 transition-all cursor-pointer"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${scraperLoading ? 'animate-spin text-blue-400' : ''}`} />
-              </button>
-            </>
-          )}
-
-          {/* Back to Website */}
+        {/* Center (Desktop lg:flex): 5 Focused Workspace Tabs */}
+        <nav className="hidden lg:flex items-center bg-[#131a2b] border border-white/10 rounded-xl p-1 gap-1">
           <button
-            onClick={onExit}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0"
+            type="button"
+            onClick={() => {
+              setAdminView('analytics');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+              adminView === 'analytics'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-white hover:bg-white/5'
+            }`}
           >
-            <Globe className="w-3 h-3 text-blue-400" />
+            <BarChart3 className="w-3.5 h-3.5" />
+            <span>Overview</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setAdminView('live_arena');
+              fetchLiveArenaStatus(false);
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+              adminView === 'live_arena'
+                ? 'bg-rose-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            <Trophy className="w-3.5 h-3.5" />
+            <span>Live Arena</span>
+            <span className="font-mono tabular-nums text-[10px] opacity-90">
+              ({liveArenaStatus?.liveNowCount ?? 0} Live)
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setAdminView('security');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+              adminView === 'security'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            <Shield className="w-3.5 h-3.5" />
+            <span>Security &amp; Turnstile</span>
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                turnstileEnabled ? 'bg-emerald-400' : 'bg-slate-500'
+              }`}
+            />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setAdminView('monetization_seo');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+              adminView === 'monetization_seo'
+                ? 'bg-emerald-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            <Globe className="w-3.5 h-3.5" />
+            <span>Ads &amp; SEO</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setAdminView('scrapers');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+              adminView === 'scrapers'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            <Server className="w-3.5 h-3.5" />
+            <span>Scrapers &amp; Backup</span>
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                scraperIsCustom ? 'bg-amber-400' : 'bg-emerald-400'
+              }`}
+              title={scraperIsCustom ? 'Custom Scraper IPs Active' : 'Default Scraper IPs Active'}
+            />
+          </button>
+        </nav>
+
+        {/* Right: Global Quick Actions (Always single row, never wraps) */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {/* Hidden file input for Backup Restore from any workspace */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json"
+            onChange={handleImportBackup}
+            className="hidden"
+          />
+
+          {/* Auto-Sync 10s Indicator/Toggle */}
+          <button
+            type="button"
+            onClick={() => setAutoRefresh(!autoRefresh)}
+            title="Toggle 10-second live auto-refresh"
+            className={`flex items-center justify-center gap-1 h-9 px-2.5 rounded-lg border text-[11px] font-bold cursor-pointer transition-all whitespace-nowrap shrink-0 ${
+              autoRefresh
+                ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                : 'bg-white/5 border-white/10 text-slate-400 hover:text-white'
+            }`}
+          >
+            <Activity className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">10s</span>
+          </button>
+
+          {/* Universal Refresh Button */}
+          <button
+            type="button"
+            onClick={() => {
+              fetchAnalytics();
+              fetchLiveArenaStatus(adminView === 'live_arena');
+              fetchSeoStatus(adminView === 'monetization_seo');
+              fetchAndSyncTurnstile();
+              if (adminView === 'scrapers') fetchAndSyncScrapers();
+            }}
+            disabled={loadingData || liveArenaRefreshing || seoRefreshing}
+            title="Refresh active workspace data"
+            className="flex items-center justify-center w-9 h-9 rounded-lg bg-white/5 hover:bg-white/10 active:scale-95 text-slate-300 hover:text-white border border-white/10 transition-all cursor-pointer shrink-0"
+          >
+            <RefreshCw
+              className={`w-4 h-4 ${
+                loadingData || liveArenaRefreshing || seoRefreshing
+                  ? 'animate-spin text-blue-400'
+                  : ''
+              }`}
+            />
+          </button>
+
+          {/* Return to Public Website */}
+          <button
+            type="button"
+            onClick={onExit}
+            className="flex items-center gap-1.5 h-9 px-2.5 sm:px-3 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 hover:text-white border border-white/10 text-xs font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Globe className="w-3.5 h-3.5 text-blue-400" />
             <span>Site</span>
           </button>
 
           {/* Logout */}
           <button
+            type="button"
             onClick={handleLogout}
             title="Sign out of Admin Studio"
-            className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 transition-all cursor-pointer"
+            className="flex items-center justify-center w-9 h-9 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 transition-all cursor-pointer shrink-0"
           >
-            <LogOut className="w-3.5 h-3.5" />
+            <LogOut className="w-4 h-4" />
           </button>
         </div>
       </header>
 
       {/* =========================================================
-          Main Harmonious Dashboard Container
+          Main Harmonious Dashboard Container (Padded for Mobile Nav)
          ========================================================= */}
-      <main className="flex-1 px-4 md:px-6 py-4 max-w-[1440px] w-full mx-auto flex flex-col gap-4">
+      <main className="flex-1 px-3.5 sm:px-6 pt-3.5 pb-24 lg:pb-6 max-w-[1440px] w-full mx-auto flex flex-col gap-4">
         {/* Backup Status Banner */}
         {backupMessage && (
-          <div className="px-3.5 py-2 rounded-xl bg-blue-500/20 border border-blue-500/40 text-blue-200 text-xs font-semibold flex items-center justify-between">
+          <div className="px-3.5 py-2.5 rounded-xl bg-blue-500/20 border border-blue-500/40 text-blue-200 text-xs font-semibold flex items-center justify-between gap-2">
             <span>{backupMessage}</span>
             <button
               onClick={() => setBackupMessage(null)}
@@ -2190,275 +2154,314 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
         )}
 
         {/* =========================================================
-            PAGE 2: Dedicated Scraper API & Server Configuration Page
+            WORKSPACE 5: Scraper Servers & Vault Backup
            ========================================================= */}
         {adminView === 'scrapers' && (
-          <section
-            id="scraper-servers-panel"
-            className="bg-[#0e1424] border border-blue-500/30 rounded-xl p-4 md:p-5 flex flex-col gap-4 shadow-xl shadow-blue-950/20"
-          >
-            <div className="flex items-start md:items-center justify-between flex-col md:flex-row gap-3 border-b border-white/10 pb-3.5">
+          <div className="flex flex-col gap-4">
+            <section
+              id="scraper-servers-panel"
+              className="bg-[#0e1424] border border-blue-500/30 rounded-xl p-4 md:p-5 flex flex-col gap-4 shadow-xl shadow-blue-950/20"
+            >
+              <div className="flex items-start md:items-center justify-between flex-col md:flex-row gap-3 border-b border-white/10 pb-3.5">
+                <div className="flex items-start gap-3">
+                  <div className="w-9 h-9 rounded-lg bg-blue-500/10 border border-blue-500/25 flex items-center justify-center text-blue-400 shrink-0">
+                    <Server className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h2 className="text-sm font-bold text-white tracking-tight">
+                        Backend Scraper API &amp; Server Configuration
+                      </h2>
+                      <span className="text-[11px] font-mono text-slate-400">
+                        · {scraperIsCustom ? 'Custom Admin Endpoints Active' : 'Default Coolify Endpoints'}
+                        {scraperUpdatedAt > 0
+                          ? ` · Saved ${new Date(scraperUpdatedAt).toLocaleTimeString([], {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}`
+                          : ''}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Replace scraper server IPs, edit ports, or update full URLs directly. Changes apply immediately to live streams and are backed up to Server Disk + Browser Vault.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:flex items-center gap-2 w-full md:w-auto shrink-0">
+                  <button
+                    type="button"
+                    onClick={handlePingAllScrapers}
+                    className="h-10 px-3 rounded-lg bg-[#131b2e] hover:bg-[#19233b] text-slate-200 border border-white/10 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <Activity className="w-3.5 h-3.5 text-teal-400" />
+                    <span>Ping All</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleResetScrapers}
+                    disabled={scraperSaving}
+                    className="h-10 px-3 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-xs font-semibold flex items-center justify-center transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+                  >
+                    Restore Defaults
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleSaveScrapers}
+                    disabled={scraperSaving}
+                    className="col-span-2 h-10 px-4 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-md shadow-blue-950/40 transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+                  >
+                    {scraperSaving ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Saving...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>Save &amp; Apply Changes</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {scraperBanner && (
+                <div
+                  className={`p-2.5 rounded-lg border text-xs font-medium flex items-center justify-between gap-3 ${
+                    scraperBanner.type === 'success'
+                      ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-200'
+                      : scraperBanner.type === 'error'
+                      ? 'bg-rose-500/15 border-rose-500/30 text-rose-200'
+                      : 'bg-blue-500/15 border-blue-500/30 text-blue-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    {scraperBanner.type === 'error' ? (
+                      <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                    ) : (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    )}
+                    <span>{scraperBanner.text}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setScraperBanner(null)}
+                    className="text-slate-400 hover:text-white px-2 py-0.5 cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              {/* 3-Column Scraper Engine Cards */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3.5">
+                {(['cinepro', 'tmdb_embed', 'gateway_fallback'] as ScraperServerId[]).map((id, idx) => {
+                  const cfg = scraperConfigs[id] || DEFAULT_SCRAPER_ENDPOINTS[id];
+                  const mode = scraperEditModes[id] || 'host_port';
+                  const ping = scraperPings[id] || { loading: false };
+                  const isModified = cfg.url !== cfg.defaultUrl;
+
+                  return (
+                    <div
+                      key={id}
+                      className="bg-[#11182a] border border-white/10 rounded-xl p-3.5 flex flex-col justify-between gap-3.5"
+                    >
+                      <div className="flex flex-col gap-2.5">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                              <span className="font-mono text-blue-400">0{idx + 1}.</span>
+                              <span>{cfg.name}</span>
+                            </div>
+                            <p className="text-[10px] text-slate-400 mt-0.5">{cfg.role}</p>
+                          </div>
+
+                          <div className="flex items-center bg-[#0b101d] border border-white/10 rounded-lg p-0.5 text-[10px] shrink-0">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setScraperEditModes((prev) => ({ ...prev, [id]: 'host_port' }))
+                              }
+                              className={`px-2 py-1 rounded font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                                mode === 'host_port'
+                                  ? 'bg-blue-600 text-white'
+                                  : 'text-slate-400 hover:text-white'
+                              }`}
+                            >
+                              IP + Port
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setScraperEditModes((prev) => ({ ...prev, [id]: 'full_url' }))
+                              }
+                              className={`px-2 py-1 rounded font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                                mode === 'full_url'
+                                  ? 'bg-blue-600 text-white'
+                                  : 'text-slate-400 hover:text-white'
+                              }`}
+                            >
+                              Full URL
+                            </button>
+                          </div>
+                        </div>
+
+                        {mode === 'host_port' ? (
+                          <div className="grid grid-cols-12 gap-2">
+                            <div className="col-span-3">
+                              <label className="block text-[10px] font-semibold text-slate-400 mb-1">
+                                Protocol
+                              </label>
+                              <select
+                                value={cfg.protocol}
+                                onChange={(e) => handleHostPortChange(id, 'protocol', e.target.value)}
+                                className="w-full h-9 bg-[#0b101d] border border-white/10 rounded-lg px-2 text-xs font-mono text-white focus:outline-none focus:border-blue-500"
+                              >
+                                <option value="http">http://</option>
+                                <option value="https">https://</option>
+                              </select>
+                            </div>
+
+                            <div className="col-span-6">
+                              <label className="block text-[10px] font-semibold text-slate-400 mb-1">
+                                Server Host / IP
+                              </label>
+                              <input
+                                type="text"
+                                value={cfg.host}
+                                onChange={(e) => handleHostPortChange(id, 'host', e.target.value)}
+                                placeholder="62.171.179.144"
+                                className="w-full h-9 bg-[#0b101d] border border-white/10 rounded-lg px-2.5 text-xs font-mono tabular-nums text-white placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
+                              />
+                            </div>
+
+                            <div className="col-span-3">
+                              <label className="block text-[10px] font-semibold text-slate-400 mb-1">
+                                Port
+                              </label>
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                value={cfg.port}
+                                onChange={(e) => handleHostPortChange(id, 'port', e.target.value)}
+                                placeholder={id === 'cinepro' ? '3001' : id === 'tmdb_embed' ? '3005' : '80'}
+                                className="w-full h-9 bg-[#0b101d] border border-white/10 rounded-lg px-2.5 text-xs font-mono tabular-nums text-amber-300 placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
+                              />
+                            </div>
+                          </div>
+                        ) : (
+                          <div>
+                            <label className="block text-[10px] font-semibold text-slate-400 mb-1">
+                              Full Scraper Endpoint URL
+                            </label>
+                            <input
+                              type="text"
+                              value={cfg.url}
+                              onChange={(e) => handleFullUrlChange(id, e.target.value)}
+                              placeholder={cfg.defaultUrl}
+                              className="w-full h-9 bg-[#0b101d] border border-white/10 rounded-lg px-2.5 text-xs font-mono tabular-nums text-white placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
+                            />
+                          </div>
+                        )}
+
+                        <div className="flex items-center justify-between text-[11px] font-mono tabular-nums text-slate-400 bg-[#0b101d]/70 px-2.5 py-1.5 rounded-lg border border-white/5">
+                          <span className="truncate" title={cfg.url}>
+                            Active: <strong className="text-slate-200">{cfg.url}</strong>
+                          </span>
+                          <span className="shrink-0 ml-2 text-[10px] text-slate-500">
+                            {isModified ? 'Edited' : 'Default'}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="pt-2.5 border-t border-white/5 flex items-center justify-between gap-2">
+                        <div className="min-w-0 flex-1 text-[11px] font-mono tabular-nums truncate">
+                          {ping.loading ? (
+                            <span className="text-blue-400 flex items-center gap-1.5">
+                              <RefreshCw className="w-3 h-3 animate-spin shrink-0" />
+                              <span>Pinging upstream...</span>
+                            </span>
+                          ) : ping.message ? (
+                            <span
+                              className={
+                                ping.reachable ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold'
+                              }
+                              title={ping.message}
+                            >
+                              {ping.message}
+                            </span>
+                          ) : (
+                            <span className="text-slate-500">Tap Test Ping to verify</span>
+                          )}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => handleTestScraper(id)}
+                          disabled={ping.loading}
+                          className="h-8 px-3 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 border border-white/10 text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+                        >
+                          <Zap className="w-3 h-3 text-amber-400" />
+                          <span>Test Ping</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+
+            {/* Dedicated Admin Browser Vault & Full JSON Backup / Restore Card */}
+            <section className="bg-[#0e1424] border border-white/10 rounded-xl p-4 md:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
               <div className="flex items-start gap-3">
-                <div className="w-9 h-9 rounded-lg bg-blue-500/10 border border-blue-500/25 flex items-center justify-center text-blue-400 shrink-0">
-                  <Server className="w-4 h-4" />
+                <div className="w-9 h-9 rounded-lg bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400 shrink-0">
+                  <Download className="w-4 h-4" />
                 </div>
                 <div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h2 className="text-sm font-bold text-white tracking-tight">
-                      Backend Scraper API &amp; Server Configuration
-                    </h2>
-                    <span className="text-[11px] font-mono text-slate-400">
-                      · {scraperIsCustom ? 'Custom Admin Endpoints Active' : 'Default Coolify Endpoints'}
-                      {scraperUpdatedAt > 0
-                        ? ` · Saved ${new Date(scraperUpdatedAt).toLocaleTimeString([], {
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })}`
-                        : ''}
-                    </span>
-                  </div>
+                  <h3 className="text-sm font-bold text-white">
+                    Admin Browser Vault &amp; JSON Backup / Restore
+                  </h3>
                   <p className="text-[11px] text-slate-400 mt-0.5">
-                    Replace scraper server IPs, edit ports, or update full URLs directly. Changes apply immediately to live streams and are backed up to Server Disk + Browser Vault.
+                    Your analytics history, blocked IPs, Turnstile keys, and scraper settings auto-sync to your browser&apos;s IndexedDB Vault across deployments. You can also export or restore a portable JSON snapshot anytime.
                   </p>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 flex-wrap shrink-0">
+              <div className="grid grid-cols-2 sm:flex items-center gap-2.5 w-full sm:w-auto shrink-0">
                 <button
                   type="button"
-                  onClick={handlePingAllScrapers}
-                  className="px-3 py-1.5 rounded-lg bg-[#131b2e] hover:bg-[#19233b] text-slate-200 border border-white/10 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  onClick={handleExportBackup}
+                  className="h-10 px-3.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer whitespace-nowrap shrink-0"
                 >
-                  <Activity className="w-3.5 h-3.5 text-teal-400" />
-                  <span>Ping All Servers</span>
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Export Backup</span>
                 </button>
 
                 <button
                   type="button"
-                  onClick={handleResetScrapers}
-                  disabled={scraperSaving}
-                  className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="h-10 px-3.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 hover:text-white border border-white/10 text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer whitespace-nowrap shrink-0"
                 >
-                  Restore Defaults
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleSaveScrapers}
-                  disabled={scraperSaving}
-                  className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-blue-950/40 transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
-                >
-                  {scraperSaving ? (
-                    <>
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      <span>Saving...</span>
-                    </>
-                  ) : (
-                    <>
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      <span>Save &amp; Apply Changes</span>
-                    </>
-                  )}
+                  <Upload className="w-3.5 h-3.5 text-blue-400" />
+                  <span>Restore JSON</span>
                 </button>
               </div>
-            </div>
-
-            {scraperBanner && (
-              <div
-                className={`p-2.5 rounded-lg border text-xs font-medium flex items-center justify-between gap-3 ${
-                  scraperBanner.type === 'success'
-                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-200'
-                    : scraperBanner.type === 'error'
-                    ? 'bg-rose-500/15 border-rose-500/30 text-rose-200'
-                    : 'bg-blue-500/15 border-blue-500/30 text-blue-200'
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  {scraperBanner.type === 'error' ? (
-                    <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
-                  ) : (
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                  )}
-                  <span>{scraperBanner.text}</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setScraperBanner(null)}
-                  className="text-slate-400 hover:text-white px-2 py-0.5 cursor-pointer"
-                >
-                  ✕
-                </button>
-              </div>
-            )}
-
-            {/* 3-Column Scraper Engine Cards */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-3.5">
-              {(['cinepro', 'tmdb_embed', 'gateway_fallback'] as ScraperServerId[]).map((id, idx) => {
-                const cfg = scraperConfigs[id] || DEFAULT_SCRAPER_ENDPOINTS[id];
-                const mode = scraperEditModes[id] || 'host_port';
-                const ping = scraperPings[id] || { loading: false };
-                const isModified = cfg.url !== cfg.defaultUrl;
-
-                return (
-                  <div
-                    key={id}
-                    className="bg-[#11182a] border border-white/10 rounded-xl p-3.5 flex flex-col justify-between gap-3.5"
-                  >
-                    <div className="flex flex-col gap-2.5">
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <div className="text-xs font-bold text-white flex items-center gap-1.5">
-                            <span className="font-mono text-blue-400">0{idx + 1}.</span>
-                            <span>{cfg.name}</span>
-                          </div>
-                          <p className="text-[10px] text-slate-400 mt-0.5">{cfg.role}</p>
-                        </div>
-
-                        <div className="flex items-center bg-[#0b101d] border border-white/10 rounded-lg p-0.5 text-[10px] shrink-0">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setScraperEditModes((prev) => ({ ...prev, [id]: 'host_port' }))
-                            }
-                            className={`px-2 py-0.5 rounded font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                              mode === 'host_port'
-                                ? 'bg-blue-600 text-white'
-                                : 'text-slate-400 hover:text-white'
-                            }`}
-                          >
-                            IP + Port
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setScraperEditModes((prev) => ({ ...prev, [id]: 'full_url' }))
-                            }
-                            className={`px-2 py-0.5 rounded font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                              mode === 'full_url'
-                                ? 'bg-blue-600 text-white'
-                                : 'text-slate-400 hover:text-white'
-                            }`}
-                          >
-                            Full URL
-                          </button>
-                        </div>
-                      </div>
-
-                      {mode === 'host_port' ? (
-                        <div className="grid grid-cols-12 gap-2">
-                          <div className="col-span-3">
-                            <label className="block text-[10px] font-semibold text-slate-400 mb-1">
-                              Protocol
-                            </label>
-                            <select
-                              value={cfg.protocol}
-                              onChange={(e) => handleHostPortChange(id, 'protocol', e.target.value)}
-                              className="w-full bg-[#0b101d] border border-white/10 rounded-lg px-2 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-blue-500"
-                            >
-                              <option value="http">http://</option>
-                              <option value="https">https://</option>
-                            </select>
-                          </div>
-
-                          <div className="col-span-6">
-                            <label className="block text-[10px] font-semibold text-slate-400 mb-1">
-                              Server Host / IP
-                            </label>
-                            <input
-                              type="text"
-                              value={cfg.host}
-                              onChange={(e) => handleHostPortChange(id, 'host', e.target.value)}
-                              placeholder="62.171.179.144"
-                              className="w-full bg-[#0b101d] border border-white/10 rounded-lg px-2.5 py-1.5 text-xs font-mono tabular-nums text-white placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
-                            />
-                          </div>
-
-                          <div className="col-span-3">
-                            <label className="block text-[10px] font-semibold text-slate-400 mb-1">
-                              Port
-                            </label>
-                            <input
-                              type="text"
-                              inputMode="numeric"
-                              value={cfg.port}
-                              onChange={(e) => handleHostPortChange(id, 'port', e.target.value)}
-                              placeholder={id === 'cinepro' ? '3001' : id === 'tmdb_embed' ? '3005' : '80'}
-                              className="w-full bg-[#0b101d] border border-white/10 rounded-lg px-2.5 py-1.5 text-xs font-mono tabular-nums text-amber-300 placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
-                            />
-                          </div>
-                        </div>
-                      ) : (
-                        <div>
-                          <label className="block text-[10px] font-semibold text-slate-400 mb-1">
-                            Full Scraper Endpoint URL
-                          </label>
-                          <input
-                            type="text"
-                            value={cfg.url}
-                            onChange={(e) => handleFullUrlChange(id, e.target.value)}
-                            placeholder={cfg.defaultUrl}
-                            className="w-full bg-[#0b101d] border border-white/10 rounded-lg px-2.5 py-1.5 text-xs font-mono tabular-nums text-white placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
-                          />
-                        </div>
-                      )}
-
-                      <div className="flex items-center justify-between text-[11px] font-mono tabular-nums text-slate-400 bg-[#0b101d]/70 px-2.5 py-1 rounded-lg border border-white/5">
-                        <span className="truncate" title={cfg.url}>
-                          Active: <strong className="text-slate-200">{cfg.url}</strong>
-                        </span>
-                        <span className="shrink-0 ml-2 text-[10px] text-slate-500">
-                          {isModified ? 'Edited' : 'Default'}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="pt-2.5 border-t border-white/5 flex items-center justify-between gap-2">
-                      <div className="min-w-0 flex-1 text-[11px] font-mono tabular-nums truncate">
-                        {ping.loading ? (
-                          <span className="text-blue-400 flex items-center gap-1.5">
-                            <RefreshCw className="w-3 h-3 animate-spin shrink-0" />
-                            <span>Pinging upstream...</span>
-                          </span>
-                        ) : ping.message ? (
-                          <span
-                            className={
-                              ping.reachable ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold'
-                            }
-                            title={ping.message}
-                          >
-                            {ping.message}
-                          </span>
-                        ) : (
-                          <span className="text-slate-500">Click Test Ping to verify</span>
-                        )}
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => handleTestScraper(id)}
-                        disabled={ping.loading}
-                        className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 border border-white/10 text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
-                      >
-                        <Zap className="w-3 h-3 text-amber-400" />
-                        <span>Test Ping</span>
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
+            </section>
+          </div>
         )}
 
         {/* =========================================================
-            PAGE 3: Dedicated Live Arena Command Center & Channel Matrix
+            WORKSPACE 2: Live Arena Command Center & Channel Matrix
            ========================================================= */}
         {adminView === 'live_arena' && (
           <section
             id="live-arena-admin-panel"
             className="flex flex-col gap-4"
           >
-            {/* Top Header Card */}
+            {/* Top Header & KPI Card */}
             <div className="bg-[#0e1424] border border-rose-500/30 rounded-xl p-4 md:p-5 flex flex-col gap-4">
               <div className="flex items-start md:items-center justify-between flex-col md:flex-row gap-3 border-b border-white/10 pb-3.5">
                 <div className="flex items-start gap-3">
@@ -2468,30 +2471,31 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                   <div>
                     <div className="flex items-center gap-2 flex-wrap">
                       <h2 className="text-sm font-bold text-white tracking-tight">
-                        01. Notflix Live Arena — Broadcast Matrix &amp; SEO Command Center
+                        Notflix Live Arena — Broadcast Matrix &amp; SEO Command
                       </h2>
                       <span className="text-[11px] font-mono tabular-nums text-slate-400">
-                        · {liveArenaStatus?.totalChannels || 102} 24/7 Networks ·{' '}
-                        {liveArenaStatus?.totalEvents || 0} Fixtures Indexed
+                        · {liveArenaStatus?.totalChannels || 102} Networks ·{' '}
+                        {liveArenaStatus?.totalEvents || 0} Fixtures
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-400 mt-0.5">
-                      Real-time monitoring of live &amp; upcoming sports fixtures, synchronized same-event broadcast channels under the player, 102 24/7 TV networks, and Google SportsEvent / BroadcastEvent SEO indexing.
+                      Real-time monitoring of live &amp; upcoming sports fixtures, synchronized same-event broadcast channels, and 102 24/7 TV networks.
                     </p>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 flex-wrap shrink-0">
+                <div className="grid grid-cols-2 sm:flex items-center gap-2 w-full md:w-auto shrink-0">
                   <button
                     type="button"
                     onClick={() => {
-                      navigator.clipboard?.writeText('https://notflixtv.com/live');
-                      setSeoCopiedUrl('https://notflixtv.com/live');
-                      setTimeout(() => setSeoCopiedUrl(null), 2500);
+                      fetchLiveArenaStatus(true);
+                      fetchSeoStatus(true);
                     }}
-                    className="px-3 py-1.5 rounded-lg bg-[#131b2e] hover:bg-[#19233b] text-slate-200 border border-white/10 text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                    disabled={liveArenaRefreshing}
+                    className="h-10 px-3 rounded-lg bg-[#131b2e] hover:bg-[#19233b] text-slate-200 border border-white/10 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
                   >
-                    {seoCopiedUrl === 'https://notflixtv.com/live' ? '✓ Copied /live URL' : 'Copy /live Hub URL'}
+                    <RefreshCw className={`w-3.5 h-3.5 ${liveArenaRefreshing ? 'animate-spin text-rose-400' : ''}`} />
+                    <span>{liveArenaRefreshing ? 'Syncing...' : 'Sync Matches'}</span>
                   </button>
 
                   <button
@@ -2500,7 +2504,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                       window.dispatchEvent(new CustomEvent('notflix:open-live-tv'));
                       onExit();
                     }}
-                    className="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                    className="h-10 px-3.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
                   >
                     <Radio className="w-3.5 h-3.5" />
                     <span>Open Live Arena</span>
@@ -2509,11 +2513,11 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
               </div>
 
               {/* 5-Column Live Arena KPI Strip */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5 sm:gap-3">
                 <div className="bg-[#11182a] border border-white/10 rounded-xl p-3 flex flex-col justify-between hover:border-rose-500/40 transition-colors">
                   <div className="flex items-center justify-between">
                     <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                      Matches Live Now
+                      Matches Live
                     </span>
                     <span className="relative flex h-2 w-2">
                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
@@ -2524,9 +2528,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                     {liveArenaStatus?.liveNowCount ?? 0}
                   </div>
                   <div className="text-[10px] text-slate-400 font-mono tabular-nums flex items-center justify-between">
-                    <span>In-play fixtures</span>
-                    <span className="text-rose-300 font-bold flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block animate-pulse" />
+                    <span>In-play</span>
+                    <span className="text-rose-300 font-bold">
                       {liveArenaStatus?.activeArenaViewers ?? analytics?.kpis?.liveArenaViewers ?? 0} watching
                     </span>
                   </div>
@@ -2546,13 +2549,13 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
 
                 <div className="bg-[#11182a] border border-white/10 rounded-xl p-3 flex flex-col justify-between">
                   <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                    24/7 Live Channels
+                    24/7 Channels
                   </span>
                   <div className="text-2xl font-extrabold font-mono tabular-nums text-blue-400 my-1">
                     {liveArenaStatus?.totalChannels ?? 102}
                   </div>
-                  <div className="text-[10px] text-slate-400">
-                    beIN · SSC · Sky · ESPN · Cinema
+                  <div className="text-[10px] text-slate-400 truncate">
+                    beIN · Starzplay · Sky · ESPN
                   </div>
                 </div>
 
@@ -2580,246 +2583,353 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                   </div>
                 </div>
               </div>
+
+              {/* Segmented Sub-Tab Switcher for Mobile & Desktop */}
+              <div className="flex items-center bg-[#090d18] border border-white/10 rounded-xl p-1 gap-1">
+                <button
+                  type="button"
+                  onClick={() => setArenaSubTab('matches')}
+                  className={`flex-1 h-9 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+                    arenaSubTab === 'matches'
+                      ? 'bg-rose-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white hover:bg-white/5'
+                  }`}
+                >
+                  <Trophy className="w-3.5 h-3.5" />
+                  <span>Matches ({liveArenaStatus?.events?.length || 0})</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setArenaSubTab('channels')}
+                  className={`flex-1 h-9 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+                    arenaSubTab === 'channels'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white hover:bg-white/5'
+                  }`}
+                >
+                  <Tv className="w-3.5 h-3.5" />
+                  <span>24/7 Channels ({liveArenaStatus?.totalChannels || 102})</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setArenaSubTab('both')}
+                  className={`hidden sm:flex flex-1 h-9 px-3 rounded-lg text-xs font-bold items-center justify-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+                    arenaSubTab === 'both'
+                      ? 'bg-slate-700 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white hover:bg-white/5'
+                  }`}
+                >
+                  <span>Show Both</span>
+                </button>
+              </div>
             </div>
 
             {/* Live & Upcoming Matches + Same-Event Channel Broadcast Matrix */}
-            <div className="bg-[#0e1424] border border-white/10 rounded-xl p-4 flex flex-col gap-3">
-              <div className="flex items-center justify-between flex-wrap gap-3">
-                <div>
-                  <h3 className="text-xs font-bold text-white uppercase tracking-wider">
-                    02. Live &amp; Upcoming Matches — Same-Event Broadcast Channel Matrix
-                  </h3>
-                  <p className="text-[11px] text-slate-400">
-                    Verifies the exact channels broadcasting the same event simultaneously under the Live Arena player and their crawlable Google SEO URLs (<code className="text-rose-300">/live/match/:id-:slug</code>).
-                  </p>
-                </div>
+            {(arenaSubTab === 'matches' || arenaSubTab === 'both') && (
+              <div className="bg-[#0e1424] border border-white/10 rounded-xl p-4 flex flex-col gap-3">
+                <div className="flex items-start sm:items-center justify-between flex-col sm:flex-row gap-3">
+                  <div>
+                    <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                      Live &amp; Upcoming Matches — Same-Event Channel Matrix
+                    </h3>
+                    <p className="text-[11px] text-slate-400">
+                      Channels broadcasting the same event simultaneously under the Live Arena player (<code className="text-rose-300">/live/match/:id-:slug</code>).
+                    </p>
+                  </div>
 
-                <div className="flex items-center gap-2 flex-wrap">
-                  <input
-                    type="text"
-                    value={arenaMatchSearch}
-                    onChange={(e) => setArenaMatchSearch(e.target.value)}
-                    placeholder="Search team, league, or channel..."
-                    className="bg-[#131a2b] border border-white/10 rounded-lg px-2.5 py-1 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 w-48 sm:w-56"
-                  />
+                  <div className="flex items-center gap-2 flex-wrap w-full sm:w-auto">
+                    <input
+                      type="text"
+                      value={arenaMatchSearch}
+                      onChange={(e) => setArenaMatchSearch(e.target.value)}
+                      placeholder="Search team, league, or channel..."
+                      className="h-9 bg-[#131a2b] border border-white/10 rounded-lg px-2.5 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 flex-1 sm:w-52"
+                    />
 
-                  <div className="flex items-center bg-[#131a2b] border border-white/10 rounded-lg p-0.5 gap-0.5 text-[11px]">
-                    {(
-                      [
-                        { id: 'all', label: `All (${liveArenaStatus?.events?.length || 0})` },
-                        { id: 'live', label: `Live (${liveArenaStatus?.liveNowCount || 0})` },
-                        { id: 'upcoming', label: `Upcoming (${liveArenaStatus?.upcomingCount || 0})` },
-                      ] as const
-                    ).map((tab) => (
-                      <button
-                        key={tab.id}
-                        type="button"
-                        onClick={() => setArenaMatchFilter(tab.id)}
-                        className={`px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-                          arenaMatchFilter === tab.id
-                            ? 'bg-rose-600 text-white shadow-sm'
-                            : 'text-slate-400 hover:text-white hover:bg-white/5'
-                        }`}
-                      >
-                        {tab.label}
-                      </button>
-                    ))}
+                    <div className="flex items-center bg-[#131a2b] border border-white/10 rounded-lg p-0.5 gap-0.5 text-[11px]">
+                      {(
+                        [
+                          { id: 'all', label: `All (${liveArenaStatus?.events?.length || 0})` },
+                          { id: 'live', label: `Live (${liveArenaStatus?.liveNowCount || 0})` },
+                          { id: 'upcoming', label: `Upcoming (${liveArenaStatus?.upcomingCount || 0})` },
+                        ] as const
+                      ).map((tab) => (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          onClick={() => setArenaMatchFilter(tab.id)}
+                          className={`px-2.5 py-1.5 rounded-md font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                            arenaMatchFilter === tab.id
+                              ? 'bg-rose-600 text-white shadow-sm'
+                              : 'text-slate-400 hover:text-white hover:bg-white/5'
+                          }`}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-[420px] overflow-y-auto pr-1">
-                {(() => {
-                  const rawEvents = liveArenaStatus?.events || [];
-                  const q = arenaMatchSearch.trim().toLowerCase();
-                  const filtered = rawEvents.filter((ev) => {
-                    const st = String(ev.status || '').toUpperCase();
-                    if (arenaMatchFilter === 'live' && st !== 'LIVE') return false;
-                    if (arenaMatchFilter === 'upcoming' && st !== 'UPCOMING') return false;
-                    if (!q) return true;
-                    const chText = (ev.recommendedChannels || [])
-                      .map((c) => c.name.toLowerCase())
-                      .join(' ');
-                    return (
-                      ev.title.toLowerCase().includes(q) ||
-                      ev.league.toLowerCase().includes(q) ||
-                      chText.includes(q)
-                    );
-                  });
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-[460px] overflow-y-auto pr-1">
+                  {(() => {
+                    const rawEvents = liveArenaStatus?.events || [];
+                    const q = arenaMatchSearch.trim().toLowerCase();
+                    const filtered = rawEvents.filter((ev) => {
+                      const st = String(ev.status || '').toUpperCase();
+                      if (arenaMatchFilter === 'live' && st !== 'LIVE') return false;
+                      if (arenaMatchFilter === 'upcoming' && st !== 'UPCOMING') return false;
+                      if (!q) return true;
+                      const chText = (ev.recommendedChannels || [])
+                        .map((c) => c.name.toLowerCase())
+                        .join(' ');
+                      return (
+                        ev.title.toLowerCase().includes(q) ||
+                        ev.league.toLowerCase().includes(q) ||
+                        chText.includes(q)
+                      );
+                    });
 
-                  if (filtered.length === 0) {
-                    return (
-                      <div className="col-span-full py-8 text-center text-xs text-slate-500 border border-dashed border-white/10 rounded-lg">
-                        No matches match your current filter. Click Refresh Live Arena to sync fixtures.
-                      </div>
-                    );
-                  }
+                    if (filtered.length === 0) {
+                      return (
+                        <div className="col-span-full py-8 text-center text-xs text-slate-500 border border-dashed border-white/10 rounded-lg">
+                          No matches match your current filter. Tap Sync Matches to refresh fixtures.
+                        </div>
+                      );
+                    }
 
-                  return filtered.map((ev) => {
-                    const isLiveNow = String(ev.status || '').toUpperCase() === 'LIVE';
-                    return (
-                      <div
-                        key={ev.id}
-                        className="bg-[#11182a] border border-white/10 rounded-xl p-3 flex flex-col justify-between gap-2.5"
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <div className="text-[11px] text-slate-400 font-medium truncate">
-                              {ev.league} · {ev.sport} ·{' '}
-                              <span
-                                className={
-                                  isLiveNow
-                                    ? 'text-rose-400 font-bold'
-                                    : 'text-amber-300 font-mono tabular-nums'
-                                }
-                              >
-                                {isLiveNow ? `LIVE ${ev.statusDetail || ''}` : ev.statusDetail || ev.status}
-                              </span>
-                            </div>
-                            <div className="text-xs font-bold text-white mt-0.5 truncate">
-                              {ev.title}
-                              {ev.homeTeam?.score !== null &&
-                              ev.homeTeam?.score !== undefined &&
-                              ev.awayTeam?.score !== null &&
-                              ev.awayTeam?.score !== undefined ? (
-                                <span className="ml-2 font-mono tabular-nums text-emerald-400">
-                                  ({ev.homeTeam.score} - {ev.awayTeam.score})
+                    return filtered.map((ev) => {
+                      const isLiveNow = String(ev.status || '').toUpperCase() === 'LIVE';
+                      return (
+                        <div
+                          key={ev.id}
+                          className="bg-[#11182a] border border-white/10 rounded-xl p-3 flex flex-col justify-between gap-2.5"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="text-[11px] text-slate-400 font-medium truncate">
+                                {ev.league} · {ev.sport} ·{' '}
+                                <span
+                                  className={
+                                    isLiveNow
+                                      ? 'text-rose-400 font-bold'
+                                      : 'text-amber-300 font-mono tabular-nums'
+                                  }
+                                >
+                                  {isLiveNow ? `LIVE ${ev.statusDetail || ''}` : ev.statusDetail || ev.status}
                                 </span>
-                              ) : null}
+                              </div>
+                              <div className="text-xs font-bold text-white mt-0.5 truncate">
+                                {ev.title}
+                                {ev.homeTeam?.score !== null &&
+                                ev.homeTeam?.score !== undefined &&
+                                ev.awayTeam?.score !== null &&
+                                ev.awayTeam?.score !== undefined ? (
+                                  <span className="ml-2 font-mono tabular-nums text-emerald-400">
+                                    ({ev.homeTeam.score} - {ev.awayTeam.score})
+                                  </span>
+                                ) : null}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard?.writeText(ev.seoUrl);
+                                  setSeoCopiedUrl(ev.seoUrl);
+                                  setTimeout(() => setSeoCopiedUrl(null), 2000);
+                                }}
+                                className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-semibold text-slate-300 cursor-pointer whitespace-nowrap shrink-0"
+                              >
+                                {seoCopiedUrl === ev.seoUrl ? '✓ Copied' : 'SEO Link'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  window.dispatchEvent(new CustomEvent('notflix:open-live-tv'));
+                                  onExit();
+                                }}
+                                className="px-2 py-1 rounded bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/30 text-[10px] font-bold text-rose-300 cursor-pointer whitespace-nowrap shrink-0"
+                              >
+                                Open →
+                              </button>
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                navigator.clipboard?.writeText(ev.seoUrl);
-                                setSeoCopiedUrl(ev.seoUrl);
-                                setTimeout(() => setSeoCopiedUrl(null), 2000);
-                              }}
-                              className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-semibold text-slate-300 cursor-pointer whitespace-nowrap shrink-0"
-                            >
-                              {seoCopiedUrl === ev.seoUrl ? '✓ Copied' : 'Copy SEO Link'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                window.dispatchEvent(new CustomEvent('notflix:open-live-tv'));
-                                onExit();
-                              }}
-                              className="px-2 py-1 rounded bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/30 text-[10px] font-bold text-rose-300 cursor-pointer whitespace-nowrap shrink-0"
-                            >
-                              Open Match →
-                            </button>
+                          <div className="text-[11px] text-slate-300 bg-[#0b101d] border border-white/5 rounded-lg px-2.5 py-1.5">
+                            <span className="text-slate-400 text-[10px]">Channels ({ev.recommendedChannels?.length || 0}): </span>
+                            <span className="font-medium text-emerald-300">
+                              {ev.recommendedChannels && ev.recommendedChannels.length > 0
+                                ? ev.recommendedChannels
+                                    .map((c) => c.name.replace(/\s*\([^)]*\)/g, ''))
+                                    .join(' · ')
+                                : 'Auto-matched by league broadcaster'}
+                            </span>
                           </div>
                         </div>
-
-                        <div className="text-[11px] text-slate-300 bg-[#0b101d] border border-white/5 rounded-lg px-2.5 py-1.5">
-                          <span className="text-slate-400 text-[10px]">Same-Event Broadcast Channels ({ev.recommendedChannels?.length || 0}): </span>
-                          <span className="font-medium text-emerald-300">
-                            {ev.recommendedChannels && ev.recommendedChannels.length > 0
-                              ? ev.recommendedChannels
-                                  .map((c) => c.name.replace(/\s*\([^)]*\)/g, ''))
-                                  .join(' · ')
-                              : 'Auto-matched by league broadcaster'}
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  });
-                })()}
+                      );
+                    });
+                  })()}
+                </div>
               </div>
-            </div>
+            )}
 
             {/* 24/7 Live TV Channel Directory (102 Channels) */}
-            <div className="bg-[#0e1424] border border-white/10 rounded-xl p-4 flex flex-col gap-3">
-              <div className="flex items-center justify-between flex-wrap gap-3">
-                <div>
-                  <h3 className="text-xs font-bold text-white uppercase tracking-wider">
-                    03. 24/7 Live TV Network Directory &amp; Indexed Channel Pages ({liveArenaStatus?.totalChannels || 102})
-                  </h3>
-                  <p className="text-[11px] text-slate-400">
-                    All 102 24/7 sports, cinema &amp; entertainment channels indexed in Google Sitemap (<code className="text-blue-300">/live/channel/:id</code>) with TelevisionChannel Schema.org markup.
-                  </p>
-                </div>
+            {(arenaSubTab === 'channels' || arenaSubTab === 'both') && (
+              <div className="bg-[#0e1424] border border-white/10 rounded-xl p-4 flex flex-col gap-3">
+                <div className="flex items-start sm:items-center justify-between flex-col sm:flex-row gap-3">
+                  <div>
+                    <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                      24/7 Live TV Network Directory ({liveArenaStatus?.totalChannels || 102})
+                    </h3>
+                    <p className="text-[11px] text-slate-400">
+                      All 102 24/7 sports, cinema &amp; entertainment channels indexed in Google Sitemap (<code className="text-blue-300">/live/channel/:id</code>).
+                    </p>
+                  </div>
 
-                <div className="flex items-center gap-2 flex-wrap">
-                  <input
-                    type="text"
-                    value={arenaChannelSearch}
-                    onChange={(e) => setArenaChannelSearch(e.target.value)}
-                    placeholder="Filter 102 channels..."
-                    className="bg-[#131a2b] border border-white/10 rounded-lg px-2.5 py-1 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-blue-500 w-44 sm:w-52"
-                  />
+                  <div className="flex items-center gap-2 flex-wrap w-full sm:w-auto">
+                    <input
+                      type="text"
+                      value={arenaChannelSearch}
+                      onChange={(e) => setArenaChannelSearch(e.target.value)}
+                      placeholder="Filter 102 channels..."
+                      className="h-9 bg-[#131a2b] border border-white/10 rounded-lg px-2.5 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-blue-500 flex-1 sm:w-48"
+                    />
 
-                  <select
-                    value={arenaChannelGroupFilter}
-                    onChange={(e) => setArenaChannelGroupFilter(e.target.value)}
-                    className="bg-[#131a2b] border border-white/10 rounded-lg px-2.5 py-1 text-xs text-white focus:outline-none focus:border-blue-500"
-                  >
-                    <option value="all">All Network Groups ({liveArenaStatus?.totalChannels || 102})</option>
-                    {Object.entries(liveArenaStatus?.channelGroups || {}).map(([grp, cnt]) => (
-                      <option key={grp} value={grp}>
-                        {grp} ({cnt})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 max-h-80 overflow-y-auto pr-1">
-                {(() => {
-                  const allCh = liveArenaStatus?.channels || [];
-                  const q = arenaChannelSearch.trim().toLowerCase();
-                  const filteredCh = allCh.filter((ch) => {
-                    if (arenaChannelGroupFilter !== 'all' && ch.group !== arenaChannelGroupFilter) {
-                      return false;
-                    }
-                    if (!q) return true;
-                    return (
-                      ch.name.toLowerCase().includes(q) ||
-                      ch.group.toLowerCase().includes(q) ||
-                      ch.languageLabel.toLowerCase().includes(q)
-                    );
-                  });
-
-                  return filteredCh.map((ch) => (
-                    <div
-                      key={ch.channelId}
-                      className="flex items-center justify-between px-2.5 py-2 rounded-lg bg-[#11182a] border border-white/5 text-xs gap-2"
+                    <select
+                      value={arenaChannelGroupFilter}
+                      onChange={(e) => setArenaChannelGroupFilter(e.target.value)}
+                      className="h-9 bg-[#131a2b] border border-white/10 rounded-lg px-2.5 text-xs text-white focus:outline-none focus:border-blue-500 flex-1 sm:flex-none"
                     >
-                      <div className="min-w-0 flex-1">
-                        <div className="font-bold text-white truncate text-[11px]">{ch.name}</div>
-                        <div className="text-[10px] text-slate-400 truncate">
-                          {ch.group} · {ch.languageLabel}
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard?.writeText(ch.seoUrl);
-                          setSeoCopiedUrl(ch.seoUrl);
-                          setTimeout(() => setSeoCopiedUrl(null), 2000);
-                        }}
-                        className="px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-semibold text-slate-300 shrink-0 cursor-pointer whitespace-nowrap"
+                      <option value="all">All Groups ({liveArenaStatus?.totalChannels || 102})</option>
+                      {Object.entries(liveArenaStatus?.channelGroups || {}).map(([grp, cnt]) => (
+                        <option key={grp} value={grp}>
+                          {grp} ({cnt})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 max-h-[440px] overflow-y-auto pr-1">
+                  {(() => {
+                    const allCh = liveArenaStatus?.channels || [];
+                    const q = arenaChannelSearch.trim().toLowerCase();
+                    const filteredCh = allCh.filter((ch) => {
+                      if (arenaChannelGroupFilter !== 'all' && ch.group !== arenaChannelGroupFilter) {
+                        return false;
+                      }
+                      if (!q) return true;
+                      return (
+                        ch.name.toLowerCase().includes(q) ||
+                        ch.group.toLowerCase().includes(q) ||
+                        ch.languageLabel.toLowerCase().includes(q)
+                      );
+                    });
+
+                    return filteredCh.map((ch) => (
+                      <div
+                        key={ch.channelId}
+                        className="flex items-center justify-between px-2.5 py-2 rounded-lg bg-[#11182a] border border-white/5 text-xs gap-2"
                       >
-                        {seoCopiedUrl === ch.seoUrl ? '✓ Copied' : 'SEO Link'}
-                      </button>
-                    </div>
-                  ));
-                })()}
+                        <div className="min-w-0 flex-1">
+                          <div className="font-bold text-white truncate text-[11px]">{ch.name}</div>
+                          <div className="text-[10px] text-slate-400 truncate">
+                            {ch.group} · {ch.languageLabel}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard?.writeText(ch.seoUrl);
+                            setSeoCopiedUrl(ch.seoUrl);
+                            setTimeout(() => setSeoCopiedUrl(null), 2000);
+                          }}
+                          className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-semibold text-slate-300 shrink-0 cursor-pointer whitespace-nowrap"
+                        >
+                          {seoCopiedUrl === ch.seoUrl ? '✓ Copied' : 'SEO Link'}
+                        </button>
+                      </div>
+                    ));
+                  })()}
+                </div>
               </div>
-            </div>
+            )}
           </section>
         )}
 
         {/* =========================================================
-            PAGE 1: Harmonious, Compact Analytics & Telemetry Page
+            WORKSPACE 1: Overview & Telemetry
            ========================================================= */}
         {adminView === 'analytics' && (
-          <>
-            {/* 1. Compact 5-Card KPI Strip */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          <div className="flex flex-col gap-4">
+            {/* Overview Sub-Toolbar: Timeframe Picker & Quick Backup */}
+            <div className="bg-[#0e1424] border border-white/10 rounded-xl px-3.5 py-2.5 flex items-center justify-between flex-wrap gap-2.5">
+              <div className="flex items-center gap-2">
+                <BarChart3 className="w-4 h-4 text-blue-400 shrink-0" />
+                <span className="text-xs font-bold text-white uppercase tracking-wider">
+                  Performance Overview
+                </span>
+                <span className="hidden sm:inline text-[11px] text-slate-400 font-mono">
+                  · Synced {lastFetchedTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap w-full sm:w-auto justify-between sm:justify-end">
+                {/* Date Range Segmented Control */}
+                <div className="flex items-center bg-[#131a2b] border border-white/10 rounded-lg p-0.5 gap-0.5 text-xs flex-1 sm:flex-none">
+                  {(
+                    [
+                      { id: 'today', label: 'Today' },
+                      { id: '7d', label: '7D' },
+                      { id: '30d', label: '30D' },
+                      { id: 'all', label: 'All Time' },
+                    ] as const
+                  ).map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setDateRange(item.id)}
+                      className={`flex-1 sm:flex-none px-2.5 py-1.5 rounded-md font-bold text-[11px] transition-all cursor-pointer whitespace-nowrap ${
+                        dateRange === item.id
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'text-slate-400 hover:text-white hover:bg-white/5'
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Desktop Quick Backup / Restore */}
+                <div className="hidden md:flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={handleExportBackup}
+                    title="Download Analytics JSON Backup"
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap"
+                  >
+                    <Download className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Backup</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    title="Restore Analytics JSON Backup"
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Restore</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* 1. Compact 5-Card KPI Strip (2-col on mobile, 5-col on desktop) */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5 sm:gap-3">
               {/* Live Viewers */}
               <div className="bg-[#0e1424] border border-white/10 rounded-xl p-3.5 flex flex-col justify-between hover:border-emerald-500/40 transition-colors">
                 <div className="flex items-center justify-between text-slate-400">
@@ -2829,13 +2939,13 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                     <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
                   </span>
                 </div>
-                <div className="text-2xl font-extrabold font-mono text-white tracking-tight my-1">
+                <div className="text-2xl font-extrabold font-mono tabular-nums text-white tracking-tight my-1">
                   {kpis.liveViewers}
                 </div>
-                <div className="text-[10px] text-emerald-400 font-medium flex items-center justify-between">
-                  <span>● Active streams</span>
-                  <span className="text-rose-400 font-bold">
-                    {kpis.liveArenaViewers ?? liveArenaStatus?.activeArenaViewers ?? 0} in Arena
+                <div className="text-[10px] text-emerald-400 font-medium flex items-center justify-between gap-1">
+                  <span className="truncate">● Active</span>
+                  <span className="text-rose-400 font-bold shrink-0 font-mono tabular-nums">
+                    {kpis.liveArenaViewers ?? liveArenaStatus?.activeArenaViewers ?? 0} Arena
                   </span>
                 </div>
               </div>
@@ -2846,12 +2956,12 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                   <span className="text-[10px] font-bold uppercase tracking-wider">Total Views</span>
                   <Play className="w-3.5 h-3.5 text-blue-400" />
                 </div>
-                <div className="text-2xl font-extrabold font-mono text-white tracking-tight my-1">
+                <div className="text-2xl font-extrabold font-mono tabular-nums text-white tracking-tight my-1">
                   {kpis.totalViews.toLocaleString()}
                 </div>
                 <div className="text-[10px] text-slate-400 flex items-center gap-1">
-                  <TrendingUp className="w-3 h-3 text-blue-400" />
-                  <span>Real stream starts</span>
+                  <TrendingUp className="w-3 h-3 text-blue-400 shrink-0" />
+                  <span className="truncate">Stream starts</span>
                 </div>
               </div>
 
@@ -2861,11 +2971,11 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                   <span className="text-[10px] font-bold uppercase tracking-wider">Watch Time</span>
                   <Clock className="w-3.5 h-3.5 text-amber-400" />
                 </div>
-                <div className="text-2xl font-extrabold font-mono text-white tracking-tight my-1">
+                <div className="text-2xl font-extrabold font-mono tabular-nums text-white tracking-tight my-1">
                   {kpis.totalWatchHours} <span className="text-xs font-normal text-slate-400">hrs</span>
                 </div>
-                <div className="text-[10px] text-slate-400">
-                  {kpis.totalWatchMinutes.toLocaleString()} mins streamed
+                <div className="text-[10px] text-slate-400 font-mono tabular-nums truncate">
+                  {kpis.totalWatchMinutes.toLocaleString()} mins total
                 </div>
               </div>
 
@@ -2875,10 +2985,10 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                   <span className="text-[10px] font-bold uppercase tracking-wider">Searches</span>
                   <Search className="w-3.5 h-3.5 text-purple-400" />
                 </div>
-                <div className="text-2xl font-extrabold font-mono text-white tracking-tight my-1">
+                <div className="text-2xl font-extrabold font-mono tabular-nums text-white tracking-tight my-1">
                   {kpis.totalSearches.toLocaleString()}
                 </div>
-                <div className="text-[10px] text-slate-400">Queries conducted</div>
+                <div className="text-[10px] text-slate-400 truncate">Catalog queries</div>
               </div>
 
               {/* Unique Visitors */}
@@ -2887,15 +2997,16 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                   <span className="text-[10px] font-bold uppercase tracking-wider">Unique Visitors</span>
                   <Users className="w-3.5 h-3.5 text-teal-400" />
                 </div>
-                <div className="text-2xl font-extrabold font-mono text-white tracking-tight my-1">
+                <div className="text-2xl font-extrabold font-mono tabular-nums text-white tracking-tight my-1">
                   {kpis.uniqueVisitors.toLocaleString()}
                 </div>
-                <div className="text-[10px] text-slate-400">Audience sessions</div>
+                <div className="text-[10px] text-slate-400 truncate">Distinct audience sessions</div>
               </div>
             </div>
 
             {/* 2. Active Real-Time Viewers Strip (Only when viewers are actively watching) */}
-            {((analytics?.liveStreams && analytics.liveStreams.length > 0) || ((kpis.liveArenaViewers ?? liveArenaStatus?.activeArenaViewers ?? 0) > 0)) && (
+            {((analytics?.liveStreams && analytics.liveStreams.length > 0) ||
+              (kpis.liveArenaViewers ?? liveArenaStatus?.activeArenaViewers ?? 0) > 0) && (
               <div className="bg-[#0e1424] border border-emerald-500/30 rounded-xl p-3">
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
@@ -2910,8 +3021,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                   <span className="text-[10px] text-slate-400 font-mono">Live · 10s sync</span>
                 </div>
 
-                {/* Dedicated Live Arena Viewers Counter (No content details exposed, strictly aggregated viewers count) */}
-                {((kpis.liveArenaViewers ?? liveArenaStatus?.activeArenaViewers ?? 0) > 0) && (
+                {/* Dedicated Live Arena Viewers Counter */}
+                {(kpis.liveArenaViewers ?? liveArenaStatus?.activeArenaViewers ?? 0) > 0 && (
                   <div className="bg-gradient-to-r from-rose-950/40 via-[#131b2e] to-rose-950/20 border border-rose-500/30 rounded-lg p-2.5 flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2.5">
                       <div className="w-8 h-8 rounded-lg bg-rose-600/20 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
@@ -2975,13 +3086,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                           <div className="min-w-0 flex-1">
                             <div className="text-xs font-bold text-white truncate">{stream.title}</div>
                             <div className="flex items-center gap-1.5 mt-0.5 text-[10px] font-mono text-slate-300">
-                              <span
-                                className={
-                                  isTvStream
-                                    ? 'text-purple-300'
-                                    : 'text-blue-300'
-                                }
-                              >
+                              <span className={isTvStream ? 'text-purple-300' : 'text-blue-300'}>
                                 {isTvStream
                                   ? `TV S${stream.season || 1}:E${stream.episode || 1}`
                                   : 'Movie'}
@@ -3000,172 +3105,150 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
               </div>
             )}
 
-            {/* 3. Sleek Single-Bar Smart Ad & Monetization Ribbon (Compact & Harmonious) */}
-            <div className="bg-[#0e1424] border border-blue-500/20 rounded-xl px-4 py-2.5 flex items-center justify-between flex-wrap gap-3">
-              <div className="flex items-center gap-2.5 flex-wrap">
-                <div className="w-7 h-7 rounded-lg bg-blue-500/15 border border-blue-500/30 flex items-center justify-center text-blue-400 shrink-0">
-                  <Zap className="w-3.5 h-3.5" />
+            {/* 3. Quick Workspace Launchpad (Compact 4-Card System Status Strip) */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3">
+              {/* Jump to Live Arena */}
+              <button
+                type="button"
+                onClick={() => {
+                  setAdminView('live_arena');
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                className="text-left bg-[#0e1424] hover:bg-[#12192d] border border-white/10 hover:border-rose-500/40 rounded-xl p-3 flex flex-col justify-between gap-2 transition-all cursor-pointer group"
+              >
+                <div className="flex items-center justify-between w-full">
+                  <div className="flex items-center gap-1.5">
+                    <Trophy className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                    <span className="text-[11px] font-bold text-white truncate">Live Arena</span>
+                  </div>
+                  <span className="text-[10px] font-bold text-rose-400 group-hover:translate-x-0.5 transition-transform">
+                    Manage →
+                  </span>
                 </div>
-                <span className="text-xs font-bold text-white">Smart Ad Engine</span>
-                <span
-                  className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider border flex items-center gap-1 ${
-                    smartMetrics.tier === 'discovery'
-                      ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
-                      : smartMetrics.tier === 'immersive_watch'
-                      ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-300'
-                      : smartMetrics.tier === 'high_friction'
-                      ? 'bg-rose-500/15 border-rose-500/40 text-rose-300'
-                      : smartMetrics.tier === 'onboarding'
-                      ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
-                      : 'bg-indigo-500/15 border-indigo-500/40 text-indigo-300'
-                  }`}
-                >
-                  <span className="w-1.5 h-1.5 rounded-full bg-current" />
-                  {smartMetrics.tier === 'discovery' && 'Discovery (0.85x)'}
-                  {smartMetrics.tier === 'immersive_watch' && 'Immersive Watch (1.45x)'}
-                  {smartMetrics.tier === 'high_friction' && 'Friction Back-off (2.0x)'}
-                  {smartMetrics.tier === 'onboarding' && 'Onboarding (1.35x)'}
-                  {smartMetrics.tier === 'loyal_viewer' && 'Balanced (1.1x)'}
-                </span>
-              </div>
+                <div className="text-[11px] font-mono tabular-nums text-slate-300 truncate">
+                  <strong className="text-rose-400">{liveArenaStatus?.liveNowCount ?? 0}</strong> Live ·{' '}
+                  <strong className="text-white">{liveArenaStatus?.totalChannels ?? 102}</strong> Channels
+                </div>
+              </button>
 
-              <div className="flex items-center gap-3 md:gap-4 flex-wrap text-xs font-mono">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-slate-400 text-[11px] font-sans">Multiplier:</span>
-                  <span className="font-bold text-white">{(Number(smartMetrics?.multiplier) || 1).toFixed(2)}x</span>
-                </div>
-                <span className="text-white/10 hidden sm:inline">|</span>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-slate-400 text-[11px] font-sans">Served / Protected:</span>
-                  <span className="font-bold text-blue-400">{smartMetrics?.adsDelivered ?? 0}</span>
-                  <span className="text-slate-500">/</span>
-                  <span className="font-bold text-emerald-400">{smartMetrics?.adsSuppressed ?? 0}</span>
-                </div>
-                <span className="text-white/10 hidden sm:inline">|</span>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-slate-400 text-[11px] font-sans">Velocity:</span>
-                  <span className="font-bold text-white">{smartMetrics?.interactionVelocityPerMin ?? 0}/m</span>
-                </div>
-                <span className="text-white/10 hidden md:inline">|</span>
-                <div className="hidden md:flex items-center gap-1.5">
-                  <span className="text-slate-400 text-[11px] font-sans">Friction:</span>
-                  <span
-                    className={`font-bold ${
-                      (Number(smartMetrics?.frictionScore) || 0) > 1 ? 'text-amber-400' : 'text-emerald-400'
-                    }`}
-                  >
-                    {(Number(smartMetrics?.frictionScore) || 0).toFixed(1)}/5
+              {/* Jump to Security & Turnstile */}
+              <button
+                type="button"
+                onClick={() => {
+                  setAdminView('security');
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                className="text-left bg-[#0e1424] hover:bg-[#12192d] border border-white/10 hover:border-blue-500/40 rounded-xl p-3 flex flex-col justify-between gap-2 transition-all cursor-pointer group"
+              >
+                <div className="flex items-center justify-between w-full">
+                  <div className="flex items-center gap-1.5">
+                    <Shield className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                    <span className="text-[11px] font-bold text-white truncate">Security &amp; Gate</span>
+                  </div>
+                  <span className="text-[10px] font-bold text-blue-400 group-hover:translate-x-0.5 transition-transform">
+                    Configure →
                   </span>
                 </div>
-                <span className="text-white/10 hidden xl:inline">|</span>
-                <div className="hidden xl:flex items-center gap-2 text-[11px] text-slate-400">
-                  <span>
-                    Poster: <strong className="text-blue-400">{Math.round((smartMetrics?.effectiveCooldowns?.poster || 15000) / 1000)}s</strong>
-                  </span>
-                  <span>·</span>
-                  <span>
-                    Dock: <strong className="text-blue-400">{Math.round((smartMetrics?.effectiveCooldowns?.dock || 20000) / 1000)}s</strong>
-                  </span>
-                  <span>·</span>
-                  <span>
-                    Ep: <strong className="text-blue-400">{Math.round((smartMetrics?.effectiveCooldowns?.episode || 35000) / 1000)}s</strong>
+                <div className="text-[11px] font-mono tabular-nums text-slate-300 truncate">
+                  Gate:{' '}
+                  <strong className={turnstileEnabled ? 'text-emerald-400' : 'text-slate-400'}>
+                    {turnstileEnabled ? 'On' : 'Off'}
+                  </strong>{' '}
+                  · <strong className="text-rose-400">{analytics?.security?.activeBannedIps || 0}</strong> Bans
+                </div>
+              </button>
+
+              {/* Jump to Ads & SEO */}
+              <button
+                type="button"
+                onClick={() => {
+                  setAdminView('monetization_seo');
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                className="text-left bg-[#0e1424] hover:bg-[#12192d] border border-white/10 hover:border-emerald-500/40 rounded-xl p-3 flex flex-col justify-between gap-2 transition-all cursor-pointer group"
+              >
+                <div className="flex items-center justify-between w-full">
+                  <div className="flex items-center gap-1.5">
+                    <Globe className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span className="text-[11px] font-bold text-white truncate">Ads &amp; SEO</span>
+                  </div>
+                  <span className="text-[10px] font-bold text-emerald-400 group-hover:translate-x-0.5 transition-transform">
+                    Open →
                   </span>
                 </div>
-              </div>
+                <div className="text-[11px] font-mono tabular-nums text-slate-300 truncate">
+                  AdBlock:{' '}
+                  <strong className={adBlockMode === 'strict' ? 'text-rose-400' : 'text-emerald-400'}>
+                    {adBlockMode === 'strict' ? 'Strict' : 'Normal'}
+                  </strong>{' '}
+                  · <strong className="text-white">{seoStatus?.totalUrls || 519}</strong> URLs
+                </div>
+              </button>
+
+              {/* Jump to Scrapers & Backup */}
+              <button
+                type="button"
+                onClick={() => {
+                  setAdminView('scrapers');
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                className="text-left bg-[#0e1424] hover:bg-[#12192d] border border-white/10 hover:border-amber-500/40 rounded-xl p-3 flex flex-col justify-between gap-2 transition-all cursor-pointer group"
+              >
+                <div className="flex items-center justify-between w-full">
+                  <div className="flex items-center gap-1.5">
+                    <Server className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span className="text-[11px] font-bold text-white truncate">Scrapers &amp; Vault</span>
+                  </div>
+                  <span className="text-[10px] font-bold text-amber-400 group-hover:translate-x-0.5 transition-transform">
+                    Edit →
+                  </span>
+                </div>
+                <div className="text-[11px] font-mono tabular-nums text-slate-300 truncate">
+                  3 APIs ·{' '}
+                  <strong className={scraperIsCustom ? 'text-amber-400' : 'text-emerald-400'}>
+                    {scraperIsCustom ? 'Custom IPs' : 'Default IPs'}
+                  </strong>
+                </div>
+              </button>
             </div>
 
-            {/* 3.5. Ad-Blocker Notification Popup Control (2 Modes: Dismissible vs Strict Lock Until Disabled) */}
-            <div
-              className={`bg-[#0e1424] border rounded-xl px-4 py-3 flex items-center justify-between flex-wrap gap-3 transition-colors ${
-                adBlockMode === 'strict'
-                  ? 'border-rose-500/35 shadow-lg shadow-rose-950/10'
-                  : 'border-amber-500/25'
-              }`}
-            >
-              <div className="flex items-center gap-2.5 flex-wrap">
-                <div
-                  className={`w-8 h-8 rounded-lg border flex items-center justify-center shrink-0 ${
-                    adBlockMode === 'strict'
-                      ? 'bg-rose-500/15 border-rose-500/35 text-rose-400'
-                      : 'bg-amber-500/15 border-amber-500/35 text-amber-400'
+            {/* Mobile Sub-Tab Switcher inside Overview (Hidden on lg: where 12-col grid shows everything cleanly) */}
+            <div className="lg:hidden flex items-center bg-[#0e1424] border border-white/10 rounded-xl p-1 gap-1 overflow-x-auto">
+              {(
+                [
+                  { id: 'content', label: 'Charts & Top Titles' },
+                  { id: 'activity', label: 'Live Feed & Searches' },
+                  { id: 'audience', label: 'Devices & Servers' },
+                  { id: 'all', label: 'All' },
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setOverviewMobileTab(tab.id)}
+                  className={`flex-1 py-2 px-2.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                    overviewMobileTab === tab.id
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white'
                   }`}
                 >
-                  {adBlockMode === 'strict' ? (
-                    <Lock className="w-4 h-4" />
-                  ) : (
-                    <ShieldAlert className="w-4 h-4" />
-                  )}
-                </div>
-                <div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-xs font-bold text-white uppercase tracking-wider">
-                      Ad-Blocker Detection Popup Control
-                    </span>
-                    <span
-                      className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase tracking-wider border ${
-                        adBlockMode === 'strict'
-                          ? 'bg-rose-500/20 border-rose-500/40 text-rose-300'
-                          : 'bg-emerald-500/15 border-emerald-500/35 text-emerald-300'
-                      }`}
-                    >
-                      {adBlockMode === 'strict'
-                        ? 'Mode 2: Locked Until Ad Blocker Disabled'
-                        : 'Mode 1: Normal (Can Close)'}
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-slate-400 mt-0.5">
-                    {adBlockMode === 'strict'
-                      ? 'Strict Lock: The "Support Free Streaming" popup cannot be closed or removed until the watcher disables their ad blocker.'
-                      : 'Dismissible Mode: Watchers see the "Support Free Streaming" popup and can close it with X or "Later".'}
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2 flex-wrap">
-                {adBlockStatusMsg && (
-                  <span className="text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-1 rounded-lg">
-                    {adBlockStatusMsg}
-                  </span>
-                )}
-
-                <div className="flex items-center bg-[#090d18] border border-white/10 rounded-xl p-1 gap-1">
-                  <button
-                    type="button"
-                    disabled={adBlockSaving}
-                    onClick={() => handleUpdateAdBlockMode('dismissible')}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                      adBlockMode === 'dismissible'
-                        ? 'bg-emerald-600 text-white shadow-sm'
-                        : 'text-slate-400 hover:text-white hover:bg-white/5'
-                    }`}
-                  >
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>Can Close Popup (Normal)</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={adBlockSaving}
-                    onClick={() => handleUpdateAdBlockMode('strict')}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                      adBlockMode === 'strict'
-                        ? 'bg-rose-600 text-white shadow-sm'
-                        : 'text-slate-400 hover:text-white hover:bg-white/5'
-                    }`}
-                  >
-                    <Lock className="w-3.5 h-3.5" />
-                    <span>Cannot Close Until Disabled</span>
-                  </button>
-                </div>
-              </div>
+                  {tab.label}
+                </button>
+              ))}
             </div>
 
             {/* 4. Main 12-Column Analytics Bento Grid */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
               {/* LEFT 8 COLUMNS: Trend Chart + Top Content + Activity Feed */}
               <div className="lg:col-span-8 flex flex-col gap-4">
-                {/* Views & Watch Duration Trend Chart (Compact Height) */}
-                <div className="bg-[#0e1424] border border-white/10 rounded-xl p-4 flex flex-col gap-3">
+                {/* Views & Watch Duration Trend Chart */}
+                <div
+                  className={`bg-[#0e1424] border border-white/10 rounded-xl p-4 flex-col gap-3 ${
+                    overviewMobileTab === 'content' || overviewMobileTab === 'all'
+                      ? 'flex'
+                      : 'hidden lg:flex'
+                  }`}
+                >
                   <div className="flex items-center justify-between flex-wrap gap-2">
                     <div>
                       <h2 className="text-xs font-bold text-white uppercase tracking-wider">
@@ -3266,7 +3349,13 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                 </div>
 
                 {/* Top Performing Content Table */}
-                <div className="bg-[#0e1424] border border-white/10 rounded-xl p-4 flex flex-col gap-3">
+                <div
+                  className={`bg-[#0e1424] border border-white/10 rounded-xl p-4 flex-col gap-3 ${
+                    overviewMobileTab === 'content' || overviewMobileTab === 'all'
+                      ? 'flex'
+                      : 'hidden lg:flex'
+                  }`}
+                >
                   {(() => {
                     const allTopTitles = analytics?.topTitles || [];
                     const movieTitlesCount = allTopTitles.filter((t) => t.mediaType === 'movie').length;
@@ -3287,11 +3376,11 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                               Top Performing Content
                             </h3>
                             <p className="text-[11px] text-slate-400">
-                              Ranked by viewers and cumulative watch time across Movies, TV &amp; Live Arena
+                              Ranked by viewers and cumulative watch time
                             </p>
                           </div>
 
-                          <div className="flex items-center bg-[#131a2b] border border-white/10 rounded-lg p-0.5 gap-0.5 text-[11px]">
+                          <div className="flex items-center bg-[#131a2b] border border-white/10 rounded-lg p-0.5 gap-0.5 text-[11px] overflow-x-auto max-w-full">
                             <button
                               onClick={() => setMediaFilter('all')}
                               className={`px-2 py-1 rounded-md font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
@@ -3333,20 +3422,20 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                               }`}
                             >
                               <Trophy className="w-3 h-3 text-rose-400" />
-                              <span>Live Arena ({liveTitlesCount})</span>
+                              <span>Live ({liveTitlesCount})</span>
                             </button>
                           </div>
                         </div>
 
-                        <div className="overflow-x-auto max-h-64 overflow-y-auto pr-1">
+                        <div className="overflow-x-auto max-h-72 overflow-y-auto pr-1">
                           <table className="w-full text-left border-collapse text-xs">
                             <thead className="sticky top-0 bg-[#0e1424] z-10">
                               <tr className="border-b border-white/10 text-slate-400 text-[10px] uppercase font-bold tracking-wider">
-                                <th className="py-2 px-2.5">#</th>
-                                <th className="py-2 px-2.5">Title</th>
-                                <th className="py-2 px-2.5 text-right">Views</th>
-                                <th className="py-2 px-2.5 text-right">Watch Time</th>
-                                <th className="py-2 px-2.5 text-right">Avg</th>
+                                <th className="py-2 px-2">#</th>
+                                <th className="py-2 px-2">Title</th>
+                                <th className="py-2 px-2 text-right">Views</th>
+                                <th className="py-2 px-2 text-right">Watch</th>
+                                <th className="py-2 px-2 text-right hidden sm:table-cell">Avg</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-white/5">
@@ -3356,10 +3445,10 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                                   const isTvItem = item.mediaType === 'tv';
                                   return (
                                     <tr key={idx} className="hover:bg-white/[0.02] transition-colors">
-                                      <td className="py-2 px-2.5 font-mono font-bold text-slate-500">
+                                      <td className="py-2 px-2 font-mono font-bold text-slate-500">
                                         {idx + 1}
                                       </td>
-                                      <td className="py-2 px-2.5">
+                                      <td className="py-2 px-2">
                                         <div className="flex items-center gap-2">
                                           {item.poster ? (
                                             <img
@@ -3386,11 +3475,11 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                                               )}
                                             </div>
                                           )}
-                                          <span className="font-bold text-white truncate max-w-[180px] md:max-w-[260px]">
+                                          <span className="font-bold text-white truncate max-w-[140px] sm:max-w-[240px]">
                                             {item.title}
                                           </span>
                                           <span
-                                            className={`text-[10px] font-mono shrink-0 ${
+                                            className={`hidden sm:inline text-[10px] font-mono shrink-0 ${
                                               isLiveItem
                                                 ? 'text-rose-300'
                                                 : isTvItem
@@ -3398,17 +3487,17 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                                                 : 'text-blue-300'
                                             }`}
                                           >
-                                            · {isLiveItem ? 'Live Arena' : isTvItem ? 'TV' : 'Movie'}
+                                            · {isLiveItem ? 'Live' : isTvItem ? 'TV' : 'Movie'}
                                           </span>
                                         </div>
                                       </td>
-                                      <td className="py-2 px-2.5 text-right font-mono font-bold text-white">
+                                      <td className="py-2 px-2 text-right font-mono tabular-nums font-bold text-white">
                                         {item.views.toLocaleString()}
                                       </td>
-                                      <td className="py-2 px-2.5 text-right font-mono text-amber-400">
+                                      <td className="py-2 px-2 text-right font-mono tabular-nums text-amber-400">
                                         {item.watchMinutes}m
                                       </td>
-                                      <td className="py-2 px-2.5 text-right font-mono text-slate-400">
+                                      <td className="py-2 px-2 text-right font-mono tabular-nums text-slate-400 hidden sm:table-cell">
                                         {item.avgMinutes}m
                                       </td>
                                     </tr>
@@ -3430,7 +3519,13 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                 </div>
 
                 {/* Recent Stream & Search Activity Feed */}
-                <div className="bg-[#0e1424] border border-white/10 rounded-xl p-4 flex flex-col gap-2.5">
+                <div
+                  className={`bg-[#0e1424] border border-white/10 rounded-xl p-4 flex-col gap-2.5 ${
+                    overviewMobileTab === 'activity' || overviewMobileTab === 'all'
+                      ? 'flex'
+                      : 'hidden lg:flex'
+                  }`}
+                >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <Activity className="w-3.5 h-3.5 text-blue-400" />
@@ -3441,7 +3536,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                     <span className="text-[10px] text-slate-400 font-mono">Live Telemetry</span>
                   </div>
 
-                  <div className="flex flex-col gap-1.5 max-h-48 overflow-y-auto pr-1">
+                  <div className="flex flex-col gap-1.5 max-h-56 overflow-y-auto pr-1">
                     {analytics?.recentEvents && analytics.recentEvents.length > 0 ? (
                       analytics.recentEvents.map((ev) => (
                         <div
@@ -3493,7 +3588,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                               )}
                               {ev.type === 'search' && (
                                 <span className="text-slate-300 truncate">
-                                  Searched <strong className="text-purple-300">"{ev.searchQuery}"</strong>
+                                  Searched <strong className="text-purple-300">&quot;{ev.searchQuery}&quot;</strong>
                                 </span>
                               )}
                               {ev.type === 'pageview' && (
@@ -3526,7 +3621,13 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
               {/* RIGHT 4 COLUMNS: Devices, Top Searches & Server Reliability */}
               <div className="lg:col-span-4 flex flex-col gap-4">
                 {/* Audience Devices */}
-                <div className="bg-[#0e1424] border border-white/10 rounded-xl p-4 flex flex-col gap-3">
+                <div
+                  className={`bg-[#0e1424] border border-white/10 rounded-xl p-4 flex-col gap-3 ${
+                    overviewMobileTab === 'audience' || overviewMobileTab === 'all'
+                      ? 'flex'
+                      : 'hidden lg:flex'
+                  }`}
+                >
                   <h3 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2">
                     <Smartphone className="w-3.5 h-3.5 text-blue-400" />
                     <span>Audience Devices</span>
@@ -3548,7 +3649,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                               <Icon className="w-3.5 h-3.5 text-slate-400" />
                               <span>{d.name}</span>
                             </div>
-                            <span className="font-mono font-bold text-white">{percent}%</span>
+                            <span className="font-mono tabular-nums font-bold text-white">{percent}%</span>
                           </div>
                           <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
                             <div
@@ -3563,7 +3664,13 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                 </div>
 
                 {/* Top Searches */}
-                <div className="bg-[#0e1424] border border-white/10 rounded-xl p-4 flex flex-col gap-2.5">
+                <div
+                  className={`bg-[#0e1424] border border-white/10 rounded-xl p-4 flex-col gap-2.5 ${
+                    overviewMobileTab === 'activity' || overviewMobileTab === 'all'
+                      ? 'flex'
+                      : 'hidden lg:flex'
+                  }`}
+                >
                   <div className="flex items-center justify-between">
                     <h3 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2">
                       <Search className="w-3.5 h-3.5 text-purple-400" />
@@ -3572,7 +3679,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                     <span className="text-[10px] text-slate-400">User intent</span>
                   </div>
 
-                  <div className="flex flex-col gap-1.5 max-h-44 overflow-y-auto pr-1">
+                  <div className="flex flex-col gap-1.5 max-h-48 overflow-y-auto pr-1">
                     {analytics?.topSearches && analytics.topSearches.length > 0 ? (
                       analytics.topSearches.map((s, idx) => (
                         <div
@@ -3585,7 +3692,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                               {s.query}
                             </span>
                           </div>
-                          <span className="font-mono text-purple-400 font-bold px-1.5 py-0.5 rounded bg-purple-500/15 border border-purple-500/20 text-[10px]">
+                          <span className="font-mono tabular-nums text-purple-400 font-bold px-1.5 py-0.5 rounded bg-purple-500/15 border border-purple-500/20 text-[10px]">
                             {s.count}
                           </span>
                         </div>
@@ -3599,7 +3706,13 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                 </div>
 
                 {/* Server Reliability */}
-                <div className="bg-[#0e1424] border border-white/10 rounded-xl p-4 flex flex-col gap-2.5">
+                <div
+                  className={`bg-[#0e1424] border border-white/10 rounded-xl p-4 flex-col gap-2.5 ${
+                    overviewMobileTab === 'audience' || overviewMobileTab === 'all'
+                      ? 'flex'
+                      : 'hidden lg:flex'
+                  }`}
+                >
                   <div className="flex items-center justify-between">
                     <h3 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2">
                       <Server className="w-3.5 h-3.5 text-teal-400" />
@@ -3655,218 +3768,82 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                 </div>
               </div>
             </div>
+          </div>
+        )}
 
-            {/* 4.2. Notflix Live Arena — Live Sports & 24/7 Broadcast Overview */}
-            <div className="bg-[#0e1424] border border-rose-500/25 rounded-xl p-4 flex flex-col gap-3">
-              <div className="flex items-center justify-between flex-wrap gap-3">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-lg bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
-                    <Trophy className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="text-xs font-bold text-white uppercase tracking-wider">
-                        Notflix Live Arena — Sports Matches &amp; 24/7 TV Broadcast Status
-                      </h3>
-                      <span className="text-[11px] font-mono tabular-nums text-slate-400">
-                        · {liveArenaStatus?.liveNowCount ?? 0} Live Now ·{' '}
-                        {liveArenaStatus?.upcomingCount ?? 0} Upcoming ·{' '}
-                        {liveArenaStatus?.totalChannels ?? 102} 24/7 Channels
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-400">
-                      Synchronizes same-event broadcast channels directly under the live match player and indexes every match (<code className="text-rose-300">/live/match/:id-:slug</code>) and 24/7 network (<code className="text-rose-300">/live/channel/:id</code>) for Google Search.
-                    </p>
-                  </div>
+        {/* =========================================================
+            WORKSPACE 3: Security, Cloudflare Turnstile & IP Firewall
+           ========================================================= */}
+        {adminView === 'security' && (
+          <div className="flex flex-col gap-4">
+            {/* Security KPI Strip */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3">
+              <div className="bg-[#0e1424] border border-white/10 rounded-xl p-3.5 flex flex-col justify-between">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Turnstile Gate
+                  </span>
+                  <Shield className={`w-3.5 h-3.5 ${turnstileEnabled ? 'text-emerald-400' : 'text-slate-500'}`} />
                 </div>
-
-                <div className="flex items-center gap-2 flex-wrap">
-                  <button
-                    type="button"
-                    onClick={() => fetchLiveArenaStatus(true)}
-                    disabled={liveArenaRefreshing}
-                    className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] font-semibold text-slate-200 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${liveArenaRefreshing ? 'animate-spin text-rose-400' : ''}`} />
-                    <span>{liveArenaRefreshing ? 'Syncing...' : 'Sync Matches'}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAdminView('live_arena');
-                      window.scrollTo({ top: 0, behavior: 'smooth' });
-                    }}
-                    className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                  >
-                    <Trophy className="w-3 h-3" />
-                    <span>Manage Live Arena →</span>
-                  </button>
+                <div className={`text-xl font-extrabold font-mono my-1 ${turnstileEnabled ? 'text-emerald-400' : 'text-slate-400'}`}>
+                  {turnstileEnabled ? 'ACTIVE' : 'DISABLED'}
+                </div>
+                <div className="text-[10px] text-slate-400 truncate">
+                  {turnstileUsingTestKeys ? 'Cloudflare Test Keys' : 'Custom Production Keys'}
                 </div>
               </div>
 
-              {liveArenaStatus?.events && liveArenaStatus.events.length > 0 && (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 pt-1">
-                  {liveArenaStatus.events.slice(0, 6).map((ev) => {
-                    const isLiveNow = String(ev.status || '').toUpperCase() === 'LIVE';
-                    return (
-                      <div
-                        key={ev.id}
-                        className="flex flex-col justify-between px-3 py-2 rounded-lg bg-[#11182a] border border-white/5 text-xs gap-1.5"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-bold text-white truncate text-[11px]">{ev.title}</span>
-                          <span
-                            className={`font-mono tabular-nums text-[10px] shrink-0 ${
-                              isLiveNow ? 'text-rose-400 font-bold' : 'text-amber-300'
-                            }`}
-                          >
-                            {isLiveNow ? `LIVE ${ev.statusDetail || ''}` : ev.statusDetail || ev.status}
-                          </span>
-                        </div>
-                        <div className="text-[10px] text-slate-400 truncate">
-                          {ev.league} ·{' '}
-                          <span className="text-emerald-300">
-                            {ev.recommendedChannels && ev.recommendedChannels.length > 0
-                              ? ev.recommendedChannels
-                                  .slice(0, 3)
-                                  .map((c) => c.name.replace(/\s*\([^)]*\)/g, ''))
-                                  .join(' · ')
-                              : 'Multi-channel HD'}
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  })}
+              <div className="bg-[#0e1424] border border-white/10 rounded-xl p-3.5 flex flex-col justify-between">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  Verified Sessions
+                </span>
+                <div className="text-2xl font-extrabold font-mono tabular-nums text-blue-400 my-1">
+                  {turnstileVerifiedCount.toLocaleString()}
                 </div>
-              )}
-            </div>
-
-            {/* 4.5. Programmatic SEO & 1,000+ Daily Visitor Growth Engine */}
-            <div className="bg-[#0e1424] border border-emerald-500/20 rounded-xl p-4 flex flex-col gap-3">
-              <div className="flex items-center justify-between flex-wrap gap-3">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-lg bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
-                    <Globe className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h3 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2 flex-wrap">
-                      <span>Programmatic SEO &amp; Google Search Indexing Engine</span>
-                      <span className="text-[10px] font-mono text-emerald-300">
-                        · SSR Meta + Dynamic Sitemap + Live Arena Schema Active
-                      </span>
-                    </h3>
-                    <p className="text-[11px] text-slate-400">
-                      Auto-generates 500+ crawlable Movie, Series, Anime &amp; Live Arena pages (<code className="text-emerald-300">/live</code>, <code className="text-emerald-300">/live/match/:id-slug</code>, <code className="text-emerald-300">/live/channel/:id</code>, <code className="text-emerald-300">/watch/movie/:id-slug</code>) with Server-Side OpenGraph &amp; Schema.org SportsEvent, BroadcastEvent, TelevisionChannel, Movie &amp; TVSeries Rich Snippets.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 flex-wrap text-xs font-mono tabular-nums">
-                  <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-emerald-500/25 flex items-center gap-1.5">
-                    <span className="text-[10px] font-sans text-slate-400">Indexed Sitemap URLs:</span>
-                    <span className="font-bold text-emerald-400">
-                      {seoStatus?.totalUrls || 519}
-                    </span>
-                  </div>
-                  <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-white/5 flex items-center gap-1.5">
-                    <span className="text-[10px] font-sans text-slate-400">Live Matches:</span>
-                    <span className="font-bold text-rose-400">
-                      {seoStatus?.liveMatchesCount ?? liveArenaStatus?.totalEvents ?? 0}
-                    </span>
-                  </div>
-                  <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-white/5 flex items-center gap-1.5">
-                    <span className="text-[10px] font-sans text-slate-400">24/7 Channels:</span>
-                    <span className="font-bold text-amber-400">
-                      {seoStatus?.liveChannelsCount || 102}
-                    </span>
-                  </div>
-                  <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-white/5 flex items-center gap-1.5">
-                    <span className="text-[10px] font-sans text-slate-400">Movies:</span>
-                    <span className="font-bold text-blue-400">
-                      {seoStatus?.moviesCount || 100}
-                    </span>
-                  </div>
-                  <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-white/5 flex items-center gap-1.5">
-                    <span className="text-[10px] font-sans text-slate-400">TV &amp; Anime:</span>
-                    <span className="font-bold text-purple-400">
-                      {seoStatus?.tvCount || 100}
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const sUrl = seoStatus?.sitemapUrl || 'https://notflixtv.com/sitemap.xml';
-                      navigator.clipboard?.writeText(sUrl);
-                      setSeoCopiedUrl(sUrl);
-                      setTimeout(() => setSeoCopiedUrl(null), 2500);
-                    }}
-                    className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] font-sans font-semibold text-slate-200 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                  >
-                    {seoCopiedUrl === (seoStatus?.sitemapUrl || 'https://notflixtv.com/sitemap.xml')
-                      ? '✓ Copied Sitemap URL'
-                      : 'Copy sitemap.xml URL'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      fetchSeoStatus(true);
-                      fetchLiveArenaStatus(true);
-                    }}
-                    disabled={seoRefreshing}
-                    className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-[11px] font-sans font-bold text-white flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${seoRefreshing ? 'animate-spin' : ''}`} />
-                    <span>{seoRefreshing ? 'Refreshing Catalog...' : 'Refresh Sitemap'}</span>
-                  </button>
+                <div className="text-[10px] text-slate-400 font-mono tabular-nums">
+                  {turnstileFailedCount.toLocaleString()} failed challenges
                 </div>
               </div>
 
-              {seoStatus?.sampleUrls && seoStatus.sampleUrls.length > 0 && (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 pt-1">
-                  {seoStatus.sampleUrls.map((item) => (
-                    <div
-                      key={item.url}
-                      className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-[#11182a] border border-white/5 text-xs gap-2"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="font-bold text-slate-200 truncate text-[11px]">
-                          {item.title}{' '}
-                          <span className="font-mono text-[10px] text-slate-400">
-                            · {item.type.toUpperCase()}
-                          </span>
-                        </div>
-                        <div className="font-mono text-[10px] text-emerald-400/90 truncate">{item.url}</div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard?.writeText(item.url);
-                          setSeoCopiedUrl(item.url);
-                          setTimeout(() => setSeoCopiedUrl(null), 2000);
-                        }}
-                        className="px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-semibold text-slate-300 shrink-0 cursor-pointer whitespace-nowrap"
-                      >
-                        {seoCopiedUrl === item.url ? '✓ Copied' : 'Copy Link'}
-                      </button>
-                    </div>
-                  ))}
+              <div className="bg-[#0e1424] border border-white/10 rounded-xl p-3.5 flex flex-col justify-between">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  Attacks Intercepted
+                </span>
+                <div className="text-2xl font-extrabold font-mono tabular-nums text-purple-400 my-1">
+                  {(analytics?.security?.totalBlockedScrapers || 0) +
+                    (analytics?.security?.totalInterceptionsBlocked || 0) +
+                    (analytics?.security?.totalHoneypotTrapped || 0)}
                 </div>
-              )}
+                <div className="text-[10px] text-slate-400 font-mono tabular-nums">
+                  {analytics?.security?.totalRateLimited || 0} rate limit strikes
+                </div>
+              </div>
+
+              <div className="bg-[#0e1424] border border-rose-500/25 rounded-xl p-3.5 flex flex-col justify-between">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-rose-300">
+                  Permanent IP Bans
+                </span>
+                <div className="text-2xl font-extrabold font-mono tabular-nums text-rose-400 my-1">
+                  {analytics?.security?.activeBannedIps || 0}
+                </div>
+                <div className="text-[10px] text-slate-400 truncate">
+                  Auto-synced to Browser Vault
+                </div>
+              </div>
             </div>
 
-            {/* 4.8. Cloudflare Turnstile Entry Gate (Env Vars + Live Admin Controls) */}
+            {/* 1. Cloudflare Turnstile Entry Gate (Env Vars + Live Admin Controls) */}
             <div
-              className={`bg-[#0e1424] border rounded-xl p-4 flex flex-col gap-3.5 transition-colors ${
+              className={`bg-[#0e1424] border rounded-xl p-4 md:p-5 flex flex-col gap-4 transition-colors ${
                 turnstileEnabled
                   ? 'border-blue-500/40 shadow-lg shadow-blue-950/15'
                   : 'border-white/10'
               }`}
             >
-              <div className="flex items-start lg:items-center justify-between flex-col lg:flex-row gap-3 border-b border-white/10 pb-3">
-                <div className="flex items-start gap-2.5">
+              <div className="flex items-start lg:items-center justify-between flex-col lg:flex-row gap-3 border-b border-white/10 pb-3.5">
+                <div className="flex items-start gap-3">
                   <div
-                    className={`w-8 h-8 rounded-lg border flex items-center justify-center shrink-0 ${
+                    className={`w-9 h-9 rounded-lg border flex items-center justify-center shrink-0 ${
                       turnstileEnabled
                         ? 'bg-blue-500/15 border-blue-500/35 text-blue-400'
                         : 'bg-slate-800/60 border-white/10 text-slate-400'
@@ -3876,7 +3853,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                   </div>
                   <div>
                     <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                      <h3 className="text-sm font-bold text-white tracking-tight">
                         Cloudflare Turnstile Full-Site Entry Gate
                       </h3>
                       <span
@@ -3888,66 +3865,46 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                       >
                         {turnstileEnabled ? 'Active · Session Gate On' : 'Disabled · Direct Entry'}
                       </span>
-                      {turnstileEnabled && (
-                        <span className="text-[10px] font-mono text-blue-300">
-                          · {turnstileUsingTestKeys ? 'Cloudflare Test Keys Active' : 'Custom Production Keys Active'}
-                        </span>
-                      )}
                       {turnstileHasEnvKeys && (
                         <span className="text-[10px] font-mono text-amber-300">
-                          · .env Keys Detected
+                          · .env Keys Active
                         </span>
                       )}
                     </div>
                     <p className="text-[11px] text-slate-400 mt-0.5">
                       Verifies every new browser session on first visit until the tab closes. Automatically bypasses{' '}
-                      <code className="text-blue-300">/admin</code> and legitimate search crawlers (Googlebot, Bingbot, Telegram).
+                      <code className="text-blue-300">/admin</code> and legitimate search crawlers (Googlebot, Bingbot).
                     </p>
                   </div>
                 </div>
 
-                {/* Live Counters & Enable/Disable Toggle */}
-                <div className="flex items-center gap-2 flex-wrap shrink-0">
-                  <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-white/5 flex items-center gap-1.5 text-xs font-mono tabular-nums">
-                    <span className="text-[10px] font-sans text-slate-400">Verified Sessions:</span>
-                    <span className="font-bold text-emerald-400">
-                      {turnstileVerifiedCount.toLocaleString()}
-                    </span>
-                  </div>
-                  <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-white/5 flex items-center gap-1.5 text-xs font-mono tabular-nums">
-                    <span className="text-[10px] font-sans text-slate-400">Failed / Blocked:</span>
-                    <span className="font-bold text-rose-400">
-                      {turnstileFailedCount.toLocaleString()}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center bg-[#090d18] border border-white/10 rounded-xl p-1 gap-1">
-                    <button
-                      type="button"
-                      disabled={turnstileSaving}
-                      onClick={() => handleSaveTurnstile({ enabled: false })}
-                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-                        !turnstileEnabled
-                          ? 'bg-slate-700 text-white shadow-sm'
-                          : 'text-slate-400 hover:text-white hover:bg-white/5'
-                      }`}
-                    >
-                      Gate Off
-                    </button>
-                    <button
-                      type="button"
-                      disabled={turnstileSaving}
-                      onClick={() => handleSaveTurnstile({ enabled: true })}
-                      className={`px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-                        turnstileEnabled
-                          ? 'bg-blue-600 text-white shadow-sm'
-                          : 'text-slate-400 hover:text-white hover:bg-white/5'
-                      }`}
-                    >
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      <span>Enable Gate</span>
-                    </button>
-                  </div>
+                {/* Enable/Disable Toggle */}
+                <div className="flex items-center bg-[#090d18] border border-white/10 rounded-xl p-1 gap-1 w-full sm:w-auto shrink-0">
+                  <button
+                    type="button"
+                    disabled={turnstileSaving}
+                    onClick={() => handleSaveTurnstile({ enabled: false })}
+                    className={`flex-1 sm:flex-none h-9 px-3.5 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                      !turnstileEnabled
+                        ? 'bg-slate-700 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    Gate Off
+                  </button>
+                  <button
+                    type="button"
+                    disabled={turnstileSaving}
+                    onClick={() => handleSaveTurnstile({ enabled: true })}
+                    className={`flex-1 sm:flex-none h-9 px-3.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+                      turnstileEnabled
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Enable Gate</span>
+                  </button>
                 </div>
               </div>
 
@@ -3983,7 +3940,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                         setTurnstileMode('custom');
                         handleSaveTurnstile({ mode: 'custom' });
                       }}
-                      className={`flex-1 py-1.5 px-2 rounded-md text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                      className={`flex-1 h-8 px-2 rounded-md text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
                         turnstileMode === 'custom'
                           ? 'bg-blue-600 text-white'
                           : 'text-slate-400 hover:text-white'
@@ -3997,13 +3954,13 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                         setTurnstileMode('test');
                         handleSaveTurnstile({ mode: 'test' });
                       }}
-                      className={`flex-1 py-1.5 px-2 rounded-md text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                      className={`flex-1 h-8 px-2 rounded-md text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
                         turnstileMode === 'test'
                           ? 'bg-amber-600 text-white'
                           : 'text-slate-400 hover:text-white'
                       }`}
                     >
-                      Test / Demo Mode
+                      Test / Demo
                     </button>
                   </div>
                 </div>
@@ -4017,7 +3974,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                     value={turnstileSiteKey}
                     onChange={(e) => setTurnstileSiteKey(e.target.value)}
                     placeholder="0x4AAAAAA... (or set TURNSTILE_SITE_KEY in .env)"
-                    className="w-full bg-[#0b101d] border border-white/10 rounded-lg px-2.5 py-1.5 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
+                    className="w-full h-10 bg-[#0b101d] border border-white/10 rounded-lg px-3 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
                   />
                 </div>
 
@@ -4031,24 +3988,24 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                       value={turnstileSecretKey}
                       onChange={(e) => setTurnstileSecretKey(e.target.value)}
                       placeholder="0x4AAAAAA... (or set TURNSTILE_SECRET_KEY in .env)"
-                      className="w-full bg-[#0b101d] border border-white/10 rounded-lg pl-2.5 pr-8 py-1.5 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
+                      className="w-full h-10 bg-[#0b101d] border border-white/10 rounded-lg pl-3 pr-9 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-blue-500"
                     />
                     <button
                       type="button"
                       onClick={() => setShowTurnstileSecret((prev) => !prev)}
-                      className="absolute right-2 text-slate-400 hover:text-white cursor-pointer"
+                      className="absolute right-2.5 text-slate-400 hover:text-white cursor-pointer"
                       title={showTurnstileSecret ? 'Hide Secret Key' : 'Show Secret Key'}
                     >
                       {showTurnstileSecret ? (
-                        <EyeOff className="w-3.5 h-3.5" />
+                        <EyeOff className="w-4 h-4" />
                       ) : (
-                        <Eye className="w-3.5 h-3.5" />
+                        <Eye className="w-4 h-4" />
                       )}
                     </button>
                   </div>
                 </div>
 
-                <div className="lg:col-span-2 flex items-center gap-2">
+                <div className="lg:col-span-2">
                   <button
                     type="button"
                     disabled={turnstileSaving}
@@ -4060,7 +4017,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                             : turnstileMode,
                       })
                     }
-                    className="w-full py-1.5 px-3 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
+                    className="w-full h-10 px-3 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
                   >
                     {turnstileSaving ? 'Saving...' : 'Save Keys & Sync'}
                   </button>
@@ -4068,63 +4025,33 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
               </div>
             </div>
 
-            {/* 5. Compact 2-Column Anti-Interception & Permanent IP Block Shield */}
-            <div className="bg-[#0e1424] border border-white/10 rounded-xl p-4 flex flex-col gap-3.5">
-              {/* Top Row: Title + Inline Security KPI Pills */}
-              <div className="flex items-center justify-between flex-wrap gap-3">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-lg bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-400 shrink-0">
-                    <Shield className="w-4 h-4" />
+            {/* 2. Anti-Interception & Permanent IP Block Shield */}
+            <div className="bg-[#0e1424] border border-white/10 rounded-xl p-4 md:p-5 flex flex-col gap-4">
+              <div className="flex items-start sm:items-center justify-between flex-col sm:flex-row gap-3">
+                <div className="flex items-start gap-3">
+                  <div className="w-9 h-9 rounded-lg bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-400 shrink-0">
+                    <ShieldAlert className="w-4 h-4" />
                   </div>
                   <div>
-                    <h3 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2 flex-wrap">
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2 flex-wrap">
                       <span>Anti-Interception &amp; Permanent IP Block Shield</span>
-                      <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/30 text-rose-400">
+                      <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded bg-rose-500/15 border border-rose-500/30 text-rose-400">
                         Permanent Ban Active
                       </span>
                     </h3>
-                    <p className="text-[11px] text-slate-400">
+                    <p className="text-[11px] text-slate-400 mt-0.5">
                       Permanently blocks any IP attempting to intercept website data, forge stream tokens, or scrape content.
                     </p>
                   </div>
                 </div>
-
-                {/* Compact Inline KPI Pills */}
-                <div className="flex items-center gap-2 flex-wrap text-xs font-mono">
-                  <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-white/5 flex items-center gap-1.5">
-                    <span className="text-[10px] font-sans text-slate-400">Scrapers:</span>
-                    <span className="font-bold text-rose-400">
-                      {analytics?.security?.totalBlockedScrapers || 0}
-                    </span>
-                  </div>
-                  <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-white/5 flex items-center gap-1.5">
-                    <span className="text-[10px] font-sans text-slate-400">Interceptions:</span>
-                    <span className="font-bold text-purple-400">
-                      {(analytics?.security?.totalInterceptionsBlocked || 0) +
-                        (analytics?.security?.totalHoneypotTrapped || 0)}
-                    </span>
-                  </div>
-                  <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-white/5 flex items-center gap-1.5">
-                    <span className="text-[10px] font-sans text-slate-400">Rate Strikes:</span>
-                    <span className="font-bold text-amber-400">
-                      {analytics?.security?.totalRateLimited || 0}
-                    </span>
-                  </div>
-                  <div className="px-2.5 py-1 rounded-lg bg-[#12192b] border border-rose-500/25 flex items-center gap-1.5">
-                    <span className="text-[10px] font-sans text-rose-300 font-semibold">Permanent Bans:</span>
-                    <span className="font-bold text-rose-400">
-                      {analytics?.security?.activeBannedIps || 0}
-                    </span>
-                  </div>
-                </div>
               </div>
 
-              {/* Manual Permanent IP Ban Bar */}
+              {/* Manual Permanent IP Ban Form (Mobile ergonomic) */}
               <form
                 onSubmit={handleManualPermanentBan}
-                className="p-2.5 rounded-lg bg-[#11182a] border border-white/10 flex flex-col sm:flex-row items-stretch sm:items-center gap-2"
+                className="p-3 rounded-xl bg-[#11182a] border border-white/10 flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5"
               >
-                <div className="flex items-center gap-1.5 text-[11px] font-bold text-slate-300 shrink-0">
+                <div className="flex items-center gap-1.5 text-xs font-bold text-slate-300 shrink-0">
                   <Lock className="w-3.5 h-3.5 text-rose-400" />
                   <span>Block IP:</span>
                 </div>
@@ -4133,30 +4060,60 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                   value={manualBanIp}
                   onChange={(e) => setManualBanIp(e.target.value)}
                   placeholder="IP Address (e.g. 185.220.101.4)"
-                  className="px-2.5 py-1 rounded-md bg-[#0b101e] border border-white/10 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-rose-500/50 sm:w-44"
+                  className="h-10 px-3 rounded-lg bg-[#0b101e] border border-white/10 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-rose-500/50 sm:w-48"
                 />
                 <input
                   type="text"
                   value={manualBanReason}
                   onChange={(e) => setManualBanReason(e.target.value)}
                   placeholder="Reason (optional — e.g. Data interception / Scraper)"
-                  className="px-2.5 py-1 rounded-md bg-[#0b101e] border border-white/10 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:border-rose-500/50 flex-1"
+                  className="h-10 px-3 rounded-lg bg-[#0b101e] border border-white/10 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:border-rose-500/50 flex-1"
                 />
                 <button
                   type="submit"
                   disabled={banActionLoading || !manualBanIp.trim()}
-                  className="px-3 py-1 rounded-md bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-xs font-bold transition-colors cursor-pointer shrink-0"
+                  className="h-10 px-4 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-xs font-bold transition-colors cursor-pointer shrink-0 whitespace-nowrap"
                 >
                   Block Permanently
                 </button>
               </form>
 
-              {/* Side-by-Side: Permanently Blocked IPs & Recent Security Incidents */}
+              {/* Mobile Sub-Tab Switcher for Blocked IPs vs Security Log */}
+              <div className="lg:hidden flex items-center bg-[#090d18] border border-white/10 rounded-xl p-1 gap-1">
+                <button
+                  type="button"
+                  onClick={() => setSecuritySubTab('bans')}
+                  className={`flex-1 h-9 px-3 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    securitySubTab === 'bans'
+                      ? 'bg-rose-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Blocked IPs ({analytics?.security?.permanentBans?.length || 0})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSecuritySubTab('logs')}
+                  className={`flex-1 h-9 px-3 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                    securitySubTab === 'logs'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Security Log ({analytics?.security?.recentEvents?.length || 0})
+                </button>
+              </div>
+
+              {/* Side-by-Side on Desktop, Sub-Tabbed on Mobile */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5">
                 {/* Left: Permanently Blocked IPs */}
-                <div className="bg-[#11182a]/60 border border-white/5 rounded-lg p-3 flex flex-col gap-2">
+                <div
+                  className={`bg-[#11182a]/60 border border-white/5 rounded-xl p-3.5 flex-col gap-2.5 ${
+                    securitySubTab === 'bans' ? 'flex' : 'hidden lg:flex'
+                  }`}
+                >
                   <div className="flex items-center justify-between gap-2">
-                    <h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
                       <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
                       <span>Permanently Blocked IPs ({analytics?.security?.permanentBans?.length || 0})</span>
                     </h4>
@@ -4165,22 +4122,22 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                         type="button"
                         onClick={handleUnblockAllIps}
                         disabled={banActionLoading}
-                        className="text-[10px] font-bold text-slate-400 hover:text-white px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 border border-white/10 transition-colors cursor-pointer"
+                        className="text-[11px] font-bold text-slate-300 hover:text-white px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 transition-colors cursor-pointer"
                       >
                         Unblock All
                       </button>
                     )}
                   </div>
 
-                  <div className="max-h-44 overflow-y-auto flex flex-col gap-1.5 pr-1">
+                  <div className="max-h-64 overflow-y-auto flex flex-col gap-2 pr-1">
                     {analytics?.security?.permanentBans && analytics.security.permanentBans.length > 0 ? (
                       analytics.security.permanentBans.map((ban) => (
                         <div
                           key={ban.ip}
-                          className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-[#0d1322] border border-rose-500/20 text-xs gap-2"
+                          className="flex items-center justify-between px-3 py-2 rounded-lg bg-[#0d1322] border border-rose-500/20 text-xs gap-2"
                         >
-                          <div className="flex items-center gap-2 min-w-0">
-                            <span className="px-1.5 py-0.5 rounded bg-rose-500/20 border border-rose-500/30 text-rose-300 font-mono font-bold text-[10px] shrink-0">
+                          <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2 min-w-0">
+                            <span className="px-2 py-0.5 rounded bg-rose-500/20 border border-rose-500/30 text-rose-300 font-mono font-bold text-[11px] shrink-0 w-fit">
                               {ban.ip}
                             </span>
                             <span className="text-slate-300 truncate text-[11px]" title={ban.reason}>
@@ -4189,14 +4146,14 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                           </div>
 
                           <div className="flex items-center gap-2 shrink-0">
-                            <span className="font-mono text-[10px] text-slate-500">
+                            <span className="font-mono tabular-nums text-[10px] text-slate-500">
                               {ban.blockedAttempts}x
                             </span>
                             <button
                               type="button"
                               onClick={() => handleUnblockIp(ban.ip)}
                               disabled={banActionLoading}
-                              className="px-2 py-0.5 rounded bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 font-bold text-[10px] transition-colors cursor-pointer"
+                              className="px-2.5 py-1 rounded-md bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 font-bold text-[11px] transition-colors cursor-pointer"
                             >
                               Unblock
                             </button>
@@ -4204,7 +4161,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                         </div>
                       ))
                     ) : (
-                      <div className="py-4 text-center text-[11px] text-slate-500">
+                      <div className="py-6 text-center text-xs text-slate-500">
                         No IPs currently blacklisted. Any scraper or interceptor is locked here automatically.
                       </div>
                     )}
@@ -4212,21 +4169,25 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                 </div>
 
                 {/* Right: Recent Security & Interception Incident Log */}
-                <div className="bg-[#11182a]/60 border border-white/5 rounded-lg p-3 flex flex-col gap-2">
-                  <h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                <div
+                  className={`bg-[#11182a]/60 border border-white/5 rounded-xl p-3.5 flex-col gap-2.5 ${
+                    securitySubTab === 'logs' ? 'flex' : 'hidden lg:flex'
+                  }`}
+                >
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
                     <Bug className="w-3.5 h-3.5 text-rose-400" />
                     <span>Recent Security &amp; Interception Log</span>
                   </h4>
 
-                  <div className="max-h-44 overflow-y-auto flex flex-col gap-1.5 pr-1">
+                  <div className="max-h-64 overflow-y-auto flex flex-col gap-2 pr-1">
                     {analytics?.security?.recentEvents && analytics.security.recentEvents.length > 0 ? (
                       analytics.security.recentEvents.map((ev, idx) => (
                         <div
                           key={idx}
-                          className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-[#0d1322] border border-white/5 text-xs gap-2"
+                          className="flex items-center justify-between px-3 py-2 rounded-lg bg-[#0d1322] border border-white/5 text-xs gap-2"
                         >
                           <div className="flex items-center gap-2 truncate">
-                            <ShieldAlert className="w-3 h-3 text-rose-400 shrink-0" />
+                            <ShieldAlert className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                             <div className="truncate text-[11px]">
                               <span className="text-rose-300 font-semibold">{ev.reason}</span>
                               <span className="text-slate-500 mx-1">on</span>
@@ -4247,7 +4208,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                         </div>
                       ))
                     ) : (
-                      <div className="py-4 text-center text-[11px] text-slate-500">
+                      <div className="py-6 text-center text-xs text-slate-500">
                         Shield active: No scraper attacks or data interception attempts detected.
                       </div>
                     )}
@@ -4255,12 +4216,422 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
                 </div>
               </div>
             </div>
-          </>
+          </div>
+        )}
+
+        {/* =========================================================
+            WORKSPACE 4: Ads, Ad-Blocker Policy & Programmatic SEO
+           ========================================================= */}
+        {adminView === 'monetization_seo' && (
+          <div className="flex flex-col gap-4">
+            {/* 1. Ad-Blocker Notification Popup Control */}
+            <div
+              className={`bg-[#0e1424] border rounded-xl p-4 md:p-5 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 transition-colors ${
+                adBlockMode === 'strict'
+                  ? 'border-rose-500/35 shadow-lg shadow-rose-950/10'
+                  : 'border-amber-500/25'
+              }`}
+            >
+              <div className="flex items-start gap-3">
+                <div
+                  className={`w-9 h-9 rounded-lg border flex items-center justify-center shrink-0 ${
+                    adBlockMode === 'strict'
+                      ? 'bg-rose-500/15 border-rose-500/35 text-rose-400'
+                      : 'bg-amber-500/15 border-amber-500/35 text-amber-400'
+                  }`}
+                >
+                  {adBlockMode === 'strict' ? (
+                    <Lock className="w-4 h-4" />
+                  ) : (
+                    <ShieldAlert className="w-4 h-4" />
+                  )}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="text-sm font-bold text-white tracking-tight">
+                      Ad-Blocker Detection Popup Control
+                    </h2>
+                    <span
+                      className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase tracking-wider border ${
+                        adBlockMode === 'strict'
+                          ? 'bg-rose-500/20 border-rose-500/40 text-rose-300'
+                          : 'bg-emerald-500/15 border-emerald-500/35 text-emerald-300'
+                      }`}
+                    >
+                      {adBlockMode === 'strict'
+                        ? 'Mode 2: Locked Until Ad Blocker Disabled'
+                        : 'Mode 1: Normal (Can Close)'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    {adBlockMode === 'strict'
+                      ? 'Strict Lock: The "Support Free Streaming" popup cannot be closed or removed until the watcher disables their ad blocker.'
+                      : 'Dismissible Mode: Watchers see the "Support Free Streaming" popup and can close it with X or "Later".'}
+                  </p>
+                  {adBlockStatusMsg && (
+                    <div className="mt-2 inline-block text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-1 rounded-lg">
+                      {adBlockStatusMsg}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center bg-[#090d18] border border-white/10 rounded-xl p-1 gap-1 w-full lg:w-auto shrink-0">
+                <button
+                  type="button"
+                  disabled={adBlockSaving}
+                  onClick={() => handleUpdateAdBlockMode('dismissible')}
+                  className={`h-10 px-3.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+                    adBlockMode === 'dismissible'
+                      ? 'bg-emerald-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white hover:bg-white/5'
+                  }`}
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>Normal (Can Close Popup)</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={adBlockSaving}
+                  onClick={() => handleUpdateAdBlockMode('strict')}
+                  className={`h-10 px-3.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+                    adBlockMode === 'strict'
+                      ? 'bg-rose-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white hover:bg-white/5'
+                  }`}
+                >
+                  <Lock className="w-3.5 h-3.5" />
+                  <span>Strict Lock (Must Disable)</span>
+                </button>
+              </div>
+            </div>
+
+            {/* 2. Smart Ad Engine Telemetry Card */}
+            <div className="bg-[#0e1424] border border-blue-500/20 rounded-xl p-4 md:p-5 flex flex-col gap-3.5">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-blue-500/15 border border-blue-500/30 flex items-center justify-center text-blue-400 shrink-0">
+                    <Zap className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white">
+                      Smart Ad Engine — Adaptive Frequency Controller
+                    </h3>
+                    <p className="text-[11px] text-slate-400">
+                      Dynamically paces ad popunders based on viewer engagement and friction score
+                    </p>
+                  </div>
+                </div>
+
+                <span
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider border flex items-center gap-1.5 ${
+                    smartMetrics.tier === 'discovery'
+                      ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                      : smartMetrics.tier === 'immersive_watch'
+                      ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-300'
+                      : smartMetrics.tier === 'high_friction'
+                      ? 'bg-rose-500/15 border-rose-500/40 text-rose-300'
+                      : smartMetrics.tier === 'onboarding'
+                      ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                      : 'bg-indigo-500/15 border-indigo-500/40 text-indigo-300'
+                  }`}
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                  {smartMetrics.tier === 'discovery' && 'Discovery Tier (0.85x)'}
+                  {smartMetrics.tier === 'immersive_watch' && 'Immersive Watch (1.45x)'}
+                  {smartMetrics.tier === 'high_friction' && 'Friction Back-off (2.0x)'}
+                  {smartMetrics.tier === 'onboarding' && 'Onboarding Tier (1.35x)'}
+                  {smartMetrics.tier === 'loyal_viewer' && 'Balanced Tier (1.1x)'}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
+                <div className="bg-[#11182a] border border-white/5 rounded-xl p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">
+                    Multiplier
+                  </div>
+                  <div className="text-lg font-extrabold font-mono tabular-nums text-white mt-0.5">
+                    {(Number(smartMetrics?.multiplier) || 1).toFixed(2)}x
+                  </div>
+                </div>
+
+                <div className="bg-[#11182a] border border-white/5 rounded-xl p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">
+                    Served / Protected
+                  </div>
+                  <div className="text-lg font-extrabold font-mono tabular-nums mt-0.5">
+                    <span className="text-blue-400">{smartMetrics?.adsDelivered ?? 0}</span>
+                    <span className="text-slate-500 mx-1">/</span>
+                    <span className="text-emerald-400">{smartMetrics?.adsSuppressed ?? 0}</span>
+                  </div>
+                </div>
+
+                <div className="bg-[#11182a] border border-white/5 rounded-xl p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">
+                    Click Velocity
+                  </div>
+                  <div className="text-lg font-extrabold font-mono tabular-nums text-white mt-0.5">
+                    {smartMetrics?.interactionVelocityPerMin ?? 0}/min
+                  </div>
+                </div>
+
+                <div className="bg-[#11182a] border border-white/5 rounded-xl p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">
+                    Friction Score
+                  </div>
+                  <div
+                    className={`text-lg font-extrabold font-mono tabular-nums mt-0.5 ${
+                      (Number(smartMetrics?.frictionScore) || 0) > 1 ? 'text-amber-400' : 'text-emerald-400'
+                    }`}
+                  >
+                    {(Number(smartMetrics?.frictionScore) || 0).toFixed(1)} / 5
+                  </div>
+                </div>
+
+                <div className="bg-[#11182a] border border-white/5 rounded-xl p-3 col-span-2 sm:col-span-1">
+                  <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">
+                    Cooldowns (P / D / E)
+                  </div>
+                  <div className="text-sm font-extrabold font-mono tabular-nums text-blue-300 mt-1">
+                    {Math.round((smartMetrics?.effectiveCooldowns?.poster || 15000) / 1000)}s ·{' '}
+                    {Math.round((smartMetrics?.effectiveCooldowns?.dock || 20000) / 1000)}s ·{' '}
+                    {Math.round((smartMetrics?.effectiveCooldowns?.episode || 35000) / 1000)}s
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* 3. Programmatic SEO & Google Search Indexing Engine */}
+            <div className="bg-[#0e1424] border border-emerald-500/20 rounded-xl p-4 md:p-5 flex flex-col gap-4">
+              <div className="flex items-start lg:items-center justify-between flex-col lg:flex-row gap-3 border-b border-white/10 pb-3.5">
+                <div className="flex items-start gap-3">
+                  <div className="w-9 h-9 rounded-lg bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                    <Globe className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2 flex-wrap">
+                      <span>Programmatic SEO &amp; Google Search Indexing Engine</span>
+                      <span className="text-[10px] font-mono text-emerald-300">
+                        · Dynamic Sitemap + Schema.org Active
+                      </span>
+                    </h3>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Auto-generates 500+ crawlable Movie, Series, Anime &amp; Live Arena pages (<code className="text-emerald-300">/live</code>, <code className="text-emerald-300">/live/match/:id-slug</code>, <code className="text-emerald-300">/live/channel/:id</code>, <code className="text-emerald-300">/watch/movie/:id-slug</code>) with Server-Side OpenGraph &amp; Rich Snippets.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:flex items-center gap-2 w-full lg:w-auto shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const sUrl = seoStatus?.sitemapUrl || 'https://notflixtv.com/sitemap.xml';
+                      navigator.clipboard?.writeText(sUrl);
+                      setSeoCopiedUrl(sUrl);
+                      setTimeout(() => setSeoCopiedUrl(null), 2500);
+                    }}
+                    className="h-10 px-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-slate-200 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    {seoCopiedUrl === (seoStatus?.sitemapUrl || 'https://notflixtv.com/sitemap.xml')
+                      ? '✓ Copied Sitemap'
+                      : 'Copy sitemap.xml'}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      fetchSeoStatus(true);
+                      fetchLiveArenaStatus(true);
+                    }}
+                    disabled={seoRefreshing}
+                    className="h-10 px-3.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-xs font-bold text-white flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${seoRefreshing ? 'animate-spin' : ''}`} />
+                    <span>{seoRefreshing ? 'Refreshing...' : 'Refresh Sitemap'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* SEO URL Breakdown KPIs */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5 text-xs font-mono tabular-nums">
+                <div className="p-3 rounded-xl bg-[#12192b] border border-emerald-500/25 flex flex-col justify-between">
+                  <span className="text-[10px] font-sans font-bold uppercase text-slate-400">
+                    Total Sitemap URLs
+                  </span>
+                  <span className="text-xl font-extrabold text-emerald-400 mt-1">
+                    {seoStatus?.totalUrls || 519}
+                  </span>
+                </div>
+                <div className="p-3 rounded-xl bg-[#12192b] border border-white/5 flex flex-col justify-between">
+                  <span className="text-[10px] font-sans font-bold uppercase text-slate-400">
+                    Live Matches
+                  </span>
+                  <span className="text-xl font-extrabold text-rose-400 mt-1">
+                    {seoStatus?.liveMatchesCount ?? liveArenaStatus?.totalEvents ?? 0}
+                  </span>
+                </div>
+                <div className="p-3 rounded-xl bg-[#12192b] border border-white/5 flex flex-col justify-between">
+                  <span className="text-[10px] font-sans font-bold uppercase text-slate-400">
+                    24/7 Channels
+                  </span>
+                  <span className="text-xl font-extrabold text-amber-400 mt-1">
+                    {seoStatus?.liveChannelsCount || 102}
+                  </span>
+                </div>
+                <div className="p-3 rounded-xl bg-[#12192b] border border-white/5 flex flex-col justify-between">
+                  <span className="text-[10px] font-sans font-bold uppercase text-slate-400">
+                    Indexed Movies
+                  </span>
+                  <span className="text-xl font-extrabold text-blue-400 mt-1">
+                    {seoStatus?.moviesCount || 100}
+                  </span>
+                </div>
+                <div className="p-3 rounded-xl bg-[#12192b] border border-white/5 flex flex-col justify-between col-span-2 sm:col-span-1">
+                  <span className="text-[10px] font-sans font-bold uppercase text-slate-400">
+                    TV &amp; Anime
+                  </span>
+                  <span className="text-xl font-extrabold text-purple-400 mt-1">
+                    {seoStatus?.tvCount || 100}
+                  </span>
+                </div>
+              </div>
+
+              {seoStatus?.sampleUrls && seoStatus.sampleUrls.length > 0 && (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 pt-1 max-h-72 overflow-y-auto pr-1">
+                  {seoStatus.sampleUrls.map((item) => (
+                    <div
+                      key={item.url}
+                      className="flex items-center justify-between px-3 py-2 rounded-lg bg-[#11182a] border border-white/5 text-xs gap-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="font-bold text-slate-200 truncate text-[11px]">
+                          {item.title}{' '}
+                          <span className="font-mono text-[10px] text-slate-400">
+                            · {item.type.toUpperCase()}
+                          </span>
+                        </div>
+                        <div className="font-mono text-[10px] text-emerald-400/90 truncate">{item.url}</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(item.url);
+                          setSeoCopiedUrl(item.url);
+                          setTimeout(() => setSeoCopiedUrl(null), 2000);
+                        }}
+                        className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-semibold text-slate-300 shrink-0 cursor-pointer whitespace-nowrap"
+                      >
+                        {seoCopiedUrl === item.url ? '✓ Copied' : 'Copy Link'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         )}
       </main>
 
-      {/* Compact Footer */}
-      <footer className="border-t border-white/5 py-3 px-6 text-center text-[11px] text-slate-500 flex items-center justify-between flex-wrap gap-2">
+      {/* =========================================================
+          Mobile Fixed Bottom Navigation Bar (Thumb-Zone Ergonomics)
+         ========================================================= */}
+      <nav
+        aria-label="Admin Mobile Workspace Navigation"
+        className="lg:hidden fixed bottom-0 inset-x-0 z-50 bg-[#0a0f1d]/95 backdrop-blur-xl border-t border-white/10 px-1.5 py-1 grid grid-cols-5 gap-1"
+      >
+        <button
+          type="button"
+          onClick={() => {
+            setAdminView('analytics');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }}
+          className={`flex flex-col items-center justify-center min-h-[52px] rounded-xl transition-all cursor-pointer ${
+            adminView === 'analytics'
+              ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30'
+              : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <BarChart3 className="w-4 h-4 mb-0.5" />
+          <span className="text-[10px] font-bold tracking-tight whitespace-nowrap">Overview</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setAdminView('live_arena');
+            fetchLiveArenaStatus(false);
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }}
+          className={`relative flex flex-col items-center justify-center min-h-[52px] rounded-xl transition-all cursor-pointer ${
+            adminView === 'live_arena'
+              ? 'bg-rose-600/20 text-rose-400 border border-rose-500/30'
+              : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <Trophy className="w-4 h-4 mb-0.5" />
+          <span className="text-[10px] font-bold tracking-tight whitespace-nowrap">Live Arena</span>
+          {(liveArenaStatus?.liveNowCount ?? 0) > 0 && (
+            <span className="absolute top-1.5 right-2.5 w-1.5 h-1.5 rounded-full bg-rose-500" />
+          )}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setAdminView('security');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }}
+          className={`relative flex flex-col items-center justify-center min-h-[52px] rounded-xl transition-all cursor-pointer ${
+            adminView === 'security'
+              ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30'
+              : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <Shield className="w-4 h-4 mb-0.5" />
+          <span className="text-[10px] font-bold tracking-tight whitespace-nowrap">Security</span>
+          <span
+            className={`absolute top-1.5 right-3 w-1.5 h-1.5 rounded-full ${
+              turnstileEnabled ? 'bg-emerald-400' : 'bg-slate-500'
+            }`}
+          />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setAdminView('monetization_seo');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }}
+          className={`flex flex-col items-center justify-center min-h-[52px] rounded-xl transition-all cursor-pointer ${
+            adminView === 'monetization_seo'
+              ? 'bg-emerald-600/20 text-emerald-400 border border-emerald-500/30'
+              : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <Globe className="w-4 h-4 mb-0.5" />
+          <span className="text-[10px] font-bold tracking-tight whitespace-nowrap">Ads &amp; SEO</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setAdminView('scrapers');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }}
+          className={`relative flex flex-col items-center justify-center min-h-[52px] rounded-xl transition-all cursor-pointer ${
+            adminView === 'scrapers'
+              ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30'
+              : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <Server className="w-4 h-4 mb-0.5" />
+          <span className="text-[10px] font-bold tracking-tight whitespace-nowrap">Scrapers</span>
+        </button>
+      </nav>
+
+      {/* Compact Footer (Desktop visible, padded above mobile bottom nav) */}
+      <footer className="hidden lg:flex border-t border-white/5 py-3 px-6 text-center text-[11px] text-slate-500 items-center justify-between flex-wrap gap-2">
         <span>Notflix Studio Telemetry Engine v2.5</span>
         <span className="font-mono">
           Last sync: {lastFetchedTime.toLocaleTimeString()}
@@ -4269,3 +4640,4 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onExit }) => {
     </div>
   );
 };
+
